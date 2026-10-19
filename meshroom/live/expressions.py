@@ -160,7 +160,7 @@ def _nodeData(node) -> dict:
     from meshroom.core import desc
     values = {}
     for attr in node.attributes:
-        if attr.isOutput or isinstance(attr.desc, desc.Image):
+        if attr.isOutput or isinstance(attr.desc, desc.Stream):
             continue
         try:
             values[attr.name] = _snapshotValue(attr)

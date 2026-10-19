@@ -895,15 +895,21 @@ class Flow(Attribute):
         return "", ValueTypeErrors.NONE
 
 
-class Image(Flow):
+class Stream(Flow):
     """
-    An image stream connection used by live compositing nodes (see `ImageOpNode`).
+    A data stream connection between live compositing nodes (see `ImageOpNode`): an image, a camera, a
+    geometry or a transformation matrix, computed in memory by `meshroom.live.Evaluator` for each frame.
 
     Like Flow, it holds no value: only its connections are serialized.
     Unlike Flow, its UID carries the UID of the upstream node, so that any change upstream
-    invalidates the downstream nodes (and their in-memory cached images).
-    An Image attribute can only be connected to another Image attribute.
+    invalidates the downstream nodes (and their in-memory cached results).
+    A stream can only be connected to a stream of the same type.
+    A stream that is not exposed (`exposed=False`) only has a pin on the node when the node is
+    expanded (its parameters shown), or when it is connected.
     """
+    # Type of the data carried by the stream (see meshroom/live/scene3d.py for the 3D types)
+    streamType = ""
+
     def __init__(self, name, label=None, description=None, advanced=False, enabled=True,
                  visible=True, exposed=True, optional=False, infoOnly=False):
         super().__init__(name=name, label=label, description=description, advanced=advanced,
@@ -915,8 +921,8 @@ class Image(Flow):
 
     def getInstanceType(self):
         # Import within the method to prevent cyclic dependencies
-        from meshroom.core.attribute import Image
-        return Image
+        from meshroom.core import attribute
+        return getattr(attribute, type(self).__name__)
 
     def clone(self):
         return self.__class__(name=self.name, label=self.label, description=self.description,
@@ -925,3 +931,26 @@ class Image(Flow):
 
     optional = Property(bool, lambda self: self._optional, constant=True)
     infoOnly = Property(bool, lambda self: self._infoOnly, constant=True)
+
+
+class Image(Stream):
+    """ An image stream (`meshroom.live.ImageBuffer`), rendered frame by frame. """
+    streamType = "image"
+
+
+class Camera(Stream):
+    """ A camera stream (`meshroom.live.scene3d.CameraData`): transform and lens at each frame. """
+    streamType = "camera"
+
+
+class Geo(Stream):
+    """ A 3D geometry stream (`meshroom.live.scene3d.GeoData`): meshes and points, in world space. """
+    streamType = "geo"
+
+
+class Matrix(Stream):
+    """
+    A 4x4 transformation matrix stream (numpy array) at each frame: the transform of a node (a camera, a
+    geometry, or the 3x3 transform of an image in pixels embedded in 4x4, see `meshroom.live.scene3d.embed2D`).
+    """
+    streamType = "matrix"

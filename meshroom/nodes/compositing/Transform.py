@@ -76,6 +76,14 @@ moves the bbox, without resampling.
             value="bilinear",
             values=["impulse", "bilinear"],
         ),
+        desc.Matrix(
+            name="inputMatrix",
+            label="Input Matrix",
+            description="When connected, the transform applied (replacing translate / rotate / scale / skew): e.g. the "
+                        "'matrix' output of another Transform, a Tracker or a CornerPin (shown when they are expanded).",
+            exposed=False,
+            optional=True,
+        ),
     ]
 
     outputs = [
@@ -99,19 +107,45 @@ moves the bbox, without resampling.
             return None
         return {"input": ops.transformedBBox(region, inverse).expanded(2, 2)}
 
+    def _center(self, ctx, info):
+        if ctx.value("centerOnImage"):
+            return (info.width / 2.0, info.height / 2.0) if info is not None else (0.0, 0.0)
+        return (ctx.value("center")["x"], ctx.value("center")["y"])
+
     def _matrix(self, ctx, info):
         import numpy as np
-        from meshroom.live import ops
+        from meshroom.live import ops, scene3d
+        if ctx.hasInput("inputMatrix"):
+            matrix = scene3d.extract2D(ctx.inputData("inputMatrix"))
+            return np.linalg.inv(matrix) if ctx.value("invert") else matrix
         translate, scale = ctx.value("translate"), ctx.value("scale")
-        if ctx.value("centerOnImage"):
-            center = (info.width / 2.0, info.height / 2.0)
-        else:
-            center = (ctx.value("center")["x"], ctx.value("center")["y"])
+        center = self._center(ctx, info)
         matrix = ops.transformMatrix(translate=(translate["x"], translate["y"]), rotate=ctx.value("rotate"),
                                      scale=(scale["x"], scale["y"]), skewX=ctx.value("skewX"), center=center)
         if ctx.value("invert"):
             matrix = np.linalg.inv(matrix)
         return matrix
+
+    def transformMatrix(self, ctx):
+        return self._matrix(ctx, ctx.inputInfo("input"))
+
+    def bakeStream(self, ctx, inputName, values):
+        """ Keys of translate / rotate / scale / skew giving the 2D transforms of the input matrix. """
+        from meshroom.live import scene3d
+        if inputName != "inputMatrix":
+            return None
+        center = self._center(ctx, ctx.inputInfo("input"))
+        keys = {"translate": [], "rotate": [], "scale": [], "skewX": []}
+        for frame, matrix in sorted(values.items()):
+            translate, rotate, scale, skewX = scene3d.decompose2D(scene3d.extract2D(matrix), center)
+            keys["translate"].append([frame, {"x": translate[0], "y": translate[1]}])
+            keys["rotate"].append([frame, rotate])
+            keys["scale"].append([frame, {"x": scale[0], "y": scale[1]}])
+            keys["skewX"].append([frame, skewX])
+        result = {name: (frameKeys[0][1] if all(v == frameKeys[0][1] for _, v in frameKeys) else frameKeys)
+                  for name, frameKeys in keys.items()}
+        result["invert"] = False
+        return result
 
     def isIdentity(self, ctx):
         import numpy as np

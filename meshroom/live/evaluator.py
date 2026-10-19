@@ -73,14 +73,17 @@ class PlanNode:
         nodeDesc: the `desc.ImageOpNode` instance.
         values: dict {parameter name: value}.
         inputs: OrderedDict {image input name: uid of the connected PlanNode, or None}.
+        dataInputs: {name of a camera / geo / matrix input: (uid of the connected PlanNode, its output name), or None}.
         optionalInputs: the names of the optional image inputs.
         error: an error known before rendering (e.g. a batch dependency not computed), or None.
         disabled: whether the node is disabled (its first image input is passed through).
     """
 
     def __init__(self, name, uid, nodeDesc, values, inputs, optionalInputs=(), error=None, disabled=False,
-                 formatInputs=(), animation=None, context=None):
+                 formatInputs=(), animation=None, context=None, dataInputs=None):
         self.name = name
+        # Inputs of the other stream types (camera, geo, matrix), computed with Evaluator.data
+        self.dataInputs = dataInputs or {}
         # Values outside of the node's attributes it depends on (desc.ImageOpNode.planContext)
         self.context = context
         self.uid = uid
@@ -185,7 +188,7 @@ def _batchDependencyError(node) -> Optional[str]:
     """
     from meshroom.core import desc
     for attr in node.attributes:
-        if attr.isOutput or isinstance(attr.desc, desc.Image) or not attr.isLink:
+        if attr.isOutput or isinstance(attr.desc, desc.Stream) or not attr.isLink:
             continue
         source = attr.inputRootLink.node
         if source is node or isImageOpNode(source):
@@ -278,9 +281,15 @@ def _resolveImageSource(attr, scope: _Scope):
     through the GraphInput of the subgraph (the input of the SubGraph node) and through the SubGraph nodes
     (the node connected to the port of their GraphOutput). (None, None) if not connected to one.
     """
+    node, scope, _ = _resolveStreamSource(attr, scope)
+    return node, scope
+
+
+def _resolveStreamSource(attr, scope: _Scope):
+    """ As _resolveImageSource, for any stream input: (compositing node, its scope, its output name) or (None, None, None). """
     for _ in range(64):
         if attr is None or not attr.isLink:
-            return None, None
+            return None, None, None
         source = attr.inputRootLink
         node = source.node
         if _subGraphRole(node) == "input" and scope.subGraphNode is not None:
@@ -298,9 +307,9 @@ def _resolveImageSource(attr, scope: _Scope):
             scope = scope.child(node)
             continue
         if isImageOpNode(node):
-            return node, scope
-        return None, None
-    return None, None
+            return node, scope, source.name
+        return None, None, None
+    return None, None, None
 
 
 def _subGraphImageSource(subGraphNode):
@@ -319,10 +328,15 @@ def _subGraphImageSource(subGraphNode):
     return None, None
 
 
+def hasImageOutput(node) -> bool:
+    from meshroom.core import desc
+    return any(isinstance(output, desc.Image) for output in node.nodeDesc.outputs)
+
+
 def isEvaluable(node) -> bool:
-    """ Whether a node can be evaluated live: a compositing node, or a SubGraph node giving an image. """
+    """ Whether a node can be evaluated live: a compositing node giving an image, or a SubGraph node giving one. """
     if isImageOpNode(node):
-        return True
+        return hasImageOutput(node)
     try:
         return _isSubGraphNode(node) and _subGraphImageSource(node)[0] is not None
     except Exception:
@@ -375,6 +389,7 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
             return
         keys[name] = None  # Being visited
         inputs = OrderedDict()
+        dataInputs = {}
         upstreamExtras = []
         optional = []
         formatInputs = []
@@ -399,6 +414,19 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
                         # Through the boundary of a subgraph: the uid of the node does not carry the upstream one
                         upstreamExtras.append(keys[sourceName])
                 continue
+            if isinstance(attr.desc, desc.Stream):
+                # A camera, geo or matrix input: computed on demand (RenderContext.inputData)
+                source, sourceScope, outputName = _resolveStreamSource(attr, scope)
+                if source is None:
+                    dataInputs[attr.name] = None
+                    continue
+                visit(source, sourceScope)
+                sourceName = sourceScope.prefix + source.name
+                dataInputs[attr.name] = (keys[sourceName], outputName)
+                upstreamExtras.append(extraKeys.get(sourceName, ""))
+                if sourceScope is not scope:
+                    upstreamExtras.append(keys[sourceName])
+                continue
             values[attr.name] = _valueInScope(attr, scope)
         disabled = current.hasInternalAttribute("disable") and bool(current.internalAttribute("disable").value)
         try:
@@ -415,7 +443,8 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
         nodes[key] = PlanNode(
             name=name, uid=key, nodeDesc=current.nodeDesc, values=values,
             inputs=inputs, optionalInputs=optional, error=None if disabled else _batchDependencyError(current),
-            disabled=disabled, formatInputs=formatInputs, animation=_nodeAnimation(current), context=context)
+            disabled=disabled, formatInputs=formatInputs, animation=_nodeAnimation(current), context=context,
+            dataInputs=dataInputs)
 
     visit(*target)
     return RenderPlan(keys[target[1].prefix + target[0].name], nodes, proxy)
@@ -501,6 +530,26 @@ class RenderContext:
             uid = planNode.inputs.get(first) if first else None
         return None
 
+    def hasInput(self, inputName: str) -> bool:
+        """ Whether an input (image, camera, geo or matrix) is connected. """
+        if self.planNode.inputs.get(inputName) is not None:
+            return True
+        return self.planNode.dataInputs.get(inputName) is not None
+
+    def inputData(self, inputName: str, frame: Optional[int] = None):
+        """
+        The value of a camera, geo or matrix input at the frame of the render (or `frame`): a CameraData, a GeoData,
+        a 4x4 matrix (see meshroom/live/scene3d.py), or None if it is not connected.
+        """
+        source = self.planNode.dataInputs.get(inputName)
+        if source is None:
+            return None
+        return self.evaluator.data(self._plan, source[0], source[1], self.frame if frame is None else frame, self._token)
+
+    def ownData(self, outputName: str, frame: int):
+        """ The value of a (non image) output of the node itself at another frame (e.g. a solve warm-started). """
+        return self.evaluator.data(self._plan, self.planNode.uid, outputName, frame, self._token)
+
     def checkCancelled(self):
         """ Raise EvaluationCancelled if the render is no longer needed (called between bands by the ops). """
         if self._token is not None and self._token.cancelled:
@@ -575,7 +624,79 @@ class Evaluator:
         self._layerNames: Dict[str, List[str]] = {}
         # Region of the cached images rendered for a region of interest ({(uid, frame): BBox}; absent: whole)
         self._rois: Dict[Tuple[str, int], BBox] = {}
+        # Values of the camera / geo / matrix outputs: {(uid, output name, frame): value}, least recently used first
+        self._data: "OrderedDict[Tuple[str, str, int], object]" = OrderedDict()
         self._lock = threading.RLock()
+
+    # Number of camera / geo / matrix values kept in memory
+    DATA_CACHE_SIZE = 4096
+
+    def data(self, plan: RenderPlan, uid: str, outputName: str, frame: int, token: Optional[CancelToken] = None):
+        """
+        The value of a camera, geo or matrix output of a plan node at a frame (desc.ImageOpNode.computeData), cached.
+
+        Raises:
+            EvaluationError: if the node or one of its inputs fails.
+            EvaluationCancelled: if `token` is cancelled.
+        """
+        key = (uid, outputName, frame)
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+                return self._data[key]
+        if token is not None and token.cancelled:
+            raise EvaluationCancelled()
+        planNode = plan.nodes[uid]
+        if planNode.error:
+            self._setStatus(uid, frame, EvalStatus.ERROR, planNode.error)
+            raise EvaluationError(planNode.name, planNode.error)
+        ctx = RenderContext(planNode, frame, self, plan)
+        ctx._token = token
+        try:
+            if planNode.disabled:
+                value = planNode.nodeDesc.disabledData(ctx, outputName)
+            else:
+                value = planNode.nodeDesc.computeData(ctx, outputName)
+        except EvaluationCancelled:
+            raise
+        except EvaluationError as e:
+            if e.nodeName != planNode.name:
+                self._setStatus(uid, frame, EvalStatus.UPSTREAM_ERROR, f"Input failed ({e.nodeName}).")
+            raise
+        except Exception as e:
+            logging.debug("[Live] %s (%s) failed:\n%s", planNode.name, outputName, traceback.format_exc())
+            message = str(e) or e.__class__.__name__
+            self._setStatus(uid, frame, EvalStatus.ERROR, message)
+            raise EvaluationError(planNode.name, message) from e
+        with self._lock:
+            self._data[key] = value
+            while len(self._data) > self.DATA_CACHE_SIZE:
+                self._data.popitem(last=False)
+        if self.status(uid, frame)[0] != EvalStatus.SUCCESS:
+            self._setStatus(uid, frame, EvalStatus.SUCCESS)
+        return value
+
+    def cachedData(self, uid: str, outputName: str, frame: int):
+        """ The cached value of a camera / geo / matrix output, or None. """
+        with self._lock:
+            return self._data.get((uid, outputName, frame))
+
+    def storeData(self, uid: str, outputName: str, frame: int, value):
+        """ Keep a camera / geo / matrix value computed on the way (e.g. the poses solved before a frame). """
+        with self._lock:
+            self._data[(uid, outputName, frame)] = value
+            while len(self._data) > self.DATA_CACHE_SIZE:
+                self._data.popitem(last=False)
+
+    def discardData(self, uids=None):
+        """ Forget the camera / geo / matrix values (of some node uids, or all). """
+        with self._lock:
+            if uids is None:
+                self._data.clear()
+            else:
+                uids = set(uids)
+                for key in [key for key in self._data if key[0] in uids]:
+                    del self._data[key]
 
     def layerNames(self, uid: str) -> Optional[List[str]]:
         """ The layers of the last image rendered for a node uid (None if it was never rendered). """
@@ -651,6 +772,7 @@ class Evaluator:
             self._infos.clear()
             self._times.clear()
             self._layerNames.clear()
+            self._data.clear()
 
     def clearInfos(self):
         """ Forget the cached ImageInfos (e.g. to detect again the frame range of sequences on disk). """

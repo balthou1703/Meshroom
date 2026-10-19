@@ -92,6 +92,13 @@ class Tracker(desc.ImageOpNode):
         dy = sum(offset[1] for offset in offsets) / len(offsets)
         return (dx, dy) if ctx.value("transform") == "matchmove" else (-dx, -dy)
 
+    def transformMatrix(self, ctx):
+        """ The translation of the tracks (match-move) or its opposite (stabilize); identity with transform 'none'. """
+        if ctx.value("transform") == "none":
+            return None
+        dx, dy = self._offset(ctx)
+        return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy], [0.0, 0.0, 1.0]])
+
     def isIdentity(self, ctx):
         if ctx.value("transform") == "none":
             return "input"
@@ -184,6 +191,11 @@ Rotate and scale alone happen around the center of the tracks.
             return "input" if np.allclose(self._matrix(ctx), np.eye(3), atol=1e-9) else None
         except Exception:
             return None
+
+    def transformMatrix(self, ctx):
+        if ctx.frame == ctx.value("referenceFrame"):
+            return None
+        return self._matrix(ctx)
 
     def render(self, ctx, inputs):
         from meshroom.live import ops

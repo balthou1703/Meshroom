@@ -709,11 +709,24 @@ class ImageOpNode(BaseNode):
 
     def __init__(self):
         super(ImageOpNode, self).__init__()
-        # Image outputs hold no value: they are not dynamic outputs to load from a values file
-        from .attribute import Image
+        # Stream outputs (images, cameras...) hold no value: they are not dynamic outputs to load from a values file
+        from .attribute import Stream
         self.hasDynamicOutputAttribute = any(
-            (output.isDynamicValue and not isinstance(output, Image)) or isinstance(output, AnySet)
+            (output.isDynamicValue and not isinstance(output, Stream)) or isinstance(output, AnySet)
             for output in self.outputs)
+
+    def __init_subclass__(cls, **kwargs):
+        """ Every compositing node gets a "matrix" output, not exposed: the transform it applies (see transformMatrix). """
+        super().__init_subclass__(**kwargs)
+        from .attribute import Matrix
+        outputs = list(cls.__dict__.get("outputs", cls.outputs) or [])
+        if not any(output.name == "matrix" for output in outputs):
+            outputs.append(Matrix(
+                name="matrix", label="Matrix", exposed=False,
+                description="Transform applied by the node at the current frame (4x4 matrix): the transform of a camera or a "
+                            "geometry, or the 3x3 transform of an image in pixels (Nuke coordinates), embedded in 4x4; "
+                            "identity for the nodes that do not move the image."))
+            cls.outputs = outputs
 
     def getMrNodeType(self):
         return self._mrNodeType
@@ -736,6 +749,47 @@ class ImageOpNode(BaseNode):
     # Each output pixel only depends on the input pixels at the same place (color nodes, merges...):
     # a region of interest is passed as is to the inputs (see inputRegions)
     pointwise = False
+
+    def transformMatrix(self, ctx):
+        """
+        The transform applied by the node at the frame of `ctx`, given by its "matrix" output: a 3x3 matrix (2D
+        transform of the image in pixels, Nuke coordinates), a 4x4 matrix (3D), or None (identity).
+        """
+        return None
+
+    def computeData(self, ctx, outputName: str):
+        """
+        Compute the value of a stream output other than an image at the frame of `ctx` (a camera, a geometry, a
+        4x4 matrix, see meshroom/live/scene3d.py). The default gives the "matrix" output from transformMatrix.
+        The inputs of these types are read with ctx.inputData(name).
+        """
+        if outputName == "matrix":
+            from meshroom.live import scene3d
+            return scene3d.toMatrix4(self.transformMatrix(ctx))
+        raise NotImplementedError(f"No value for the output '{outputName}' of {self.__class__.__name__}.")
+
+    def disabledData(self, ctx, outputName: str):
+        """
+        The value of a stream output (other than an image) of the node when it is disabled: an input of the same
+        type passed through, or the identity for a matrix. Raises RuntimeError if there is none.
+        """
+        from .attribute import Stream
+        streamType = next((output.streamType for output in self.outputs if output.name == outputName), "")
+        if streamType == "matrix":
+            from meshroom.live import scene3d
+            return scene3d.identity()
+        for attr in self.inputs:
+            if isinstance(attr, Stream) and attr.streamType == streamType and ctx.hasInput(attr.name):
+                return ctx.inputData(attr.name)
+        raise RuntimeError("The node is disabled.")
+
+    def bakeStream(self, ctx, inputName: str, values: dict):
+        """
+        "Disconnect and Bake" of a stream input (e.g. a matrix): the parameters reproducing the values the input had
+        at each frame (`values`: {frame: value}). Returns {parameter name: [[frame, value], ...] keys, or a value}
+        (see meshroom/live/animation.py), or None when the input cannot be baked into parameters.
+        """
+        return None
 
     def planContext(self, node):
         """

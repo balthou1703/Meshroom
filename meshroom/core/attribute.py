@@ -2099,16 +2099,16 @@ class Flow(Attribute):
     isDefault = Property(bool, _isDefault, notify=Attribute.valueChanged)
 
 
-class Image(Flow):
+class Stream(Flow):
     """
-    Image stream connection between live compositing nodes.
+    Data stream connection between live compositing nodes (image, camera, geometry, matrix).
 
     Like a Flow it holds no value, but its UID propagates the UID of the upstream node:
-    an output Image attribute derives its UID from its node, and a connected input Image
+    an output stream attribute derives its UID from its node, and a connected input stream
     attribute inherits the UID of the output it is connected to.
     """
 
-    def __init__(self, node, attributeDesc: desc.Image, isOutput: bool,
+    def __init__(self, node, attributeDesc: desc.Stream, isOutput: bool,
                  root=None, parent=None):
         super().__init__(node, attributeDesc, isOutput, root, parent)
 
@@ -2122,5 +2122,25 @@ class Image(Flow):
 
     # Override
     def _validateIncomingConnection(self, connectingAttribute: Attribute) -> bool:
-        """ Only accept connections from another image stream. """
-        return isinstance(connectingAttribute, Image)
+        """ Only accept connections from a stream of the same type (image to image, camera to camera...). """
+        return isinstance(connectingAttribute, Stream) and \
+            connectingAttribute.desc.streamType == self.desc.streamType
+
+    isStream = Property(bool, lambda self: True, constant=True)
+    streamType = Property(str, lambda self: self.desc.streamType, constant=True)
+
+
+class Image(Stream):
+    """ Image stream connection between live compositing nodes. """
+
+
+class Camera(Stream):
+    """ Camera stream connection between live compositing nodes. """
+
+
+class Geo(Stream):
+    """ 3D geometry stream connection between live compositing nodes. """
+
+
+class Matrix(Stream):
+    """ 4x4 transformation matrix stream connection between live compositing nodes. """

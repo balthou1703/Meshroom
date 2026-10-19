@@ -74,6 +74,13 @@ the output format.
         width, height = self._geometry(ctx, info)[:2]
         return ImageInfo(width, height, info.firstFrame, info.lastFrame)
 
+    def transformMatrix(self, ctx):
+        info = ctx.inputInfo("input")
+        if info is None:
+            return None
+        _, _, sx, sy, ox, oy = self._geometry(ctx, info)
+        return np.array([[sx, 0, ox], [0, sy, oy], [0, 0, 1]], dtype=np.float64)
+
     def isIdentity(self, ctx):
         info = ctx.inputInfo("input")
         if info is None:
@@ -195,6 +202,16 @@ Mirrors the image horizontally (flop) and / or vertically (flip) inside its form
     def isIdentity(self, ctx):
         return "input" if not ctx.value("horizontal") and not ctx.value("vertical") else None
 
+    def transformMatrix(self, ctx):
+        info = ctx.inputInfo("input")
+        width, height = (info.width, info.height) if info is not None else (0, 0)
+        matrix = np.eye(3)
+        if ctx.value("horizontal"):
+            matrix[0, 0], matrix[0, 2] = -1.0, width
+        if ctx.value("vertical"):
+            matrix[1, 1], matrix[1, 2] = -1.0, height
+        return matrix
+
     def render(self, ctx, inputs):
         image = inputs["input"]
         horizontal, vertical = ctx.value("horizontal"), ctx.value("vertical")
@@ -253,6 +270,9 @@ plane). "Invert" applies the opposite transform (e.g. to flatten a plane).
         desc.BoolParam(name="invert", label="Invert", description="Apply the inverse transform.", value=False),
         desc.ChoiceParam(name="filter", label="Filter", description="Pixel filter.", value="bilinear",
                          values=["impulse", "bilinear"]),
+        desc.Matrix(name="inputMatrix", label="Input Matrix", exposed=False, optional=True,
+                    description="When connected, the transform applied (replacing the corners): e.g. the 'matrix' output "
+                                "of another CornerPin, a Stabilize or a Transform."),
     ]
     outputs = imageOutput("Transformed image.")
     valuesOnlyInputs = ("tracker",)
@@ -289,7 +309,10 @@ plane). "Invert" applies the opposite transform (e.g. to flatten a plane).
         return src, dst
 
     def _matrix(self, ctx):
-        from meshroom.live import geometry
+        from meshroom.live import geometry, scene3d
+        if ctx.hasInput("inputMatrix"):
+            matrix = scene3d.extract2D(ctx.inputData("inputMatrix"))
+            return np.linalg.inv(matrix) if ctx.value("invert") else matrix
         src, dst = self._corners(ctx)
         matrix = geometry.homography(src, dst)
         if matrix is None:
@@ -301,6 +324,26 @@ plane). "Invert" applies the opposite transform (e.g. to flatten a plane).
             return "input" if np.allclose(self._matrix(ctx), np.eye(3), atol=1e-9) else None
         except Exception:
             return None
+
+    def transformMatrix(self, ctx):
+        return self._matrix(ctx)
+
+    def bakeStream(self, ctx, inputName, values):
+        """ Keys of the "To" corners: the "From" corners moved by the input matrix at each frame. """
+        from meshroom.live import scene3d
+        if inputName != "inputMatrix":
+            return None
+        src = np.array([[ctx.value(f"from{i}")["x"], ctx.value(f"from{i}")["y"], 1.0] for i in range(1, 5)])
+        keys = {f"to{i}": [] for i in range(1, 5)}
+        for frame, matrix in sorted(values.items()):
+            moved = src @ scene3d.extract2D(matrix).T
+            for i in range(4):
+                x, y = moved[i, :2] / moved[i, 2]
+                keys[f"to{i + 1}"].append([frame, {"x": float(x), "y": float(y)}])
+        result = {name: (frameKeys[0][1] if all(v == frameKeys[0][1] for _, v in frameKeys) else frameKeys)
+                  for name, frameKeys in keys.items()}
+        result.update(tracks="", invert=False)
+        return result
 
     def render(self, ctx, inputs):
         from meshroom.live import ops
