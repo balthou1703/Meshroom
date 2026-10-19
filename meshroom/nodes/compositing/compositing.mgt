@@ -1,0 +1,43 @@
+{
+    "header": {
+        "releaseVersion": "2026.1.0+develop",
+        "fileVersion": "2.1",
+        "nodesVersions": {
+            "Grade": "0.2",
+            "Read": "0.1",
+            "Write": "0.1"
+        },
+        "workspaceMode": "compositing",
+        "template": true
+    },
+    "graph": {
+        "Grade_1": {
+            "nodeType": "Grade",
+            "position": [
+                250,
+                0
+            ],
+            "inputs": {
+                "input": "{Read_1.output}"
+            }
+        },
+        "Read_1": {
+            "nodeType": "Read",
+            "position": [
+                0,
+                0
+            ],
+            "inputs": {}
+        },
+        "Write_1": {
+            "nodeType": "Write",
+            "position": [
+                500,
+                0
+            ],
+            "inputs": {
+                "image": "{Grade_1.output}"
+            }
+        }
+    }
+}
