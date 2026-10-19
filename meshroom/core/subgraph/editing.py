@@ -361,8 +361,9 @@ def compositingSubGraphs(graph) -> list:
     from meshroom.core.subgraph.executor import readGraphData
     from meshroom.core.subgraph.nodes import nodeGraphSource
     result = []
+    import re
     for node in graph.nodes:
-        if not isSubGraphNode(node):
+        if not isSubGraphNode(node) or node.attribute("subGraph").isLink:
             continue
         if node.label.lower().startswith(COMPOSITING_LABEL) or node.name.lower().startswith(COMPOSITING_LABEL):
             result.append(node)
@@ -377,7 +378,8 @@ def compositingSubGraphs(graph) -> list:
         providers = [pluginManager.getNodeDescProvider(nodeType) for nodeType in nodeTypes if nodeType]
         if any(provider is not None and issubclass(provider.nodeDescClass, desc.ImageOpNode) for provider in providers):
             result.append(node)
-    return sorted(result, key=lambda node: node.label)
+    # Natural order: compositing_2 before compositing_10
+    return sorted(result, key=lambda node: [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", node.label)])
 
 
 def newCompositingLabel(graph) -> str:

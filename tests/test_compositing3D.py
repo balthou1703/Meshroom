@@ -523,3 +523,60 @@ def test_writeOutsideTheCompositingSubGraph(tmp_path):
     write.postprocess()
     image = imageIO.readImage(str(tmp_path / "out" / "render.0001.tif"), "linear")
     np.testing.assert_allclose(image.rgba()[0, 0, 0], 0.5, rtol=1e-6)
+
+
+def test_keysInASubGraphSurviveWritingItBack():
+    """ Writing a subgraph back (e.g. saving inside it) keeps the cache keys of its nodes. """
+    from meshroom.core.subgraph.editing import SubGraphStack, collapseIntoSubGraph
+    graph = Graph("keys")
+    constant = graph.addNewNode("Constant", width=8, height=4)
+    grade = graph.addNewNode("Grade")
+    graph.addEdge(constant.output, grade.input)
+    subGraphNode, _ = collapseIntoSubGraph(graph, [constant, grade])
+    stack = SubGraphStack()
+    inner = stack.enter(graph, subGraphNode)
+    innerGrade = next(node for node in inner.nodes if node.nodeType == "Grade")
+    before = buildPlan(innerGrade).target
+    uidBefore = subGraphNode._uid
+    innerGrade.position = type(innerGrade.position)(500, 500)
+    stack.commitAll(inner)
+    graph.update()
+    assert subGraphNode._uid != uidBefore
+    assert buildPlan(innerGrade).target == before
+
+
+def test_bakeKeepsWhatAnInvertedTransformApplied():
+    graph = Graph("bakeInvert")
+    constant = graph.addNewNode("Constant", width=64, height=36)
+    transform = graph.addNewNode("Transform", rotate=20.0, translate={"x": 4.0, "y": 1.0})
+    driven = graph.addNewNode("Transform", invert=True)
+    graph.addEdge(constant.output, transform.input)
+    graph.addEdge(constant.output, driven.input)
+    graph.addEdge(transform.matrix, driven.inputMatrix)
+    graph.update()
+    applied = data(driven, "matrix")
+    plan = buildPlan(driven)
+    baked = driven.nodeDesc.bakeStream(RenderContext(plan.targetNode, 1, Evaluator(), plan), "inputMatrix",
+                                       {1: data(transform, "matrix")})
+    graph.removeEdge(driven.inputMatrix)
+    for name, value in baked.items():
+        driven.attribute(name).value = value
+    graph.update()
+    np.testing.assert_allclose(data(driven, "matrix"), applied, atol=1e-9)
+
+
+def test_streamSubclassOfAPlugin():
+    from meshroom.core import attribute
+
+    class Mask(desc.Image):
+        pass
+    assert Mask(name="mask").getInstanceType() is attribute.Image
+    assert desc.Camera(name="camera").getInstanceType() is attribute.Camera
+
+
+def test_compositingSubGraphsInNaturalOrder():
+    from meshroom.core.subgraph.editing import compositingSubGraphs
+    graph = Graph("order")
+    for label in ("compositing_10", "compositing_2"):
+        graph.addNewNode("SubGraph").internalAttribute("label").value = label
+    assert [node.label for node in compositingSubGraphs(graph)] == ["compositing_2", "compositing_10"]

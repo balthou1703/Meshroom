@@ -336,7 +336,11 @@ plane). "Invert" applies the opposite transform (e.g. to flatten a plane).
         src = np.array([[ctx.value(f"from{i}")["x"], ctx.value(f"from{i}")["y"], 1.0] for i in range(1, 5)])
         keys = {f"to{i}": [] for i in range(1, 5)}
         for frame, matrix in sorted(values.items()):
-            moved = src @ scene3d.extract2D(matrix).T
+            # The transform the node applied (inverted with "invert"), with "invert" off after the bake
+            applied = scene3d.extract2D(matrix)
+            if ctx.value("invert"):
+                applied = np.linalg.inv(applied)
+            moved = src @ applied.T
             for i in range(4):
                 x, y = moved[i, :2] / moved[i, 2]
                 keys[f"to{i + 1}"].append([frame, {"x": float(x), "y": float(y)}])

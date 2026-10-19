@@ -922,7 +922,11 @@ class Stream(Flow):
     def getInstanceType(self):
         # Import within the method to prevent cyclic dependencies
         from meshroom.core import attribute
-        return getattr(attribute, type(self).__name__)
+        # The class of the same name (a subclass in a plugin: the one of its first known base)
+        for cls in type(self).__mro__:
+            if hasattr(attribute, cls.__name__) and cls.__module__ == __name__:
+                return getattr(attribute, cls.__name__)
+        return attribute.Stream
 
     def clone(self):
         return self.__class__(name=self.name, label=self.label, description=self.description,

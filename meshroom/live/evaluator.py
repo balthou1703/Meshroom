@@ -14,6 +14,7 @@ import enum
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -215,11 +216,12 @@ class _Scope:
         # Values outside of the nodes that their result depends on: the SubGraph nodes they are in
         self.signature = ""
         if subGraphNode is not None:
-            # The values of its inputs are not all in its uid (the children of an AnySet)
+            # The values of its inputs (not all in its uid: the children of an AnySet). Not its uid: it changes with
+            # the serialized subgraph each time the subgraph is written back (e.g. saved), while the uids of the nodes
+            # inside already follow its content
             from meshroom.core.subgraph.executor import plainValue
             values = json.dumps(plainValue(subGraphNode.attribute("ins")), sort_keys=True, default=str)
-            self.signature = hashlib.sha1(f"{subGraphNode._uid}|{values}|{parent.signature if parent else ''}"
-                                          .encode()).hexdigest()[:12]
+            self.signature = hashlib.sha1(f"{values}|{parent.signature if parent else ''}".encode()).hexdigest()[:12]
 
     def child(self, subGraphNode) -> "_Scope":
         return _Scope(subGraphNode, self, f"{self.prefix}{subGraphNode.name}/")
@@ -599,6 +601,15 @@ def scaleValue(value, scale: float, minimum=None):
 
 StatusListener = Callable[[str, int, EvalStatus, str], None]
 
+
+def _dataBytes(value) -> int:
+    """ Memory used by a camera / geo / matrix value (the arrays of a geometry). """
+    total = 0
+    for name in ("vertices", "faceCounts", "faceIndices", "_triangles", "_edges"):
+        array = getattr(value, name, None)
+        total += getattr(array, "nbytes", 0)
+    return total + 256
+
 # Pass-through marker of a disabled node without image input
 _BLACK = "__black__"
 
@@ -626,10 +637,12 @@ class Evaluator:
         self._rois: Dict[Tuple[str, int], BBox] = {}
         # Values of the camera / geo / matrix outputs: {(uid, output name, frame): value}, least recently used first
         self._data: "OrderedDict[Tuple[str, str, int], object]" = OrderedDict()
+        self._dataBytes = 0
         self._lock = threading.RLock()
 
-    # Number of camera / geo / matrix values kept in memory
+    # Camera / geo / matrix values kept in memory: number, and memory (MESHROOM_LIVE_DATA_CACHE_GB, 2 by default)
     DATA_CACHE_SIZE = 4096
+    DATA_CACHE_BYTES = int(float(os.environ.get("MESHROOM_LIVE_DATA_CACHE_GB", "2")) * 1024 ** 3)
 
     def data(self, plan: RenderPlan, uid: str, outputName: str, frame: int, token: Optional[CancelToken] = None):
         """
@@ -668,11 +681,9 @@ class Evaluator:
             message = str(e) or e.__class__.__name__
             self._setStatus(uid, frame, EvalStatus.ERROR, message)
             raise EvaluationError(planNode.name, message) from e
-        with self._lock:
-            self._data[key] = value
-            while len(self._data) > self.DATA_CACHE_SIZE:
-                self._data.popitem(last=False)
-        if self.status(uid, frame)[0] != EvalStatus.SUCCESS:
+        self.storeData(uid, outputName, frame, value)
+        if self.status(uid, frame)[0] == EvalStatus.NONE:
+            # A node rendering an image too keeps the status of its image at that frame
             self._setStatus(uid, frame, EvalStatus.SUCCESS)
         return value
 
@@ -682,21 +693,30 @@ class Evaluator:
             return self._data.get((uid, outputName, frame))
 
     def storeData(self, uid: str, outputName: str, frame: int, value):
-        """ Keep a camera / geo / matrix value computed on the way (e.g. the poses solved before a frame). """
+        """
+        Keep a camera / geo / matrix value (also one computed on the way, e.g. the poses solved before a frame). The
+        values are kept within DATA_CACHE_SIZE entries and DATA_CACHE_BYTES (geometries), least recently used first.
+        """
+        key = (uid, outputName, frame)
         with self._lock:
-            self._data[(uid, outputName, frame)] = value
-            while len(self._data) > self.DATA_CACHE_SIZE:
-                self._data.popitem(last=False)
+            if key in self._data:
+                self._dataBytes -= _dataBytes(self._data.pop(key))
+            self._data[key] = value
+            self._dataBytes += _dataBytes(value)
+            while len(self._data) > 1 and (len(self._data) > self.DATA_CACHE_SIZE or self._dataBytes > self.DATA_CACHE_BYTES):
+                _, dropped = self._data.popitem(last=False)
+                self._dataBytes -= _dataBytes(dropped)
 
     def discardData(self, uids=None):
         """ Forget the camera / geo / matrix values (of some node uids, or all). """
         with self._lock:
             if uids is None:
                 self._data.clear()
+                self._dataBytes = 0
             else:
                 uids = set(uids)
                 for key in [key for key in self._data if key[0] in uids]:
-                    del self._data[key]
+                    self._dataBytes -= _dataBytes(self._data.pop(key))
 
     def layerNames(self, uid: str) -> Optional[List[str]]:
         """ The layers of the last image rendered for a node uid (None if it was never rendered). """
@@ -773,6 +793,7 @@ class Evaluator:
             self._times.clear()
             self._layerNames.clear()
             self._data.clear()
+            self._dataBytes = 0
 
     def clearInfos(self):
         """ Forget the cached ImageInfos (e.g. to detect again the frame range of sequences on disk). """

@@ -134,10 +134,15 @@ moves the bbox, without resampling.
         from meshroom.live import scene3d
         if inputName != "inputMatrix":
             return None
+        import numpy as np
         center = self._center(ctx, ctx.inputInfo("input"))
         keys = {"translate": [], "rotate": [], "scale": [], "skewX": []}
         for frame, matrix in sorted(values.items()):
-            translate, rotate, scale, skewX = scene3d.decompose2D(scene3d.extract2D(matrix), center)
+            # The transform the node applied (inverted with "invert"), with "invert" off after the bake
+            applied = scene3d.extract2D(matrix)
+            if ctx.value("invert"):
+                applied = np.linalg.inv(applied)
+            translate, rotate, scale, skewX = scene3d.decompose2D(applied, center)
             keys["translate"].append([frame, {"x": translate[0], "y": translate[1]}])
             keys["rotate"].append([frame, rotate])
             keys["scale"].append([frame, {"x": scale[0], "y": scale[1]}])
