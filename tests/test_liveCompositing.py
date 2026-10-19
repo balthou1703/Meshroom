@@ -345,13 +345,23 @@ class TestReadWrite:
 
 
 def test_compositingTemplate():
-    """ The "compositing" pipeline template is registered and opens in the compositing workspace. """
+    """
+    The "compositing" pipeline template is registered and opens in the compositing workspace: the compositing nodes
+    are in the "compositing_1" SubGraph node, rendered by the Write outside.
+    """
+    from meshroom.core.subgraph.editing import SubGraphStack
+    if not pluginManager.isNodeDescRegistered("SubGraph"):
+        subGraphFolder = os.path.join(os.path.dirname(meshroom.__file__), "nodes", "subgraph")
+        pluginManager.addPluginFromBuiltInFolder("subgraph", subGraphFolder)
     templates = pluginManager.getPipelineTemplates()
     assert "compositing" in templates
     graph = Graph("")
     graph.initFromTemplate(templates["compositing"])
     assert graph.workspaceMode == "compositing"
-    assert graph.node("Write_1").image.inputRootLink.node.name == "Grade_1"
+    subGraphNode = graph.node("Write_1").image.inputRootLink.node
+    assert subGraphNode.nodeType == "SubGraph" and subGraphNode.label == "compositing_1"
+    inner = SubGraphStack().enter(graph, subGraphNode)
+    assert {node.nodeType for node in inner.nodes} >= {"Read", "Grade"}
 
 
 class TestBBoxNodes:

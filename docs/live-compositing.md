@@ -234,6 +234,7 @@ nœud Dot.
 | Comp Filter | Blur, Sharpen, Erode, Median, MotionBlur, ZDefocus |
 | Comp Merge | Merge, Premult, Unpremult, Dot, Clone, Switch |
 | Comp Transform | Transform, Reformat (option Crop), Crop, Mirror, CornerPin, Tracker, Stabilize, CameraTracker, LensDistortion |
+| Comp 3D | Camera, ReadGeo, MergeGeo, Resection (voir 4.13) |
 | Comp Time | TimeOffset, FrameHold, Retime, TimeWarp, OpticalFlow |
 
 Couleur du corps des nœuds par famille (quand l'utilisateur n'en a pas choisi), le bandeau gardant
@@ -448,6 +449,63 @@ Les images sont traitées dans un espace de travail linéaire (`meshroom/live/co
 - import `.nk` : colorspaces des Read / Write (« ACES - ACEScg » → ACEScg, « default (...) » →
   auto), nœuds OCIOColorSpace et Colorspace.
 
+### 4.12 Sous-graph de compositing par défaut
+
+Passer en vue compositing (menu View > Compositing Workspace, File > New Compositing, ouverture d'un projet en
+mode compositing) montre le compositing **dans un nœud SubGraph** : le premier SubGraph de compositing du graphe
+(nommé ou labellisé `compositing...`, ou contenant des nœuds de compositing) est ouvert, ou un SubGraph
+`compositing_1` est créé puis ouvert, avec le viewer et la timeline. Un projet qui a déjà des nœuds de compositing
+dans son propre graphe (fait avant) reste tel quel. Le mode compositing et la plage de la timeline sont ceux du
+projet (header du graphe racine), aussi à l'intérieur d'un sous-graph ; le viewer évalue les nœuds du graphe
+affiché. Le template « compositing » contient `compositing_1` (Read → Grade) et le Write à l'extérieur
+(`meshroom/core/subgraph/editing.py` : `compositingSubGraphs`, `UIGraph.ensureCompositingSubGraph`).
+
+### 4.13 3D : flux caméra, géométrie et matrice
+
+En plus des images, les nœuds de compositing échangent des **caméras**, des **géométries** et des **matrices de
+transformation** (`desc.Camera`, `desc.Geo`, `desc.Matrix`, sous-classes de `desc.Stream` comme `desc.Image`) :
+calculés frame par frame en mémoire par l'évaluateur (`ImageOpNode.computeData(ctx, sortie)`, lus avec
+`ctx.inputData(entrée)`, cache par `(uid, sortie, frame)`), un flux ne se branche que sur un flux du même type.
+Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`meshroom/live/scene3d.py`).
+
+- Conventions (USD, Nuke, Maya) : Y en haut, matrices 4x4 sur des vecteurs colonnes, transform = translate @
+  rotate @ scale, angles en degrés dans l'ordre de rotation (ZXY par défaut : Z d'abord) ; une caméra est sa
+  matrice caméra → monde et regarde vers -Z, l'ouverture horizontale (mm) couvre la largeur de l'image.
+- **Sortie matrice de tous les nœuds** : chaque nœud de compositing a une sortie « Matrix », non exposée : son pin
+  n'apparaît que quand le nœud est déplié (flèche du bas) ou qu'elle est branchée. C'est la transformation que le
+  nœud applique à la frame : Transform, CornerPin, Tracker (match-move / stabilize), Stabilize, Reformat, Mirror
+  (la 3x3 en pixels, plongée en 4x4), Camera, ReadGeo, Resection ; identité pour les autres.
+- **Entrées matrice** (non exposées aussi) : « Input Matrix » de Transform, CornerPin, Camera, ReadGeo remplace la
+  transformation du nœud (une caméra suit l'animation d'une autre caméra, un Transform reprend le mouvement d'un
+  Tracker...).
+- **Camera** : paramètres animables (translate, rotate, ordre de rotation, focale, ouvertures, near / far), ou
+  fichier (USD : `.usda` lu sans module, binaire avec `pxr` ; Alembic avec PyAlembic ; FBX avec le SDK FBX ; nom de
+  la caméra, décalage de frames, fps), ou entrée « Input Camera » (prise telle quelle, ex. la caméra d'une Resection).
+- **ReadGeo** : OBJ, PLY (ascii / binaire), USD, Alembic, FBX (mêmes conditions), échantillons de temps lus à chaque
+  frame ; translate / rotate / scale / uniform scale ou « Input Matrix ». **MergeGeo** : jusqu'à 4 géométries.
+- **Resection** (à la GeoTracker) : entrées plaque, géométrie, caméra (optique et pose de départ ; sans caméra :
+  35 mm sur 36 mm, cadrant la géométrie). Sorties : **Camera** (en premier : la caméra résolue, la géométrie fixe),
+  **Camera Matrix**, **Geo Matrix** (la transformation de la géométrie vue depuis la caméra d'entrée, à brancher
+  dans l'« Input Matrix » d'un ReadGeo), et l'image (la plaque avec la géométrie en fil de fer, les points des pins
+  reprojetés et leur écart). Dans le viewer (Resection sélectionnée) : « Add pin » puis clic sur la géométrie (lancer
+  de rayon depuis la caméra résolue ; nuage de points : le point projeté le plus proche) ; glisser le pin à sa place
+  dans la plaque, la pose suit en direct : 1 pin déplace la géométrie dans l'image, 2 pins la tournent et la mettent
+  à l'échelle, 3 pins et plus résolvent la pose (Gauss-Newton amorti vers la pose de départ ; DLT à partir de 6). Les
+  pins se suivent comme les pistes d'un Tracker (avant / arrière) ; la pose est résolue frame après frame depuis la
+  keyframe la plus proche (chaque pose part de la précédente). La barre d'outils indique le nombre de pins de la
+  frame et l'erreur de reprojection. Un pin compte entre sa première et sa dernière clé (un pin à une seule clé
+  la tient).
+- **Disconnect and Bake** (clic droit sur un edge) : l'edge est retiré et l'entrée garde ce qu'elle recevait. Un
+  paramètre garde la valeur de sa source, et ses clés si elle est animée (pour un enfant, x d'une valeur 2D : les
+  clés du groupe). Une entrée caméra ou matrice devient des clés des paramètres du nœud sur la plage de la timeline
+  (`ImageOpNode.bakeStream` : Camera → translate / rotate et optique, ReadGeo → translate / rotate / scale,
+  Transform → translate / rotate / scale / skew, CornerPin → coins « To ») ; une seule étape d'annulation
+  (`meshroom/live/bake.py`).
+
+Limites : pas de distorsion d'objectif dans la Resection, focale non estimée, géométrie supposée fixe pendant que
+l'on pose les pins (les points des pins sont en coordonnées monde) ; lecture Alembic / FBX non testée ici (modules
+absents).
+
 ## 5. Import `.nk` (P4, fait)
 
 File > « Import Nuke Script... », ou glisser un `.nk` sur le graphe : les nœuds du script sont
@@ -507,7 +565,9 @@ comparaison des EXR produits avec ceux de Nuke.
 | `meshroom/live/frameRange.py` | in / out de la timeline (enregistrés dans le header du graphe) |
 | `meshroom/core/chapters.py`, `meshroom/nodes/general/Chapter.py` | chapitres repliables du graphe |
 | `meshroom/ui/qml/GraphEditor/` | menu Evaluate, contours de statut, éditeurs (couleur, 2D, formes), lignes de chapitre |
-| `tests/test_liveCompositing.py` | tests du moteur et des nœuds |
+| `meshroom/live/scene3d.py`, `meshroom/nodes/compositing/ThreeDNodes.py` | 3D : caméras, géométries, matrices, lecture des fichiers, résolution de pose ; nœuds Camera, ReadGeo, MergeGeo, Resection |
+| `meshroom/live/bake.py` | Disconnect and Bake |
+| `tests/test_liveCompositing.py`, `tests/test_compositing3D.py` | tests du moteur et des nœuds |
 
 ## Subgraphs
 
