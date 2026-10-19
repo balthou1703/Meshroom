@@ -290,7 +290,11 @@ class MeshroomApp(QApplication):
             self.engine.addImportPath(pyside6QmlPath)
 
         # expose available node types that can be instantiated
-        self.engine.rootContext().setContextProperty("_nodeTypes", {n: {"category": pluginManager.getNodeDescProviders()[n].nodeDescClass.category} for n in sorted(pluginManager.getNodeDescProviders().keys())})
+        # Node types of the creation menu (some are only created by other means, e.g. Clone)
+        providers = pluginManager.getNodeDescProviders()
+        self.engine.rootContext().setContextProperty(
+            "_nodeTypes", {n: {"category": providers[n].nodeDescClass.category} for n in sorted(providers.keys())
+                           if not getattr(providers[n].nodeDescClass, "hiddenFromMenu", False)})
 
         # instantiate the 3D Scene object
         self._undoStack = commands.UndoStack(self)
@@ -299,6 +303,8 @@ class MeshroomApp(QApplication):
         self._activeProject = Scene(undoStack=self._undoStack, taskManager=self._taskManager, defaultPipeline=args.pipeline, parent=self)
         self._activeProject.setSubmitLabel(args.submitLabel)
         self.engine.rootContext().setContextProperty("_currentScene", self._activeProject)
+        # Images displayed by the live compositing evaluation ("image://live/...")
+        self.engine.addImageProvider("live", self._activeProject.live.imageProvider)
 
         # those helpers should be available from QML Utils module as singletons, but:
         #  - qmlRegisterUncreatableType is not yet available in PySide2

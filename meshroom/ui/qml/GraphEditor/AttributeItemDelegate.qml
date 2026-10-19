@@ -6,6 +6,7 @@ import QtQuick.Dialogs
 import MaterialIcons 2.2
 import Utils 1.0
 import Controls 1.0
+import Compositing 1.0
 import "AttributeControls" as AttributeControls
 import "AnySetUtils.js" as AnySetUtils
 
@@ -150,8 +151,27 @@ RowLayout {
 
     spacing: 2
 
+    // Groups show their own header, except the colors (a single line editor)
+    // Colors ("rgbaColor") and values per channel ("linkedColor"): edited by RgbaColorField
+    readonly property bool isRgbaColor: attribute.type === "GroupAttribute" && !attribute.keyable &&
+                                        (attribute.desc.semantic === "rgbaColor" || attribute.desc.semantic === "linkedColor")
+
+    // Parameter of a compositing node that can be animated (keys per frame)
+    readonly property bool animatable: {
+        if (!attribute || attribute.isOutput || attribute.root || !attribute.node || !attribute.node.isImageOpNode)
+            return false
+        var node = attribute.node
+        if (!node.hasInternalAttribute("animation") ||
+            (node.hasInternalAttribute(attribute.name) && node.internalAttribute(attribute.name) === attribute))
+            return false
+        if (attribute.desc.semantic === "liveAction")
+            return false
+        return ["IntParam", "FloatParam", "BoolParam", "ChoiceParam", "Vec2d"].indexOf(attribute.type) >= 0 ||
+               root.isRgbaColor
+    }
+
     Pane {
-        visible: attribute.type !== "GroupAttribute"
+        visible: attribute.type !== "GroupAttribute" || root.isRgbaColor
         background: Rectangle {
             id: background
             color: Qt.darker(parent.palette.window, 1.1)
@@ -362,6 +382,40 @@ RowLayout {
                 }
             }
 
+            // Key of an animated parameter of a compositing node at the current frame (see meshroom/live/animation.py)
+            Loader {
+                active: root.animatable
+                visible: active
+                Layout.fillHeight: true
+                sourceComponent: MaterialToolButton {
+                    readonly property string keyState: {
+                        // Re-evaluated when the frame or the keys change
+                        var frame = _currentScene.live.currentFrame
+                        var keys = attribute.node.internalAttribute("animation").value
+                        return _currentScene.keyState(attribute)
+                    }
+                    text: MaterialIcons.diamond
+                    font.pointSize: 8
+                    padding: 3
+                    enabled: !attribute.isLink && !root.readOnly
+                    opacity: keyState === "" ? 0.35 : 1.0
+                    textColor: keyState === "key" ? "#E8A33D" : keyState === "animated" ? "#5DA5E8" : palette.text
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    ToolTip.text: keyState === "key" ? "Remove the key at frame " + _currentScene.live.currentFrame +
+                                                    " (right click: remove the animation)"
+                                : keyState === "animated" ? "Animated: set a key at frame " + _currentScene.live.currentFrame +
+                                                         " (right click: remove the animation)"
+                                : "Set a key at frame " + _currentScene.live.currentFrame + " (animate this value)"
+                    onClicked: _currentScene.toggleKey(attribute)
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: _currentScene.removeAnimation(attribute)
+                    }
+                }
+            }
+
             MaterialLabel {
                 property bool isDisplayable: attribute.isOutput && (attribute.is2dDisplayable || attribute.is3dDisplayable || attribute.isTextDisplayable)
                 property bool isDisplayed: attribute === _currentScene.displayedAttr2D || _currentScene.displayedAttrs3D.count && _currentScene.displayedAttrs3D.contains(attribute)
@@ -441,8 +495,9 @@ RowLayout {
         id: inputField
 
         sourceComponent: {
-            // PushButtonParam always has value == undefined, so it needs to be excluded from this check
-            if (attribute.type != "PushButtonParam" && attribute.type != "Flow" && !attribute.keyable && attribute.value === undefined) {
+            // PushButtonParam, Flow and Image (compositing) always have value == undefined: exclude them from this check
+            if (attribute.type != "PushButtonParam" && attribute.type != "Flow" && attribute.type != "Image" &&
+                !attribute.keyable && attribute.value === undefined) {
                 return notComputedComponent
             }
             switch (attribute.type) {
@@ -460,17 +515,38 @@ RowLayout {
                 case "ListAttribute":
                     return listAttributeComponent
                 case "GroupAttribute":
-                    return groupAttributeComponent
+                    return root.isRgbaColor ? rgbaColorComponent : groupAttributeComponent
+                case "Vec2d":
+                    return root.attribute.keyable ? groupAttributeComponent : vec2Component
                 case "AnySet":
                     return groupAttributeComponent
                 case "StringParam":
+                    if (attribute.desc.semantic === "rotoShapes" && !attribute.isLink)
+                        return rotoShapesComponent
+                    if (attribute.desc.semantic === "tracks" && !attribute.isLink)
+                        return tracksComponent
+                    if (attribute.desc.semantic === "autoTracks" || attribute.desc.semantic === "cameraSolve")
+                        return jsonSummaryComponent
+                    if ((attribute.desc.semantic === "colorCurves" || attribute.desc.semantic === "timeCurve") && !attribute.isLink)
+                        return curvesComponent
+                    if (attribute.desc.semantic.startsWith("imageLayer") && !attribute.isLink && !!_currentScene && !!_currentScene.live)
+                        return imageLayerComponent
+                    if (attribute.desc.semantic === "colorspace" && !attribute.isLink && !!_currentScene && !!_currentScene.live)
+                        return colorspaceComponent
                     if (attribute.desc.semantic.includes('multiline'))
                         return textAreaComponent
                     return textFieldComponent
                 case "ColorParam":
                     return colorComponent
                 case "Flow":
+                case "Image":
                     return flowComponent
+                case "File":
+                    if (attribute.desc.semantic === "imageSequence" && !attribute.isOutput)
+                        return sequenceFieldComponent
+                    if (attribute.desc.semantic.startsWith("saveFile") && !attribute.isOutput && !attribute.isLink)
+                        return saveFileComponent
+                    return textFieldComponent
                 default:
                     return textFieldComponent
             }
@@ -483,12 +559,50 @@ RowLayout {
 
         Component {
             id: pushButtonComponent
-            Button {
-                text: attribute.label
-                enabled: root.editable
-                onClicked: {
-                    attribute.clicked()
+            RowLayout {
+                // Compositing actions ("liveAction"): run in the background by the live controller, with progress
+                readonly property bool liveAction: attribute.desc.semantic === "liveAction" && !!_currentScene && !!_currentScene.live
+                // Any action running: the buttons wait; this one running: its progress
+                readonly property bool busy: liveAction && _currentScene.live.actionProgress >= 0
+                readonly property bool running: busy && _currentScene.live.actionNode === attribute.node &&
+                                                _currentScene.live.actionName === attribute.name
+                Button {
+                    text: attribute.label
+                    enabled: root.editable && !parent.busy
+                    onClicked: {
+                        if (parent.liveAction)
+                            _currentScene.live.runAction(attribute.node, attribute.name)
+                        else
+                            attribute.clicked()
+                    }
                 }
+                ProgressBar {
+                    Layout.fillWidth: true
+                    visible: parent.running
+                    from: 0
+                    to: 1
+                    value: parent.running ? _currentScene.live.actionProgress : 0
+                }
+                MaterialToolButton {
+                    visible: parent.running
+                    text: MaterialIcons.stop_circle
+                    font.pointSize: 10
+                    ToolTip.text: "Stop " + _currentScene.live.actionText
+                    onClicked: _currentScene.live.stopAction()
+                }
+            }
+        }
+
+        Component {
+            id: jsonSummaryComponent
+            // Results of compositing actions (autotrack tracks, camera solve): a summary line
+            Label {
+                text: {
+                    attribute.value  // Refreshed when the value changes
+                    return _currentScene && _currentScene.live ? _currentScene.live.jsonSummary(attribute) : ""
+                }
+                opacity: 0.8
+                elide: Text.ElideRight
             }
         }
 
@@ -527,6 +641,125 @@ RowLayout {
                     setTextFieldAttribute(updatedValue)
                     // Set the cursor at the end of the added text
                     textField.cursorPosition = before.length + clipboard.length
+                }
+            }
+        }
+
+        // File written by a node (e.g. the USD exports of a CameraTracker): text field and a "save as" dialog;
+        // "saveFile:Name (*.ext)" gives the name filter
+        Component {
+            id: saveFileComponent
+            RowLayout {
+                spacing: 2
+                TextField {
+                    Layout.fillWidth: true
+                    text: attribute.value
+                    readOnly: !root.editable
+                    selectByMouse: true
+                    placeholderText: "Path of the file to write"
+                    onEditingFinished: setTextFieldAttribute(text.trim())
+                }
+                MaterialToolButton {
+                    text: MaterialIcons.folder
+                    enabled: root.editable
+                    font.pointSize: 11
+                    ToolTip.text: "Choose where to write the file"
+                    onClicked: saveFileDialog.open()
+                }
+                FileDialog {
+                    id: saveFileDialog
+                    title: "Save " + attribute.label
+                    fileMode: FileDialog.SaveFile
+                    readonly property string filter: attribute.desc.semantic.indexOf(":") >= 0
+                                                     ? attribute.desc.semantic.split(":").slice(1).join(":") : ""
+                    nameFilters: filter ? [filter, "All files (*)"] : ["All files (*)"]
+                    currentFolder: attribute.value ? Filepath.stringToUrl(Filepath.dirname(attribute.value)) : ""
+                    onAccepted: setTextFieldAttribute(Filepath.urlToString(selectedFile))
+                }
+            }
+        }
+
+        Component {
+            id: sequenceFieldComponent
+            // File of a compositing Read: text field and a browser grouping image sequences, frame range below
+            ColumnLayout {
+                spacing: 1
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Item {
+                    Layout.fillWidth: true
+                    implicitHeight: sequenceTextField.implicitHeight
+                    AttributeControls.TextFieldRow {
+                        id: sequenceTextField
+                        text: attribute.value
+                        mandatory: attribute.isMandatory
+                        attribute: root.attribute
+                        editable: root.editable
+                        onEditingFinished: (text) => setTextFieldAttribute(text)
+                        onAccepted: (parameterLabel, text) => {
+                            setTextFieldAttribute(text)
+                            parameterLabel.forceActiveFocus()
+                        }
+                        onDestruction: (activeFocus, text) => {
+                            if (activeFocus)
+                                setTextFieldAttribute(text)
+                        }
+                        onDropped: (hasUrls, hasText, urlText, text) => {
+                            if (hasUrls)
+                                setTextFieldAttribute(urlText)
+                            else if (hasText)
+                                setTextFieldAttribute(text)
+                        }
+                        onTriggered: (text, start, end, length, clipboard) => {
+                            setTextFieldAttribute(text.substr(0, start) + clipboard + text.substr(end, length))
+                        }
+                    }
+                }
+                MaterialToolButton {
+                    text: MaterialIcons.folder
+                    enabled: root.editable
+                    font.pointSize: 11
+                    ToolTip.text: "Browse Images and Sequences"
+                    onClicked: {
+                        sequenceBrowserLoader.active = true
+                        sequenceBrowserLoader.item.openAt(attribute.value)
+                    }
+                }
+                Loader {
+                    id: sequenceBrowserLoader
+                    active: false
+                    sourceComponent: SequenceBrowser {
+                        live: _currentScene.live
+                        onSelected: (path) => setTextFieldAttribute(path)
+                        onClosed: Qt.callLater(function() { sequenceBrowserLoader.active = false })
+                    }
+                }
+            }
+                // Frame range of the sequence (with the frame offset of the Read)
+                Label {
+                    Layout.leftMargin: 4
+                    readonly property string frameRange: {
+                        var node = root.attribute.node
+                        if (!node || !_currentScene || !_currentScene.live)
+                            return ""
+                        // Re-evaluated when the file or the offset changes
+                        root.attribute.value
+                        node.attribute("frameOffset") ? node.attribute("frameOffset").value : 0
+                        return _currentScene.live.nodeFrameRange(node)
+                    }
+                    visible: frameRange !== ""
+                    text: frameRange
+                    font.pointSize: 8
+                    opacity: 0.75
+                    ToolTip.text: "Frame range of the sequence, with the frame offset"
+                    ToolTip.visible: frameRangeMouse.containsMouse
+                    MouseArea {
+                        id: frameRangeMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+                    }
                 }
             }
         }
@@ -595,6 +828,92 @@ RowLayout {
             }
         }
 
+        // Layer of the image entering the node (e.g. Shuffle): the layers of its last render, or any name
+        Component {
+            id: imageLayerComponent
+
+            ComboBox {
+                id: layerCombo
+                property var layers: []
+                // Updated after the renders, but not while the name is being typed or the list is open
+                function refresh() {
+                    // "imageLayer" reads the "input" image, "imageLayer:a,b" the first connected of a and b
+                    var semantic = root.attribute.desc.semantic
+                    var inputs = semantic.indexOf(":") >= 0 ? semantic.split(":")[1] : "input"
+                    var names = _currentScene.live.inputLayers(root.attribute.node, inputs)
+                    var value = root.attribute.value
+                    if (value && names.indexOf(value) < 0)
+                        names = names.concat([value])
+                    if (JSON.stringify(names) !== JSON.stringify(layers))
+                        layers = names
+                }
+                Component.onCompleted: refresh()
+                Connections {
+                    target: _currentScene.live
+                    function onStatusRevisionChanged() {
+                        if (!layerCombo.activeFocus && !layerCombo.contentItem.activeFocus && !layerCombo.popup.visible)
+                            layerCombo.refresh()
+                    }
+                }
+                Connections {
+                    target: root.attribute
+                    function onValueChanged() { layerCombo.refresh() }
+                }
+                model: layers
+                editable: true
+                enabled: root.editable
+                currentIndex: layers.indexOf(root.attribute.value)
+                ToolTip.text: "Layers of the image entering the node (after a render); a name can also be typed."
+                ToolTip.visible: hovered
+                ToolTip.delay: 800
+                onActivated: function(index) {
+                    if (layers[index] !== root.attribute.value)
+                        _currentScene.setAttribute(root.attribute, layers[index])
+                }
+                onAccepted: {
+                    var text = editText.trim()
+                    if (text !== "" && text !== root.attribute.value)
+                        _currentScene.setAttribute(root.attribute, text)
+                }
+            }
+        }
+
+        // Colorspace of the color config (OCIO or builtin): its colorspaces, "auto" for the files, or any name
+        Component {
+            id: colorspaceComponent
+
+            ComboBox {
+                id: colorspaceCombo
+                readonly property bool isFile: root.attribute.desc.name === "colorspace"
+                property var names: {
+                    var list = _currentScene.live.colorspaces.slice()
+                    if (isFile)
+                        list.unshift("auto")
+                    var value = root.attribute.value
+                    if (value && list.indexOf(value) < 0)
+                        list.push(value)
+                    return list
+                }
+                model: names
+                editable: true
+                enabled: root.editable
+                currentIndex: names.indexOf(root.attribute.value)
+                ToolTip.text: _currentScene.live.colorConfigDescription + (isFile ?
+                              "\n'auto': sRGB for 8/16-bit integer files, the working space for float files." : "")
+                ToolTip.visible: hovered
+                ToolTip.delay: 800
+                onActivated: function(index) {
+                    if (names[index] !== root.attribute.value)
+                        _currentScene.setAttribute(root.attribute, names[index])
+                }
+                onAccepted: {
+                    var text = editText.trim()
+                    if (text !== "" && text !== root.attribute.value)
+                        _currentScene.setAttribute(root.attribute, text)
+                }
+            }
+        }
+
         Component {
             id: choiceMultiComponent
 
@@ -648,7 +967,23 @@ RowLayout {
                             setTextFieldAttribute(evaluatedValue)
                     }
                 }
+                // Compositing nodes update the image while the slider is dragged, recorded as one undo step
+                readonly property bool live: !root.attribute.keyable && !root.attribute.isLink && !!root.attribute.node &&
+                                             !!root.attribute.node.isImageOpNode
+                onMoved: (formattedValue) => {
+                    if (live)
+                        _currentScene.setValueInteractively(root.attribute, formattedValue)
+                }
                 onPressedChanged: (pressed, formattedValue) => {
+                    if (live) {
+                        if (pressed) {
+                            _currentScene.beginInteractiveEdit(root.attribute)
+                        } else {
+                            _currentScene.setValueInteractively(root.attribute, formattedValue)
+                            _currentScene.endInteractiveEdit(root.attribute)
+                        }
+                        return
+                    }
                     if (!pressed) {
                         if (root.attribute.keyable)
                             _currentScene.addAttributeKeyValue(root.attribute, _currentScene.selectedViewId, formattedValue)
@@ -656,6 +991,46 @@ RowLayout {
                             _currentScene.setAttribute(root.attribute, formattedValue)
                     }
                 }
+            }
+        }
+
+        Component {
+            id: tracksComponent
+            AttributeControls.TracksField {
+                attribute: root.attribute
+                editable: root.editable
+            }
+        }
+
+        Component {
+            id: curvesComponent
+            AttributeControls.CurveEditor {
+                attribute: root.attribute
+                editable: root.editable
+            }
+        }
+
+        Component {
+            id: rotoShapesComponent
+            AttributeControls.RotoShapesField {
+                attribute: root.attribute
+                editable: root.editable
+            }
+        }
+
+        Component {
+            id: rgbaColorComponent
+            AttributeControls.RgbaColorField {
+                attribute: root.attribute
+                editable: root.editable
+            }
+        }
+
+        Component {
+            id: vec2Component
+            AttributeControls.Vec2Field {
+                attribute: root.attribute
+                editable: root.editable
             }
         }
 

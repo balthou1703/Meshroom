@@ -36,9 +36,11 @@ from meshroom.core.taskManager import TaskManager
 from meshroom.core.submitter import jobManager
 
 from meshroom.core.node import NodeChunk, Node, Status, ExecMode, CompatibilityNode, BackdropNode, Position
-from meshroom.core import submitters, MrNodeType
+from meshroom.core import desc, submitters, MrNodeType
 from meshroom.ui import commands
 from meshroom.ui.utils import makeProperty
+from meshroom.ui.live import LiveController
+from meshroom.core import chapters
 
 
 class PollerRefreshStatus(Enum):
@@ -436,6 +438,32 @@ class UIGraph(QObject):
         self._selectedChunk = None
         self._nodeSelection: QItemSelectionModel = QItemSelectionModel(self._graph.nodes, parent=self)
         self._hoveredNode = None
+        # Selected node names in the order they were selected (used to connect nodes with "&")
+        self._selectionOrder: list[str] = []
+        self._nodeSelection.selectionChanged.connect(self._updateSelectionOrder)
+        # Pin copied from a pin context menu, to connect it to another pin: (attribute full name, isOutput)
+        self._copiedPin = None
+        # Values of attributes being edited interactively (viewer handles), restored for the undo command
+        self._interactiveEdits: dict = {}
+        # Set while the values of animated parameters must not be mirrored from their keys
+        self._mirroring = False
+        # Uid of the Read node the frame range follows, when it was last read
+        self._rangeSourceUid = None
+        # 2D attributes shown as separate x / y fields (by full name), kept while the session lasts
+        self._splitVec2: set = set()
+        # Live compositing evaluation ("Evaluate" on a node)
+        self._live: LiveController = LiveController(parent=self)
+        self._live.setGraph(self._graph)
+        # Animated parameters of the selected node show their value at the current frame
+        self._live.currentFrameChanged.connect(self._mirrorAnimation)
+        self._live.playingChanged.connect(self._mirrorAnimation)
+        self.selectedNodeChanged.connect(self._mirrorAnimation)
+        # Chapter lines (folding of the graph editor): folded sections and the watched Chapter nodes
+        self._foldBands: list = []
+        self._foldRevision = 0
+        self._foldSignature = None
+        self._watchedChapters: set = set()
+        self._watchChapters()
 
         self.submitLabel = "{projectName}"
         self.computeStatusChanged.connect(self.updateLockedUndoStack)
@@ -456,6 +484,13 @@ class UIGraph(QObject):
 
         self._graph.updated.connect(self.onGraphUpdated)
         self._graph.statusUpdated.connect(self.updateChunkMonitor)
+        self._graph.frameRangeChanged.connect(self._onFrameRangeChanged)
+        self._live.setGraph(self._graph)
+        self._rangeSourceUid = None
+        self._updateFrameRange()
+        # The range loaded with the graph (its change was emitted before this connection)
+        self._onFrameRangeChanged()
+        self._watchChapters()
         self._taskManager.update(self._graph)
 
         # Update and connect chunks when the graph is set for the first time
@@ -474,12 +509,20 @@ class UIGraph(QObject):
                 self._undoStack.clear()
 
         self._nodeSelection.setModel(self._graph.nodes)
+        self._selectionOrder = []
+        # Interactive edits of the previous graph
+        self._interactiveEdits = {}
+        self._copiedPin = None
+        self.copiedAttributeChanged.emit()
         self.graphChanged.emit()
 
     def onGraphUpdated(self):
         """ Callback to any kind of attribute modification. """
         # TODO: handle this with a better granularity
         self.updateChunks()
+        # Keys changed (undo / redo, key toggled): the animated values follow
+        self._mirrorAnimation()
+        self._updateFrameRange()
 
     def updateChunks(self):
         dfsNodes: list[Node] = self._graph.dfsOnFinish(None)[0]
@@ -1139,6 +1182,45 @@ class UIGraph(QObject):
                 x = startX + i * (nodeWidth + nodePadding)
                 self.moveNode(selectedNode, Position(x, meanY))
 
+    @Slot("QVariant")
+    def layoutNodes(self, sizes=None):
+        """
+        Lay out the selected nodes (all the nodes without selection) following their connections, as one
+        undoable change (see meshroom.core.graphLayout): left to right, the inputs of a node stacked in
+        the order of its inputs (Merge: B on top, A below). The hidden edges and the backdrops are left out.
+
+        Args:
+            sizes: {node name: [width, height]} of the node items (an estimate is used otherwise).
+        """
+        from meshroom.core import graphLayout
+        sizes = sizes or {}
+        if hasattr(sizes, "toVariant"):
+            sizes = sizes.toVariant()
+        nodes = [node for node in (self.getSelectedNodes() or list(self._graph.nodes))
+                 if not isinstance(node, BackdropNode) and node.nodeType not in ("Backdrop", "Chapter")]
+        if len(nodes) < 2:
+            return
+
+        def size(node):
+            value = sizes.get(node.name)
+            if value:
+                return float(value[0]), float(value[1])
+            pins = sum(1 for attr in node.attributes if not attr.isOutput and attr.desc.visible
+                       and (attr.desc.exposed or attr.type in ("Image", "File")))
+            return 180.0, 40.0 + 16.0 * max(1, pins)
+
+        def skip(edge):
+            # Hidden edges (and the link of a Clone to its cloned node) do not pull the nodes together
+            return self.isEdgeHidden(edge.dst) or (edge.dst.node.nodeType == "Clone" and edge.dst.name == "source")
+
+        edges = graphLayout.layoutEdges(self._graph, nodes, skip)
+        origin = (min(node.x for node in nodes), min(node.y for node in nodes))
+        positions = graphLayout.treeLayout(nodes, edges, size, origin, lambda node: (node.x, node.y))
+        with self.groupedGraphModification("Layout Nodes"):
+            for node, (x, y) in positions.items():
+                if (int(x), int(y)) != (node.x, node.y):
+                    self.moveNode(node, Position(int(x), int(y)))
+
     @Slot()
     def alignVertically(self):
         """ All nodes are moved vertically to the same position, on an average position of selected nodes. """
@@ -1162,9 +1244,49 @@ class UIGraph(QObject):
         if any(n.locked for n in nodes):
             return
 
+        reconnections = self._imageReconnections(nodes)
         with self.groupedGraphModification("Remove Nodes"):
             for node in nodes:
                 self.push(commands.RemoveNodeCommand(self._graph, node))
+            # Compositing chains stay connected: the input of a removed node goes to its outputs
+            for srcName, dstName in reconnections:
+                src, dst = self._graph.attribute(srcName), self._graph.attribute(dstName)
+                if src is not None and dst is not None and not dst.isLink:
+                    self.addEdge(src, dst)
+
+    def _imageReconnections(self, nodes):
+        """
+        The image links to create when `nodes` are removed, as (source, destination) attribute full
+        names: each image input fed by a removed compositing node gets the image entering that node
+        (its first image input, through the other removed nodes), as Nuke does.
+        """
+        removed = {node.name for node in nodes}
+
+        def upstreamSource(node, seen):
+            if node.name in seen:
+                return None
+            seen.add(node.name)
+            first = next((attr for attr in node.attributes if not attr.isOutput and attr.type == "Image"
+                          and attr.desc.visible and not attr.desc.infoOnly), None)
+            if first is None or not first.isLink:
+                return None
+            source = first.inputLink
+            if source.node.name in removed:
+                return upstreamSource(source.node, seen) if source.node.isImageOpNode else None
+            return source
+
+        reconnections = []
+        for node in nodes:
+            if not node.isImageOpNode:
+                continue
+            for edge in list(self._graph.edges):
+                if edge.src.node is not node or edge.dst.node.name in removed or edge.dst.type != "Image" \
+                        or edge.dst.desc.infoOnly:
+                    continue
+                source = upstreamSource(node, set())
+                if source is not None and edge.dst.validateIncomingConnection(source):
+                    reconnections.append((source.fullName, edge.dst.fullName))
+        return reconnections
 
     @Slot()
     def removeSelectedNodes(self):
@@ -1367,7 +1489,766 @@ class UIGraph(QObject):
 
     @Slot(Attribute, "QVariant")
     def setAttribute(self, attribute, value):
-        self.push(commands.SetAttributeCommand(self._graph, attribute, value))
+        animation = self._animationOf(attribute)
+        if animation is None:
+            self.push(commands.SetAttributeCommand(self._graph, attribute, value))
+            return
+        # Animated parameter of a compositing node: the change is also a key at the current frame.
+        # The values are not mirrored from the keys in between (the new value would be lost).
+        self._mirroring = True
+        try:
+            with self.groupedGraphModification(f"Set Key '{attribute.fullName}'"):
+                self.push(commands.SetAttributeCommand(self._graph, attribute, value))
+                self.push(commands.SetAttributeCommand(self._graph, animation, self._keyedAnimation(attribute)))
+        finally:
+            self._mirroring = False
+
+    # Frame range of the timeline (compositing), saved with the graph (Graph.frameRange)
+
+    def _updateFrameRange(self):
+        """ Keep the frame range of the timeline (entered by the user, or following the first Read: see meshroom/live/frameRange.py). """
+        from meshroom.live.frameRange import followedFrameRange
+        value, self._rangeSourceUid = followedFrameRange(self._graph, self._live.nodeInfo, self._rangeSourceUid)
+        if value is not None:
+            self._graph.setFrameRange(value)
+
+    def _onFrameRangeChanged(self):
+        frameRange = self._graph.frameRange
+        if "first" in frameRange and "last" in frameRange:
+            self._live.setProjectRange(int(frameRange["first"]), int(frameRange["last"]))
+        else:
+            self._live.setProjectRange(None, None)
+        self.frameRangeChanged.emit()
+
+    @Slot(int, int)
+    def setFrameRange(self, first, last):
+        """ Set the frame range of the timeline by hand: it no longer follows a Read. Undoable. """
+        first, last = int(first), int(last)
+        if last < first:
+            first, last = last, first
+        self.push(commands.SetFrameRangeCommand(self._graph, {"first": first, "last": last, "source": ""}))
+
+    @Slot()
+    def resetFrameRange(self):
+        """ The frame range of the timeline follows the first Read of the graph again. Undoable. """
+        from meshroom.live.frameRange import followedFrameRange
+        value, self._rangeSourceUid = followedFrameRange(self._graph, self._live.nodeInfo, None, frameRange={})
+        self.push(commands.SetFrameRangeCommand(self._graph, value or {}))
+
+    frameRangeChanged = Signal()
+    frameRangeIsUser = Property(bool, lambda self: bool(self._graph.frameRange) and self._graph.frameRange.get("source", "") == "",
+                                notify=frameRangeChanged)
+
+    # Animation of the parameters of compositing nodes (keys per frame, see meshroom/live/animation.py)
+
+    @staticmethod
+    def _topAttribute(attribute):
+        """ The parameter an attribute belongs to (a group for its children: x of a 2D value, r of a color). """
+        while attribute.root is not None:
+            attribute = attribute.root
+        return attribute
+
+    def _animationOf(self, attribute):
+        """ The "animation" internal attribute of the node when `attribute` is an animated parameter, else None. """
+        from meshroom.live import animation as anim
+        node = attribute.node
+        if attribute.isOutput or not node.hasInternalAttribute(anim.ANIMATION):
+            return None
+        top = self._topAttribute(attribute)
+        if top.node is not node or node.hasInternalAttribute(top.name) and node.internalAttribute(top.name) is top:
+            return None
+        animation = node.internalAttribute(anim.ANIMATION)
+        return animation if top.name in anim.parseAnimation(animation.value) else None
+
+    def _keyedAnimation(self, attribute) -> str:
+        """ The animation of the node of `attribute` with a key of its current value at the current frame. """
+        from meshroom.live import animation as anim
+        top = self._topAttribute(attribute)
+        animation = top.node.internalAttribute(anim.ANIMATION)
+        keys = anim.setKey(anim.parseAnimation(animation.value), top.name, self._live.currentFrame,
+                           top.getSerializedValue())
+        return anim.dumpAnimation(keys)
+
+    @Slot(Attribute, result=str)
+    def keyState(self, attribute):
+        """ "key" (a key at the current frame), "animated" (keys elsewhere) or "" for a parameter. """
+        from meshroom.live import animation as anim
+        node = attribute.node
+        if not node.hasInternalAttribute(anim.ANIMATION):
+            return ""
+        keys = anim.parseAnimation(node.internalAttribute(anim.ANIMATION).value).get(self._topAttribute(attribute).name)
+        if not keys:
+            return ""
+        return "key" if any(frame == self._live.currentFrame for frame, _ in keys) else "animated"
+
+    @Slot(Attribute)
+    def toggleKey(self, attribute):
+        """ Set a key of a parameter at the current frame, or remove it if there is one. Undoable. """
+        from meshroom.live import animation as anim
+        top = self._topAttribute(attribute)
+        node = top.node
+        if not node.hasInternalAttribute(anim.ANIMATION):
+            return
+        animationAttr = node.internalAttribute(anim.ANIMATION)
+        animation = anim.parseAnimation(animationAttr.value)
+        frame = self._live.currentFrame
+        if any(f == frame for f, _ in animation.get(top.name, [])):
+            animation = anim.removeKey(animation, top.name, frame)
+        else:
+            animation = anim.setKey(animation, top.name, frame, top.getSerializedValue())
+        self.push(commands.SetAttributeCommand(self._graph, animationAttr, anim.dumpAnimation(animation)))
+
+    @Slot(Attribute)
+    def removeAnimation(self, attribute):
+        """ Remove all the keys of a parameter: it keeps its value at the current frame. Undoable. """
+        from meshroom.live import animation as anim
+        top = self._topAttribute(attribute)
+        animationAttr = top.node.internalAttribute(anim.ANIMATION) if top.node.hasInternalAttribute(anim.ANIMATION) else None
+        if animationAttr is None:
+            return
+        animation = anim.parseAnimation(animationAttr.value)
+        animation.pop(top.name, None)
+        self.push(commands.SetAttributeCommand(self._graph, animationAttr, anim.dumpAnimation(animation)))
+
+    def _mirrorAnimation(self, *args):
+        """
+        Show the values of the animated parameters of the selected node at the current frame: their
+        stored value mirrors their keys (it is not part of the uid, and not undoable).
+        """
+        from meshroom.live import animation as anim
+        node = self._selectedNode
+        # Not while playing (the values are mirrored when the playback stops), nor from its own changes
+        if self._live.playDirection != 0 or self._mirroring:
+            return
+        try:
+            if node is None or not node.hasInternalAttribute(anim.ANIMATION):
+                return
+        except RuntimeError:  # The underlying Qt object has been deleted
+            return
+        animation = anim.parseAnimation(node.internalAttribute(anim.ANIMATION).value)
+        frame = self._live.currentFrame
+        self._mirroring = True
+        try:
+            for name, keys in animation.items():
+                if not node.hasAttribute(name) or node.attribute(name).isLink:
+                    continue
+                # Being edited interactively (the parameter or one of its components, e.g. "gain.r")
+                fullName = node.attribute(name).fullName
+                if any(edited == fullName or edited.startswith(fullName + ".") for edited in self._interactiveEdits):
+                    continue
+                attribute = node.attribute(name)
+                value = anim.valueAt(keys, frame)
+                if attribute.getSerializedValue() != value:
+                    attribute.value = value
+        finally:
+            self._mirroring = False
+
+    @Slot(Attribute, float, float)
+    def setVec2Attribute(self, attribute, x, y):
+        """ Set both components of a 2D attribute ({x, y}) in a single undoable step. """
+        self.setAttribute(attribute, {"x": x, "y": y})
+
+    @Slot(Attribute, float, float, float, float)
+    def setRgbaAttribute(self, attribute, r, g, b, a):
+        """ Set the 4 components of a color attribute ({r, g, b, a}) in a single undoable step. """
+        self.setAttribute(attribute, {"r": r, "g": g, "b": b, "a": a})
+
+    def _updateSelectionOrder(self, *args):
+        """ Keep the selected node names in selection order: new ones are appended. """
+        selected = [node.name for node in self.iterSelectedNodes()]
+        selectedSet = set(selected)
+        order = [name for name in self._selectionOrder if name in selectedSet]
+        order += [name for name in selected if name not in order]
+        self._selectionOrder = order
+
+    @staticmethod
+    def _mainOutput(node):
+        """ The output used when connecting a node: its image output, or its first connectable output. """
+        outputs = [attr for attr in node.attributes if attr.isOutput]
+        if not outputs and node.hasInternalAttribute("flowOutput"):
+            return node.internalAttribute("flowOutput")
+        for attr in outputs:
+            if attr.type == "Image":
+                return attr
+        return outputs[0] if outputs else None
+
+    # Graph editor: edges selected, hidden (H), pulled from an output to an input
+
+    @staticmethod
+    def _relativeName(attribute):
+        """ Name of an attribute within its node (e.g. "input", "inputs[0]"). """
+        return attribute.fullName.split(".", 1)[1]
+
+    def _edgesTo(self, dstNames):
+        """ The edges whose destination attribute full name is in `dstNames`. """
+        names = set(dstNames)
+        return [edge for edge in self._graph.edges if edge.dst.fullName in names]
+
+    @Slot("QVariantList")
+    def removeEdgesTo(self, dstNames):
+        """ Remove the edges going to the given destination attributes (full names), as one undoable step. """
+        edges = self._edgesTo(dstNames)
+        if not edges:
+            return
+        with self.groupedGraphModification("Remove Edges"):
+            for edge in edges:
+                if not edge.dst.node.locked:
+                    self.removeEdge(edge)
+
+    @Slot(QObject, result=bool)
+    def isEdgeHidden(self, dstAttribute):
+        """ Whether the edge going to `dstAttribute` is hidden (compositing nodes, "hiddenInputs" internal attribute). """
+        node = dstAttribute.node
+        if not node.hasInternalAttribute("hiddenInputs"):
+            return False
+        return self._relativeName(dstAttribute) in node.internalAttribute("hiddenInputs").value.split(",")
+
+    @Slot("QVariantList")
+    def toggleHiddenEdges(self, dstNames):
+        """
+        Hide the given edges (destination attribute full names), or show them if they are all hidden.
+        Only the edges going into compositing nodes can be hidden; saved with the graph, undoable.
+        """
+        edges = [edge for edge in self._edgesTo(dstNames) if edge.dst.node.hasInternalAttribute("hiddenInputs")]
+        if not edges:
+            return
+        hide = not all(self.isEdgeHidden(edge.dst) for edge in edges)
+        byNode = {}
+        for edge in edges:
+            byNode.setdefault(edge.dst.node, []).append(self._relativeName(edge.dst))
+        with self.groupedGraphModification("Hide Edges" if hide else "Show Edges"):
+            for node, names in byNode.items():
+                attribute = node.internalAttribute("hiddenInputs")
+                current = [name for name in attribute.value.split(",") if name]
+                if hide:
+                    current += [name for name in names if name not in current]
+                else:
+                    current = [name for name in current if name not in names]
+                self.setAttribute(attribute, ",".join(current))
+
+    @Slot()
+    def toggleHiddenInputEdgesOfSelectedNodes(self):
+        """ Hide the input edges of the selected nodes (or show them if they are all hidden). """
+        selected = set(self.getSelectedNodes())
+        self.toggleHiddenEdges([edge.dst.fullName for edge in self._graph.edges if edge.dst.node in selected])
+
+    @Slot(Attribute, Attribute, result=bool)
+    def connectAttributes(self, src, dst):
+        """ Connect an output to an input (an edge pulled from an output, then a click on an input), if allowed. """
+        if src is None or dst is None or dst.isOutput or not src.isOutput or src.node is dst.node:
+            return False
+        if dst.isReadOnly or dst.node.locked or not dst.validateIncomingConnection(src) or \
+                self._createsCycle(src.node, dst.node):
+            return False
+        with self.groupedGraphModification(f"Connect '{src.fullName}' to '{dst.fullName}'"):
+            self.addEdge(src, dst)
+            # A new edge into a hidden input is shown
+            if self.isEdgeHidden(dst):
+                self.toggleHiddenEdges([dst.fullName])
+        return True
+
+    @Slot(str, QPoint, Attribute, result=QObject)
+    def addNewNodeConnectedTo(self, nodeType, position, src):
+        """ Create a node (Tab while pulling an edge from an output) with `src` connected to its first compatible input. """
+        with self.groupedGraphModification(f"Add Node {nodeType}"):
+            node = self.addNewNode(nodeType, position)
+            if node is not None and src is not None:
+                dst = self._inputToConnect(node, src)
+                if dst is not None:
+                    self.addEdge(src, dst)
+        return node
+
+    @Slot(str, QObject, result=QObject)
+    def addNewNodeAfter(self, nodeType, previous):
+        """
+        Create a compositing node after `previous` (nodes created one after the other, as in Nuke): placed on
+        its right (below the nodes already there), its first compatible input connected to the main output
+        of `previous`. Undoable.
+        """
+        output = self._mainOutput(previous) if previous is not None else None
+        width = self._layout.nodeWidth
+        x = previous.x + width + self._layout._gridSpacing * 2
+        y = previous.y
+        # Below the nodes already there
+        occupied = [(node.x, node.y) for node in self._graph.nodes if node is not previous]
+        while any(abs(nx - x) < width and abs(ny - y) < 60 for nx, ny in occupied):
+            y += 90
+        with self.groupedGraphModification(f"Add Node {nodeType}"):
+            node = self.addNewNode(nodeType, Position(x, y))
+            if node is not None and output is not None:
+                dst = self._inputToConnect(node, output)
+                if dst is not None:
+                    self.addEdge(output, dst)
+        return node
+
+    def _inputToConnect(self, node, source):
+        """ The input of `node` to connect `source` to: the first compatible free input, else the first compatible one. """
+        # Hidden inputs (e.g. the source of a Clone) are not candidates
+        candidates = [attr for attr in node.attributes
+                      if not attr.isOutput and attr.desc.visible and attr.validateIncomingConnection(source)]
+        for attr in candidates:
+            if not attr.isLink:
+                return attr
+        return candidates[0] if candidates else None
+
+    def _createsCycle(self, source: Node, target: Node) -> bool:
+        """ Whether connecting `source` into `target` would create a cycle. """
+        if source is target:
+            return True
+        upstream = self._graph.getInputNodes(source, recursive=True, dependenciesOnly=False)
+        return target in upstream
+
+    @Slot(QObject)
+    def addLookupPoints(self, node):
+        """
+        Add to the curves of a ColorLookup / ColorLookupHSV node the points moving its "sourceColor"
+        to its "targetColor" (picked in the viewer). Undoable.
+        """
+        from meshroom.live import curves
+        if node is None or not node.hasAttribute("curves") or not node.hasAttribute("sourceColor"):
+            return
+        source = [node.attribute("sourceColor").value.get(c).value for c in "rgb"]
+        target = [node.attribute("targetColor").value.get(c).value for c in "rgb"]
+        try:
+            values = curves.parseCurves(node.attribute("curves").value)
+        except ValueError:
+            values = {}
+        mode = "hsv" if node.nodeType == "ColorLookupHSV" else "rgb"
+        self.setAttribute(node.attribute("curves"), json.dumps(curves.lookupPoints(values, mode, source, target)))
+
+    @Slot(QObject, str, str, result=bool)
+    def renameTrack(self, tracker, oldName, newName):
+        """
+        Rename a track of a Tracker node, and the links of the Roto shapes reading this Tracker.
+        Refused (False) if the name is empty or already used. Undoable.
+        """
+        from meshroom.live import tracking
+        newName = newName.strip()
+        try:
+            tracks = tracking.parseTracks(tracker.attribute("tracks").value)
+        except ValueError:
+            return False
+        if not newName or any(track.get("name") == newName for track in tracks):
+            return False
+        for track in tracks:
+            if track.get("name") == oldName:
+                track["name"] = newName
+        from meshroom.live import roto
+        with self.groupedGraphModification(f"Rename Track '{oldName}'"):
+            self.setAttribute(tracker.attribute("tracks"), json.dumps(tracks))
+            for node in self._graph.nodes:
+                if node is tracker or not node.isImageOpNode:
+                    continue
+                # The image inputs of the node reading this Tracker (through Dot, Clone, disabled nodes)
+                inputs = [name for name in ("tracker", "tracker2", "tracker3") if node.hasAttribute(name) and
+                          self._live.upstreamValuesNode(node.attribute(name)) is tracker]
+                if not inputs:
+                    continue
+                if node.hasAttribute("shapes"):
+                    # Roto: the links of its shapes
+                    try:
+                        shapes = json.loads(node.attribute("shapes").value or "[]")
+                    except ValueError:
+                        continue
+                    changed = False
+                    for shape in shapes:
+                        links = roto.shapeLinks(shape)
+                        for link in links:
+                            if link.get("input", "tracker") in inputs and link.get("track") == oldName:
+                                link["track"] = newName
+                                changed = True
+                        if links or "link" in shape:
+                            shape.pop("link", None)
+                            shape["links"] = links
+                    if changed:
+                        self.setAttribute(node.attribute("shapes"), json.dumps(shapes))
+                elif node.hasAttribute("tracks") and not node.attribute("tracks").desc.semantic:
+                    # CornerPin, Stabilize, MotionBlur: track names, comma separated
+                    names = [name.strip() for name in node.attribute("tracks").value.split(",")]
+                    if oldName in names:
+                        renamed = ",".join(newName if name == oldName else name for name in names if name)
+                        self.setAttribute(node.attribute("tracks"), renamed)
+        return True
+
+    @Slot(QObject, int, str, int)
+    def setRotoShapeLinks(self, node, shapeIndex, linksJson, frame):
+        """
+        Set the track links of a Roto shape, the shape staying where it is at `frame`: its points are
+        moved by the change of the link offsets at that frame. Undoable.
+        """
+        from meshroom.live import roto, tracking
+        try:
+            shapes = json.loads(node.attribute("shapes").value or "[]")
+            links = json.loads(linksJson)
+        except ValueError:
+            return
+        if not 0 <= shapeIndex < len(shapes):
+            return
+        tracks = {}
+        for name in ("tracker", "tracker2", "tracker3"):
+            source = self._live.upstreamValuesNode(node.attribute(name)) if node.hasAttribute(name) else None
+            try:
+                tracks[name] = tracking.parseTracks(source.attribute("tracks").value) \
+                    if source is not None and source.hasAttribute("tracks") else []
+            except ValueError:
+                tracks[name] = []
+        # In the pixels of the Roto, as when it renders (tracks made on another resolution)
+        rotoFormat = self._live.nodeFormat(node)
+        if rotoFormat is not None:
+            tracks = {name: tracking.scaleTracks(values, *rotoFormat) for name, values in tracks.items()}
+        shape = shapes[shapeIndex]
+        before = roto.shapeAtFrame(shape, frame, tracks)["points"]
+        shape.pop("link", None)
+        shape["links"] = links
+        after = roto.shapeAtFrame(shape, frame, tracks)["points"]
+        deltas = [(b.get("x", 0.0) - a.get("x", 0.0), b.get("y", 0.0) - a.get("y", 0.0)) for b, a in zip(before, after)]
+
+        def rebase(points):
+            for point, (dx, dy) in zip(points, deltas):
+                point["x"] = point.get("x", 0.0) + dx
+                point["y"] = point.get("y", 0.0) + dy
+        rebase(shape.get("points") or [])
+        for key in shape.get("keys") or []:
+            rebase(key.get("points") or [])
+        self.setAttribute(node.attribute("shapes"), json.dumps(shapes))
+
+    @Slot(QObject, "QVariantList", int, result=QObject)
+    def createCornerPinFromTracks(self, tracker, names, frame):
+        """
+        Create a CornerPin driven by 4 tracks of a Tracker (reference: `frame`), next to it, with the
+        Tracker connected to its "tracker" input. Undoable.
+        """
+        names = [str(name) for name in names]
+        if tracker is None or len(names) != 4 or not tracker.hasAttribute("output"):
+            return None
+        with self.groupedGraphModification(f"CornerPin from {tracker.label}"):
+            cornerPin = self.addNewNode("CornerPin", Position(tracker.x + 220, tracker.y + 60))
+            self.addEdge(tracker.attribute("output"), cornerPin.attribute("tracker"))
+            self.setAttribute(cornerPin.attribute("tracks"), ",".join(names))
+            self.setAttribute(cornerPin.attribute("referenceFrame"), int(frame))
+        self.selectedNode = cornerPin
+        return cornerPin
+
+    @Slot(QObject, result=QObject)
+    def cloneNode(self, node):
+        """
+        Create a Clone of a compositing node, next to it: a node whose link to `node` is hidden and
+        which outputs the result of `node`. Undoable.
+        """
+        if node is None or not node.isImageOpNode or not node.hasAttribute("output"):
+            return None
+        # Cloning a clone: the new clone points to the same reference
+        if node.nodeType == "Clone":
+            source = node.attribute("source")
+            if not source.isLink:
+                return None
+            reference = source.inputLink.node
+            with self.groupedGraphModification(f"Clone {reference.label}"):
+                clone = self.addNewNode("Clone", Position(node.x + 40, node.y + 120))
+                self.addEdge(source.inputLink, clone.attribute("source"))
+            return clone
+        with self.groupedGraphModification(f"Clone {node.label}"):
+            clone = self.addNewNode("Clone", Position(node.x + 40, node.y + 120))
+            self.addEdge(node.attribute("output"), clone.attribute("source"))
+        return clone
+
+    @Slot()
+    def connectSelectedNodes(self):
+        """
+        Connect the output of the first selected node to an input of each of the other selected nodes
+        (the first free compatible input, as when dropping a link on a node). Undoable.
+        """
+        self._updateSelectionOrder()
+        nodes = [self._graph.node(name) for name in self._selectionOrder]
+        nodes = [node for node in nodes if node is not None]
+        if len(nodes) < 2:
+            return
+        source, targets = nodes[0], nodes[1:]
+        output = self._mainOutput(source)
+        if output is None:
+            return
+        with self.groupedGraphModification(f"Connect {source.label}"):
+            for target in targets:
+                if self._createsCycle(source, target):
+                    continue
+                attr = self._inputToConnect(target, output)
+                if attr is not None and not (attr.isLink and attr.inputLink is output):
+                    self.addEdge(output, attr)
+
+    @Slot(Attribute)
+    def copyAttribute(self, attribute):
+        """ Remember a pin, to connect it to another one with `connectCopiedAttribute`. """
+        self._copiedPin = (attribute.fullName, attribute.isOutput)
+        self.copiedAttributeChanged.emit()
+
+    def _getCopiedAttribute(self):
+        """ The copied pin, resolved by name in the current graph (None if it no longer exists). """
+        if self._copiedPin is None:
+            return None
+        fullName, isOutput = self._copiedPin
+        try:
+            attribute = self._graph.attribute(fullName)
+        except Exception:
+            return None
+        if attribute is None or attribute.isOutput != isOutput:
+            return None
+        return attribute
+
+    def _copiedConnection(self, attribute):
+        """ The (source, destination) edge that connecting the copied pin to `attribute` would create, or None. """
+        copied = self._getCopiedAttribute()
+        if copied is None or attribute is None or copied is attribute:
+            return None
+        if copied.isOutput and not attribute.isOutput:
+            source, destination = copied, attribute
+        elif not copied.isOutput and attribute.isOutput:
+            source, destination = attribute, copied
+        elif not copied.isOutput and not attribute.isOutput and copied.isLink:
+            # Two inputs: connect to the same source as the copied input
+            source, destination = copied.inputLink, attribute
+        else:
+            return None
+        if source.node is None or destination.node is None:
+            return None
+        if source.node is destination.node or not destination.validateIncomingConnection(source):
+            return None
+        if self._createsCycle(source.node, destination.node):
+            return None
+        return source, destination
+
+    @Slot(Attribute, result=bool)
+    def canConnectCopiedAttribute(self, attribute):
+        return self._copiedConnection(attribute) is not None
+
+    @Slot(Attribute)
+    def connectCopiedAttribute(self, attribute):
+        """ Connect the copied pin to `attribute` (output to input, or input to the same source). Undoable. """
+        connection = self._copiedConnection(attribute)
+        if connection is not None:
+            self.addEdge(*connection)
+
+    @staticmethod
+    def _splitVec2Attribute(attribute):
+        """ The internal attribute of a compositing node storing its split 2D values (saved with the graph), or None. """
+        node = attribute.node
+        return node.internalAttribute("splitVec2") if node.hasInternalAttribute("splitVec2") else None
+
+    @Slot(Attribute, result=bool)
+    def isVec2Split(self, attribute):
+        """ Whether a linkable 2D attribute was split into x / y fields by the user. """
+        stored = self._splitVec2Attribute(attribute)
+        if stored is not None:
+            return attribute.name in [name for name in stored.value.split(",") if name]
+        return attribute.fullName in self._splitVec2
+
+    @Slot(Attribute, bool)
+    def setVec2Split(self, attribute, split):
+        """ Show a linkable 2D attribute as x / y fields (or a single value). Saved with compositing nodes. """
+        stored = self._splitVec2Attribute(attribute)
+        if stored is None:
+            if split:
+                self._splitVec2.add(attribute.fullName)
+            else:
+                self._splitVec2.discard(attribute.fullName)
+            return
+        names = [name for name in stored.value.split(",") if name and name != attribute.name]
+        if split:
+            names.append(attribute.name)
+        value = ",".join(sorted(names))
+        if value != stored.value:
+            # Not an undoable change of the graph: a display preference
+            stored.value = value
+
+    @Slot(Attribute)
+    def beginInteractiveEdit(self, attribute):
+        """
+        Start an interactive edit (e.g. dragging a handle in the viewer): the following changes made with
+        `setValueInteractively` / `setVec2Interactively` / `setRgbaInteractively` update the graph live
+        without filling the undo stack, and `endInteractiveEdit` records them as a single undoable change.
+        """
+        # A connected attribute takes its value from its link: it cannot be edited interactively
+        if attribute.isLink:
+            return
+        # An animated parameter: its keys are edited with it
+        animation = self._animationOf(attribute)
+        if animation is not None:
+            self._interactiveEdits.setdefault(animation.fullName, animation.getSerializedValue())
+        self._interactiveEdits.setdefault(attribute.fullName, attribute.getSerializedValue())
+
+    def _syncKeyInteractively(self, attribute):
+        """ During an interactive edit of an animated parameter: its key at the current frame follows. """
+        animation = self._animationOf(attribute)
+        if animation is not None and animation.fullName in self._interactiveEdits:
+            animation.value = self._keyedAnimation(attribute)
+
+    @Slot(Attribute, "QVariant")
+    def setValueInteractively(self, attribute, value):
+        if attribute.fullName in self._interactiveEdits:
+            attribute.value = value
+            self._syncKeyInteractively(attribute)
+
+    @Slot(Attribute, float, float)
+    def setVec2Interactively(self, attribute, x, y):
+        if attribute.fullName in self._interactiveEdits:
+            attribute.value = {"x": x, "y": y}
+            self._syncKeyInteractively(attribute)
+
+    def cancelInteractiveEdit(self, attribute):
+        """ Forget an interactive edit (the changes stay, without undo step), e.g. when its node is gone. """
+        self._interactiveEdits.pop(attribute.fullName, None)
+        # And the edit of its keys
+        from meshroom.live import animation as anim
+        try:
+            animationName = f"{attribute.node.name}.{anim.ANIMATION}"
+        except RuntimeError:
+            return
+        if not any(name.startswith(attribute.node.name + ".") for name in self._interactiveEdits if name != animationName):
+            self._interactiveEdits.pop(animationName, None)
+
+    @Slot(Attribute, float, float, float, float)
+    def setRgbaInteractively(self, attribute, r, g, b, a):
+        if attribute.fullName in self._interactiveEdits:
+            attribute.value = {"r": r, "g": g, "b": b, "a": a}
+            self._syncKeyInteractively(attribute)
+
+    @Slot(Attribute)
+    def endInteractiveEdit(self, attribute):
+        """ Record the interactive changes of an attribute (and of its keys, if animated) as one undoable change. """
+        if attribute.fullName not in self._interactiveEdits:
+            return
+        animation = self._animationOf(attribute)
+        if animation is not None and animation.fullName in self._interactiveEdits:
+            with self.groupedGraphModification(f"Set Key '{attribute.fullName}'"):
+                self._recordInteractiveEdit(attribute)
+                self._recordInteractiveEdit(animation)
+            return
+        self._recordInteractiveEdit(attribute)
+
+    def _recordInteractiveEdit(self, attribute):
+        """ Push the change of an attribute since beginInteractiveEdit as one undo step. """
+        if attribute.fullName not in self._interactiveEdits:
+            return
+        previous = self._interactiveEdits.pop(attribute.fullName)
+        final = attribute.getSerializedValue()
+        if final == previous:
+            return
+        # Record the change without setting the previous value back first: the attribute keeps its
+        # value (a temporary revert would reach the bindings, e.g. a shape being drawn in the viewer)
+        command = commands.SetAttributeCommand(self._graph, attribute, final)
+        command.oldValue = previous
+        self.push(command)
+
+    # Chapters
+
+    def _watchChapters(self):
+        """ Follow the Chapter nodes of the current graph, to update the folded sections. """
+        self._watchedChapters = set()
+        self._graph.nodes.countChanged.connect(self._onNodesCountChanged)
+        self._onNodesCountChanged()
+
+    def _onNodesCountChanged(self):
+        current = set(self._chapterNodes())
+        for node in current - self._watchedChapters:
+            node.positionChanged.connect(self._updateFolds)
+            node.internalAttribute("folded").valueChanged.connect(self._updateFolds)
+        # Removed chapters are deleted with their connections
+        self._watchedChapters = current
+        self._updateFolds()
+
+    def _chapterNodes(self):
+        return [node for node in self._graph.nodes if node.nodeType == "Chapter" and node.hasInternalAttribute("folded")]
+
+    def _updateFolds(self):
+        """
+        Update the folded sections. The revision changes when a chapter is added, removed, moved or
+        (un)folded, and when nodes are added or removed while a chapter is folded (hidden node counts).
+        """
+        lines = tuple(sorted((node.y, node.name, bool(node.internalAttribute("folded").value))
+                             for node in self._chapterNodes()))
+        bands = chapters.foldBands((y, folded) for y, _, folded in lines)
+        signature = (lines, len(self._graph.nodes) if bands else None)
+        if signature == self._foldSignature:
+            return
+        self._foldSignature = signature
+        self._foldBands = bands
+        self._foldRevision += 1
+        self.foldRevisionChanged.emit()
+
+    @Slot(float, result=float)
+    def unfoldY(self, y):
+        """ The graph position of an item displayed at `y` in the graph editor (inverse of the folding). """
+        return float(chapters.unfoldY(self._foldBands, y))
+
+    @Slot(float, result=float)
+    def foldShift(self, y):
+        """ How much an item of the graph editor at `y` is moved up by the folded chapters above it. """
+        return float(chapters.foldShift(self._foldBands, y))
+
+    @Slot(float, result=bool)
+    def isFoldedAway(self, y):
+        """ Whether an item of the graph editor at `y` is hidden in a folded chapter. """
+        return chapters.isFoldedAway(self._foldBands, y)
+
+    @Slot(QObject, result=bool)
+    def canFoldChapter(self, node):
+        """ A chapter can be folded when there is another chapter line below it. """
+        return any(other is not node and other.y > node.y for other in self._chapterNodes())
+
+    @Slot(QObject, result=int)
+    def foldedNodeCount(self, node):
+        """ Number of nodes hidden by a folded chapter. """
+        band = next((band for band in self._foldBands if band.start == node.y), None)
+        if band is None:
+            return 0
+        return sum(1 for other in self._graph.nodes if other.nodeType != "Chapter" and band.start < other.y < band.end)
+
+    @Slot(QObject)
+    def toggleChapterFold(self, node):
+        """ Fold or unfold a chapter. Undoable. """
+        if node is None or not node.hasInternalAttribute("folded"):
+            return
+        folded = node.internalAttribute("folded")
+        if not folded.value and not self.canFoldChapter(node):
+            return
+        self.setAttribute(folded, not folded.value)
+
+    @Slot(QObject, QPoint)
+    def moveChapter(self, node, position):
+        """ Move a chapter line alone (the nodes of its section stay in place). Undoable. """
+        self.moveNode(node, Position(position.x(), position.y()))
+
+    @Slot(QPoint, result=QObject)
+    def addChapter(self, position):
+        """ Add a chapter line at `position`. Undoable. """
+        return self.addNewNode("Chapter", position)
+
+    @Slot("QVariantList")
+    def endInteractiveEdits(self, attributes):
+        """ Record the interactive changes of several attributes (edited together) as one undoable change. """
+        with self.groupedGraphModification("Edit"):
+            for attribute in attributes:
+                self.endInteractiveEdit(attribute)
+
+    @Slot()
+    def toggleDisableSelectedNodes(self):
+        """
+        Disable the selected live compositing nodes, or enable them if they are all disabled (as in Nuke).
+        A disabled node passes its first image input through. Undoable.
+        """
+        nodes = [node for node in self.getSelectedNodes()
+                 if node.isImageOpNode and node.hasInternalAttribute("disable")]
+        if not nodes:
+            return
+        disable = any(not node.internalAttribute("disable").value for node in nodes)
+        with self.groupedGraphModification("Disable Nodes" if disable else "Enable Nodes"):
+            for node in nodes:
+                self.setAttribute(node.internalAttribute("disable"), disable)
+
+    @Slot(str)
+    def setWorkspaceMode(self, mode: str):
+        """ Switch the workspace of the graph (e.g. "compositing", "" for the default one). Undoable. """
+        if mode != self._graph.workspaceMode:
+            self.push(commands.SetWorkspaceModeCommand(self._graph, mode))
 
     @Slot(Attribute)
     def resetAttribute(self, attribute):
@@ -1446,7 +2327,20 @@ class UIGraph(QObject):
 
     @Slot(Attribute)
     def removeAttribute(self, attribute):
-        self.push(commands.ListAttributeRemoveCommand(self._graph, attribute))
+        node = attribute.node
+        listAttribute = attribute.root
+        if not (node.hasInternalAttribute("hiddenInputs") and node.internalAttribute("hiddenInputs").value
+                and isinstance(listAttribute, ListAttribute) and not listAttribute.isOutput):
+            self.push(commands.ListAttributeRemoveCommand(self._graph, attribute))
+            return
+        # Compositing node with hidden edges: the hidden edges of the next elements move down with them
+        hidden = node.internalAttribute("hiddenInputs")
+        newValue = desc.ImageOpNode.hiddenInputsAfterRemoval(hidden.value, self._relativeName(listAttribute),
+                                                             listAttribute.index(attribute))
+        with self.groupedGraphModification(f"Remove {attribute.fullName}"):
+            self.push(commands.ListAttributeRemoveCommand(self._graph, attribute))
+            if newValue != hidden.value:
+                self.setAttribute(hidden, newValue)
 
     @Slot(Attribute)
     def removeAnySetAttribute(self, attribute):
@@ -1615,7 +2509,17 @@ class UIGraph(QObject):
         """
         if not self._nodeSelection.hasSelection():
             return ""
-        graphData = self._graph.serializePartial(self.getSelectedNodes())
+        selection = self.getSelectedNodes()
+        graphData = self._graph.serializePartial(selection)
+        # Clones copied without their cloned node: the partial serialization drops the link, keep it
+        # aside so that the pasted Clones point to the same node (see _reconnectPastedClones)
+        cloneSources = {}
+        for node in selection:
+            if node.nodeType == "Clone" and node.hasAttribute("source") and node.attribute("source").isLink:
+                link = node.attribute("source").inputLink
+                cloneSources[node.name] = [link.node.name, link.name]
+        if cloneSources and isinstance(graphData, dict):
+            graphData[self._CLONE_SOURCES_KEY] = cloneSources
         return json.dumps(graphData, indent=4)
 
     @Slot(str, QPoint, result=list)
@@ -1646,11 +2550,47 @@ class UIGraph(QObject):
             return []
 
         pos = Position(position.x(), position.y()) if position else Position(0, 0)
-        result = self.push(commands.PasteNodesCommand(self._graph, graphData, pos))
-        if result is False:
-            logging.warning("Content is not a valid graph data.")
-            return []
+        with self.groupedGraphModification("Paste Nodes"):
+            result = self.push(commands.PasteNodesCommand(self._graph, graphData, pos))
+            if result is False:
+                logging.warning("Content is not a valid graph data.")
+                return []
+            self._reconnectPastedClones(graphData, result)
         return result
+
+    # Key of the copied content listing the cloned node of each copied Clone: {clone name: [node, attribute]}
+    _CLONE_SOURCES_KEY = "liveCloneSources"
+
+    def _reconnectPastedClones(self, graphData, pastedNodes):
+        """ Pasted Clones whose cloned node was not pasted with them point to it again (it is still in the graph). """
+        if not isinstance(graphData, dict):
+            return
+        nodesData = graphData.get(GraphIO.Keys.Graph, graphData)
+        sources = graphData.get(self._CLONE_SOURCES_KEY) or {}
+        if not isinstance(nodesData, dict) or not isinstance(sources, dict):
+            return
+        # The pasted nodes are created in the order of the index of their name (Graph._deserialize),
+        # renamed when their name is taken: match them with their copied names in that order
+        names = sorted((name for name, data in nodesData.items() if isinstance(data, dict) and "nodeType" in data),
+                       key=Graph.getNodeIndexFromName)
+        if len(names) != len(pastedNodes):
+            return
+        for name, node in zip(names, pastedNodes):
+            if node.nodeType != "Clone" or not node.hasAttribute("source") or node.attribute("source").isLink:
+                continue
+            source = sources.get(name)
+            if isinstance(source, (list, tuple)) and len(source) == 2:
+                nodeName, attributeName = source
+            else:
+                # Link expression "{NodeName.output}" (content written by hand)
+                link = nodesData[name].get("inputs", {}).get("source")
+                match = re.match(r"^\{(\w+)\.(\w+)\}$", link.strip()) if isinstance(link, str) else None
+                if match is None:
+                    continue
+                nodeName, attributeName = match.group(1), match.group(2)
+            sourceNode = self._graph.node(nodeName)
+            if sourceNode is not None and sourceNode is not node and sourceNode.hasAttribute(attributeName):
+                self.addEdge(sourceNode.attribute(attributeName), node.attribute("source"))
 
     @Slot(Node, result=bool)
     def canComputeNode(self, node: Node) -> bool:
@@ -1680,6 +2620,12 @@ class UIGraph(QObject):
     taskManager = Property(TaskManager, lambda self: self._taskManager, constant=True)
     nodes = Property(QObject, lambda self: self._graph.nodes, notify=graphChanged)
     layout = Property(GraphLayout, lambda self: self._layout, constant=True)
+    live = Property(QObject, lambda self: self._live, constant=True)
+    foldRevisionChanged = Signal()
+    # Changes when chapters are folded, unfolded or moved (to refresh the positions in the graph editor)
+    foldRevision = Property(int, lambda self: self._foldRevision, notify=foldRevisionChanged)
+    copiedAttributeChanged = Signal()
+    copiedAttribute = Property(QObject, lambda self: self._getCopiedAttribute(), notify=copiedAttributeChanged)
 
     computeStatusChanged = Signal()
     computing = Property(bool, isComputing, notify=computeStatusChanged)

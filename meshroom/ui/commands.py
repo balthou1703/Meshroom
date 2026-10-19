@@ -126,6 +126,41 @@ class GraphCommand(UndoCommand):
         self.graph = graph
 
 
+class SetWorkspaceModeCommand(GraphCommand):
+    """ Change the workspace the graph is edited in (e.g. "compositing"), saved in its header. """
+    def __init__(self, graph, mode, parent=None):
+        super().__init__(graph, parent)
+        self.mode = mode
+        self.previousMode = graph.workspaceMode
+        self.setText(f"Set Workspace Mode '{mode or 'default'}'")
+
+    def redoImpl(self):
+        self.graph.workspaceMode = self.mode
+        return True
+
+    def undoImpl(self):
+        self.graph.workspaceMode = self.previousMode
+
+
+class SetFrameRangeCommand(GraphCommand):
+    """ Change the frame range of the timeline saved with the graph (see Graph.frameRange). """
+    def __init__(self, graph, value, parent=None):
+        super().__init__(graph, parent)
+        self.value = dict(value or {})
+        self.previousValue = graph.frameRange
+        if self.value.get("source", "") == "" and "first" in self.value:
+            self.setText(f"Set Frame Range {self.value['first']}-{self.value['last']}")
+        else:
+            self.setText("Reset Frame Range")
+
+    def redoImpl(self):
+        self.graph.setFrameRange(self.value)
+        return True
+
+    def undoImpl(self):
+        self.graph.setFrameRange(self.previousValue)
+
+
 class AddNodeCommand(GraphCommand):
     def __init__(self, graph, nodeType, position, parent=None, **kwargs):
         super().__init__(graph, parent)
@@ -486,15 +521,12 @@ class RemoveEdgeCommand(GraphCommand):
         super().__init__(graph, parent)
         self.srcAttr = edge.src.fullName
         self.dstAttr = edge.dst.fullName
-        self.isFlow = isinstance(edge.dst, Flow)
         self.deletedEdgeNames = []  # Store the names of deleted edges.
         self.setText(f"Disconnect '{self.srcAttr}' -> '{self.dstAttr}'")
 
     def getAttribute(self, attrName):
-        if self.isFlow:
-            return self.graph.internalAttribute(attrName)
-        else:
-            return self.graph.attribute(attrName)
+        # Regular or internal attribute: Flow attributes can be either (internal flow pins, compositing images)
+        return self.graph.anyAttribute(attrName)
 
     def redoImpl(self) -> bool:
         dstAttribute = self.getAttribute(self.dstAttr)

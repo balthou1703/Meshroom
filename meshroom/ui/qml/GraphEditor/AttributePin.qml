@@ -82,6 +82,27 @@ RowLayout {
         }
     }
 
+    // Copy a pin, then connect it to another pin (output to input, or input to the same source)
+    Component {
+        id: connectionMenuComp
+        Menu {
+            MenuItem {
+                text: root.attribute.isOutput ? "Copy Output" : "Copy Input"
+                onTriggered: _currentScene.copyAttribute(root.attribute)
+            }
+            MenuItem {
+                enabled: !root.readOnly && !!_currentScene && _currentScene.canConnectCopiedAttribute(root.attribute)
+                text: {
+                    var copied = _currentScene ? _currentScene.copiedAttribute : null
+                    if (!copied || !copied.node)
+                        return "Connect Copied (nothing copied)"
+                    return "Connect to " + copied.node.label + "." + copied.label
+                }
+                onTriggered: _currentScene.connectCopiedAttribute(root.attribute)
+            }
+        }
+    }
+
     Component {
         id: renameAnySetAttributeDialogComp
         Dialog {
@@ -431,9 +452,14 @@ RowLayout {
 
         MouseArea {
             anchors.fill: parent
-            enabled: root.isAnySetChild
             acceptedButtons: Qt.RightButton
             onClicked: function(mouse) {
+                if (!root.isAnySetChild) {
+                    var connectionMenu = connectionMenuComp.createObject(nameContainer)
+                    connectionMenu.closed.connect(function() { connectionMenu.destroy() })
+                    connectionMenu.popup()
+                    return
+                }
                 var menu = removeAnySetAttributeMenuComp.createObject(nameContainer)
                 var position = mapToItem(Overlay.overlay, mouse.x, mouse.y)
                 menu.preferredX = position.x

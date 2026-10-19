@@ -818,6 +818,14 @@ class Scene(UIGraph):
 
 
 
+        # Nuke scripts: their nodes are added to the graph (compositing)
+        nukeScripts = [path for path in filesByType["other"] if extensionLower(path) == ".nk"]
+        for path in nukeScripts:
+            self.importNukeScript(path, position)
+        filesByType["other"] = [path for path in filesByType["other"] if path not in nukeScripts]
+        if nukeScripts and not filesByType["other"]:
+            return False
+
         if not filesByType["images"] and not filesByType["videos"] and not filesByType["panoramaInfo"] and not filesByType["meshroomScenes"] and not filesByType["meshroomTemplates"]:
             if filesByType["other"]:
                 extensions = {extensionLower(url) for url in filesByType["other"]}
@@ -832,6 +840,49 @@ class Scene(UIGraph):
         # As the boolean is introduced to check if the project is loaded or not, the return value is added to the function.
         # The default value is False, which means the project is not loaded.
         return False
+
+    @Slot(QUrl, result=list)
+    @Slot(QUrl, QPoint, result=list)
+    def importNukeScript(self, url, position=None):
+        """
+        Add the nodes of a Nuke script (.nk) to the graph, as compositing nodes (see meshroom/live/nuke.py), at
+        `position` (the center of the graph by default); the frame range of the script becomes the in / out of
+        the timeline when it was not entered by hand. One undoable step; what is not imported is reported.
+        """
+        from meshroom.core.graph import Graph
+        from meshroom.live import nuke
+        if isinstance(url, QUrl):
+            path = url.toLocalFile() or url.toString()
+        else:
+            path = str(url)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            temporary = Graph("")
+            created, report, root = nuke.importScript(temporary, text)
+        except Exception as e:
+            logging.exception("[Nuke import] %s", path)
+            self.error.emit(Message("Nuke Script Import", f"Could not import '{os.path.basename(path)}'.", str(e)))
+            return []
+        if not created:
+            self.error.emit(Message("Nuke Script Import", f"No node imported from '{os.path.basename(path)}'.", ""))
+            return []
+        if position is None:
+            bbox = self.layout.boundingBox() if self.nodes else [0, 0, 0, 0]
+            position = QPoint(int(bbox[0]), int(bbox[1] + bbox[3] + 200))
+        data = json.dumps(temporary.serializePartial(list(temporary.nodes)))
+        with self.groupedGraphModification(f"Import Nuke Script {os.path.basename(path)}"):
+            if self._graph.workspaceMode != "compositing":
+                self.setWorkspaceMode("compositing")
+            nodes = self.pasteNodes(data, position)
+            frameRange = nuke.rootFrameRange(root)
+            if frameRange and self._graph.frameRange.get("source", None) != "":
+                self.setFrameRange(*frameRange)
+        details = "\n".join(report) if report else "Every node was imported."
+        self.info.emit(Message("Nuke Script Import",
+                               f"{len(nodes)} nodes imported from '{os.path.basename(path)}'"
+                               + (f", {len(report)} remarks." if report else "."), details))
+        return nodes
 
     @Slot("QList<QUrl>", result="QVariantMap")
     def getFilesByTypeFromDrop(self, urls):

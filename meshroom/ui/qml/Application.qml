@@ -8,6 +8,7 @@ import QtQml.Models
 import Qt.labs.platform as Platform
 import QtQuick.Dialogs
 
+import Compositing 1.0
 import GraphEditor 1.0
 import MaterialIcons 2.2
 import Utils 1.0
@@ -21,6 +22,8 @@ Page {
     property alias workspaceView: workspaceView
 
     readonly property var scenefile: _currentScene ? _currentScene.graph.filepath : "";
+    // Live compositing workspace: viewer of the evaluated node instead of the photogrammetry viewers
+    readonly property bool compositingMode: _currentScene ? _currentScene.graph.workspaceMode === "compositing" : false
 
     onScenefileChanged: {
         // Check if we are not currently saving and emit the currentProjectChanged signal
@@ -232,6 +235,16 @@ Page {
             _currentScene.importImagesUrls(currentFiles)
             imagesFolder = Filepath.dirname(currentFiles[0])
             MeshroomApp.addRecentImportedImagesFolder(imagesFolder)
+        }
+    }
+
+    Platform.FileDialog {
+        id: importNukeScriptDialog
+        title: "Import Nuke Script"
+        fileMode: Platform.FileDialog.OpenFile
+        nameFilters: ["Nuke Scripts (*.nk)"]
+        onAccepted: {
+            _currentScene.importNukeScript(currentFile)
         }
     }
 
@@ -700,6 +713,12 @@ Page {
                         _currentScene.new()
                     })
                 }
+                Action {
+                    text: "New Compositing"
+                    onTriggered: ensureSaved(function() {
+                        _currentScene.new("compositing")
+                    })
+                }
                 Menu {
                     id: newPipelineMenu
                     title: "New Pipeline"
@@ -786,6 +805,14 @@ Page {
                                 elideWidth: openRecentMenu.maxWidth
                             }
                         }
+                    }
+                }
+                Action {
+                    id: importNukeScriptAction
+                    text: "Import Nuke Script..."
+                    onTriggered: {
+                        initFileDialogFolder(importNukeScriptDialog)
+                        importNukeScriptDialog.open()
                     }
                 }
                 Action {
@@ -1062,6 +1089,14 @@ Page {
                     checked: false
                 }
                 MenuSeparator {}
+                MenuItem {
+                    text: "Compositing Workspace"
+                    checkable: true
+                    checked: root.compositingMode
+                    enabled: _currentScene !== null
+                    onTriggered: _currentScene.setWorkspaceMode(checked ? "compositing" : "")
+                }
+                MenuSeparator {}
                 Action {
                     text: "Fullscreen"
                     checkable: true
@@ -1278,7 +1313,10 @@ Page {
 
             WorkspaceView {
                 id: workspaceView
-                SplitView.fillHeight: true
+                visible: !root.compositingMode && (settingsUILayout.showImageGallery || settingsUILayout.showImageViewer ||
+                                                   settingsUILayout.showViewer3D || settingsUILayout.showTextViewer)
+                // Only one item of a SplitView can fill it, even when hidden
+                SplitView.fillHeight: !root.compositingMode
                 SplitView.preferredHeight: 300
                 SplitView.minimumHeight: 80
                 currentScene: _currentScene
@@ -1357,6 +1395,15 @@ Page {
                     }
 
                 }
+            }
+
+            CompositingView {
+                id: compositingView
+                visible: root.compositingMode
+                SplitView.fillHeight: root.compositingMode
+                SplitView.preferredHeight: 300
+                SplitView.minimumHeight: 80
+                currentScene: _currentScene
             }
 
             MSplitView {

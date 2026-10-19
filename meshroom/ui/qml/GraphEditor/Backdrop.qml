@@ -77,6 +77,10 @@ Item {
     x: root.node ? root.node.x : undefined
     y: root.node ? root.node.y : undefined
 
+    // Folded chapters above the backdrop move it up (drawn moved, its position is unchanged)
+    property real foldShift: 0
+    transform: Translate { y: -root.foldShift }
+
     // The backdrop node always needs to be at the back (below nodes which default to z=0).
     // Among backdrops, smaller area gets a higher (less negative) z so it renders on top.
     z: -(width * height)

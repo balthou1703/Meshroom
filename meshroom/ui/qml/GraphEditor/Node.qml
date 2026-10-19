@@ -34,6 +34,9 @@ Item {
             return activePalette.mid
         if (node.isIONode)
             return Colors.blue
+        // Compositing nodes: the default dark header, their body has the color of their category
+        if (node.isImageOpNode)
+            return activePalette.base
         if (!node.isComputableType)
             return '#2f6352'
         return activePalette.base
@@ -57,9 +60,67 @@ Item {
     property point mousePosition: Qt.point(mouseArea.mouseX, mouseArea.mouseY)
     property bool hasWarnings: false
 
+    // Live compositing evaluation (LiveController), to outline the nodes of the evaluated branch
+    property var liveController: null
+    // A disabled compositing node passes its first input through
+    readonly property bool nodeDisabled: !!node && node.isImageOpNode && node.hasInternalAttribute("disable") &&
+                                         node.internalAttribute("disable").value === true
+    readonly property bool isEvaluated: !!liveController && liveController.evaluatedNode === node
+    readonly property bool liveRendering: !!liveController && liveController.rendering
+    // "", "RUNNING", "SUCCESS", "ERROR" or "UPSTREAM_ERROR" at the current frame
+    readonly property string evalStatus: {
+        if (!liveController || !node || !node.isImageOpNode)
+            return ""
+        liveController.statusRevision  // Re-evaluate the binding when statuses change
+        return liveController.nodeStatus(node)
+    }
+    readonly property string evalMessage: {
+        if (evalStatus !== "ERROR" && evalStatus !== "UPSTREAM_ERROR")
+            return ""
+        return liveController.nodeMessage(node)
+    }
+
     Item {
         id: m
         property bool displayParams: false
+    }
+
+    // Evaluation status shown on the node outline.
+    // "RUNNING" is only shown after a short delay, so that fast renders do not make the graph blink,
+    // and the last settled status is kept while a render is in progress.
+    QtObject {
+        id: evalDisplay
+        property bool showRunning: false
+        property string settledStatus: ""
+        readonly property string status: {
+            if (showRunning)
+                return "RUNNING"
+            if (root.evalStatus === "RUNNING" || (root.evalStatus === "" && root.liveRendering))
+                return settledStatus
+            return root.evalStatus
+        }
+    }
+
+    Timer {
+        id: runningDelay
+        interval: 150
+        onTriggered: evalDisplay.showRunning = root.evalStatus === "RUNNING"
+    }
+
+    onEvalStatusChanged: {
+        if (evalStatus === "RUNNING") {
+            runningDelay.restart()
+            return
+        }
+        runningDelay.stop()
+        evalDisplay.showRunning = false
+        if (evalStatus !== "" || !liveRendering)
+            evalDisplay.settledStatus = evalStatus
+    }
+
+    onLiveRenderingChanged: {
+        if (!liveRendering && evalStatus === "")
+            evalDisplay.settledStatus = ""
     }
 
     // Mouse interaction related signals
@@ -75,6 +136,9 @@ Item {
     // Already connected attribute with another edge in DropArea
     signal edgeAboutToBeRemoved(var input)
 
+    /// Emitted when a pin is clicked (not dragged): e.g. to pull an edge from an output
+    signal pinClicked(var attribute)
+
     /// Emitted when child attribute pins are created
     signal attributePinCreated(var attribute, var pin)
     /// Emitted when child attribute pins are deleted
@@ -86,6 +150,10 @@ Item {
     // initialize position with node coordinates
     x: root.node ? root.node.x : undefined
     y: root.node ? root.node.y : undefined
+
+    // Folded chapters above the node move it up (drawn moved, its position is unchanged)
+    property real foldShift: 0
+    transform: Translate { y: -root.foldShift }
 
     implicitHeight: childrenRect.height
 
@@ -339,6 +407,56 @@ Item {
             root.endShaking();
         }
 
+        // Live evaluation status outline, drawn outside of the selection border
+        Rectangle {
+            id: evalOutline
+            readonly property real outlineWidth: root.isEvaluated ? 3 : 1.5
+            anchors.fill: nodeContent
+            anchors.margins: -(4 + outlineWidth)
+            visible: evalDisplay.status !== ""
+            border.width: outlineWidth
+            border.color: {
+                switch (evalDisplay.status) {
+                    case "SUCCESS": return Colors.green
+                    case "RUNNING": return Colors.orange
+                    case "ERROR": return Colors.red
+                    case "UPSTREAM_ERROR": return Qt.darker(Colors.red, 1.8)
+                }
+                return "transparent"
+            }
+            opacity: 0.85
+            radius: background.radius + 4 + outlineWidth
+            color: "transparent"
+
+            ToolTip.visible: root.hovered && root.evalMessage !== ""
+            ToolTip.text: root.evalMessage
+            ToolTip.delay: 300
+        }
+
+        // Disabled node: dimmed and crossed out, as in Nuke
+        Item {
+            id: disabledOverlay
+            anchors.fill: nodeContent
+            anchors.topMargin: header.height
+            visible: root.nodeDisabled
+            z: 10
+            clip: true
+            Rectangle {
+                anchors.fill: parent
+                color: Qt.rgba(0, 0, 0, 0.45)
+                radius: 3
+            }
+            Rectangle {
+                readonly property real diagonal: Math.sqrt(parent.width * parent.width + parent.height * parent.height)
+                width: diagonal
+                height: 2
+                anchors.centerIn: parent
+                rotation: Math.atan2(parent.height, parent.width) * 180 / Math.PI
+                color: Qt.rgba(1, 1, 1, 0.55)
+                antialiasing: true
+            }
+        }
+
         // Selection border
         Rectangle {
             anchors.fill: nodeContent
@@ -368,7 +486,15 @@ Item {
         Rectangle {
             id: background
             anchors.fill: nodeContent
-            color: node.color === "" ? Qt.lighter(activePalette.base, 1.4) : node.color
+            // A Clone has the color of the node it clones
+            readonly property var cloneReference: {
+                if (!node || node.nodeType !== "Clone" || !node.hasAttribute("source"))
+                    return null
+                var source = node.attribute("source")
+                return source.isLink && source.inputLink ? source.inputLink.node : null
+            }
+            readonly property string bodyColor: cloneReference ? cloneReference.color : node.color
+            color: bodyColor === "" ? Qt.lighter(activePalette.base, 1.4) : bodyColor
             layer.enabled: true
             layer.effect: MultiEffect {
                 shadowColor: activePalette.shadow
@@ -452,7 +578,7 @@ Item {
                                 // All intermediate items (mouseArea, nodeContent, body, header, headerLayout)
                                 // are at position (0,0), so only the Loader's position within the RowLayout matters.
                                 property real globalX: root.x + flowInputsLoader.x
-                                property real globalY: root.y + flowInputsLoader.y
+                                property real globalY: root.y - root.foldShift + flowInputsLoader.y
 
                                 Component.onCompleted: attributePinCreated(attribute, flowInputsHeaderPin)
                                 Component.onDestruction: attributePinDeleted(attribute, flowInputsHeaderPin)
@@ -462,15 +588,31 @@ Item {
                             }
                         }
 
-                        // Node Name
+                        // Node Name (a Clone: the cloned node first, with an arrow, then its own name)
                         Label {
                             id: nodeLabel
+                            readonly property var cloneSource: node && node.nodeType === "Clone" && node.hasAttribute("source") ?
+                                                               node.attribute("source") : null
                             Layout.fillWidth: true
-                            text: root.nodeLabel
+                            text: {
+                                if (!cloneSource)
+                                    return root.nodeLabel
+                                return cloneSource.isLink && cloneSource.inputRootLink ? "\u21E2 " + cloneSource.inputRootLink.node.label : "\u21E2 ?"
+                            }
                             padding: 4
                             color: root.mainSelected ? activePalette.highlightedText : activePalette.text
                             elide: Text.ElideMiddle
                             font.pointSize: 8
+                        }
+
+                        // Clone: its own name, after the cloned node
+                        Label {
+                            visible: nodeLabel.cloneSource !== null
+                            text: root.nodeLabel
+                            font.pointSize: 7
+                            font.italic: true
+                            color: root.mainSelected ? activePalette.highlightedText : activePalette.text
+                            opacity: 0.7
                         }
 
                         // Node State icons
@@ -479,6 +621,43 @@ Item {
                             Layout.alignment: Qt.AlignRight
                             Layout.rightMargin: 2
                             spacing: 2
+
+                            // Live compositing: time the node took to render the current frame
+                            Label {
+                                id: renderTimeLabel
+                                readonly property real milliseconds: {
+                                    if (!root.liveController || !node || !node.isImageOpNode || root.evalStatus !== "SUCCESS")
+                                        return -1
+                                    root.liveController.statusRevision  // Refresh with the evaluation
+                                    return root.liveController.nodeRenderTime(node)
+                                }
+                                visible: milliseconds > 0.5
+                                text: milliseconds >= 1000 ? (milliseconds / 1000).toFixed(1) + " s" : Math.round(milliseconds) + " ms"
+                                font.pointSize: 6.5
+                                color: root.mainSelected ? activePalette.highlightedText : activePalette.text
+                                opacity: 0.7
+                                ToolTip.text: "Render time of this node at the current frame (inputs excluded)"
+                                ToolTip.visible: renderTimeMA.containsMouse
+                                ToolTip.delay: 500
+                                MouseArea {
+                                    id: renderTimeMA
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    acceptedButtons: Qt.NoButton
+                                }
+                            }
+
+                            // Live compositing: enable / disable the node (I)
+                            MaterialToolButton {
+                                visible: !!node && node.isImageOpNode && node.hasInternalAttribute("disable")
+                                text: root.nodeDisabled ? MaterialIcons.visibility_off : MaterialIcons.visibility
+                                font.pointSize: 7
+                                padding: 2
+                                palette.text: Colors.sysPalette.text
+                                opacity: root.nodeDisabled ? 1.0 : 0.55
+                                ToolTip.text: root.nodeDisabled ? "Enable the node (I)" : "Disable the node: pass its first input through (I)"
+                                onClicked: _currentScene.setAttribute(node.internalAttribute("disable"), !root.nodeDisabled)
+                            }
 
                             // CompatibilityBadge icon for CompatibilityNodes
                             Loader {
@@ -652,7 +831,7 @@ Item {
                                 // All intermediate items (mouseArea, nodeContent, body, header, headerLayout)
                                 // are at position (0,0), so only the Loader's position within the RowLayout matters.
                                 property real globalX: root.x + flowOutLoader.x
-                                property real globalY: root.y + flowOutLoader.y
+                                property real globalY: root.y - root.foldShift + flowOutLoader.y
 
                                 Component.onCompleted: attributePinCreated(attribute, flowOutHeaderPin)
                                 Component.onDestruction: attributePinDeleted(attribute, flowOutHeaderPin)
@@ -763,7 +942,7 @@ Item {
                                         expanded: Boolean(modelData.expanded)
 
                                         property real globalX: root.x + nodeAttributes.x + outputs.x + outputLoader.x + outPin.x
-                                        property real globalY: root.y + nodeAttributes.y + outputs.y + outputLoader.y + outPin.y
+                                        property real globalY: root.y - root.foldShift + nodeAttributes.y + outputs.y + outputLoader.y + outPin.y
 
                                         onIsConnectedChanged: function() {
                                             outputs.parentPinsUpdated()
@@ -774,6 +953,7 @@ Item {
                                         }
 
                                         onClicked: function() {
+                                            root.pinClicked(modelData)
                                             if (outputs.parentPins.has(modelData.fullName)) {
                                                 modelData.expanded = !modelData.expanded
                                                 outputs.parentPins.set(modelData.fullName, modelData.expanded)
@@ -808,7 +988,10 @@ Item {
                                 delegate: Loader {
                                     id: inputLoader
 
-                                    active: !modelData.isOutput && modelData.exposed && modelData.desc.visible
+                                    // A disabled image input (e.g. "Match Target" while "Match Source" is off) has no
+                                    // pin, unless it is connected (its link stays visible and removable)
+                                    active: !modelData.isOutput && modelData.exposed && modelData.desc.visible &&
+                                            (modelData.type !== "Image" || modelData.enabled || modelData.isLink)
                                     visible: {
                                         if (Boolean(modelData.enabled)) {
                                             if (modelData.root && (modelData.root.isExpandable) ) {
@@ -838,7 +1021,7 @@ Item {
                                         expanded: Boolean(modelData.expanded)
 
                                         property real globalX: root.x + nodeAttributes.x + inputs.x + inputLoader.x + inPin.x
-                                        property real globalY: root.y + nodeAttributes.y + inputs.y + inputLoader.y + inPin.y
+                                        property real globalY: root.y - root.foldShift + nodeAttributes.y + inputs.y + inputLoader.y + inPin.y
 
                                         onIsConnectedChanged: function() {
                                             inputs.parentPinsUpdated()
@@ -853,6 +1036,7 @@ Item {
                                         }
 
                                         onClicked: function() {
+                                            root.pinClicked(modelData)
                                             if (inputs.parentPins.has(modelData.fullName)) {
                                                 modelData.expanded = !modelData.expanded
                                                 inputs.parentPins.set(modelData.fullName, modelData.expanded)
@@ -945,7 +1129,7 @@ Item {
                                             expanded: Boolean(modelData.expanded)
 
                                             property real globalX: root.x + nodeAttributes.x + inputParamsRect.x + paramLoader.x + inParamsPin.x
-                                            property real globalY: root.y + nodeAttributes.y + inputParamsRect.y + paramLoader.y + inParamsPin.y
+                                            property real globalY: root.y - root.foldShift + nodeAttributes.y + inputParamsRect.y + paramLoader.y + inParamsPin.y
 
                                             onIsConnectedChanged: function() {
                                                 inputParams.parentPinsUpdated()
@@ -964,6 +1148,7 @@ Item {
                                             }
 
                                             onClicked: function() {
+                                                root.pinClicked(modelData)
                                                 if (inputParams.parentPins.has(modelData.fullName)) {
                                                     modelData.expanded = !modelData.expanded
                                                     inputParams.parentPins.set(modelData.fullName, modelData.expanded)

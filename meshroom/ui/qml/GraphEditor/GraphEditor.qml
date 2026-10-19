@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 
 import Controls 1.0
 import MaterialIcons 2.2
@@ -58,13 +59,130 @@ Item {
         return undefined
     }
 
+    /// The visible pin of an attribute (or of its first visible parent group), or null
+    function pinOf(attribute) {
+        if (!attribute)
+            return null
+        let pin = root._attributeToDelegate[attribute.uuid]
+        if (pin && pin.visible)
+            return pin
+        let group = attribute.root
+        while (group) {
+            let groupPin = root._attributeToDelegate[group.uuid]
+            if (groupPin && groupPin.visible)
+                return groupPin
+            group = group.root
+        }
+        return pin || null
+    }
+
+    // Edges selected in the graph editor (click on an edge, or right drag a box over edges):
+    // {destination attribute full name: true}. Delete removes them, H hides them (compositing nodes).
+    property var selectedEdges: ({})
+    readonly property bool hasSelectedEdges: Object.keys(selectedEdges).length > 0
+    function selectEdges(names, mode) {
+        // mode: "replace", "add" or "toggle"
+        var selection = mode === "replace" ? {} : Object.assign({}, selectedEdges)
+        names.forEach(function(name) {
+            if (mode === "toggle" && selection[name])
+                delete selection[name]
+            else
+                selection[name] = true
+        })
+        selectedEdges = selection
+    }
+    function clearEdgeSelection() {
+        if (hasSelectedEdges)
+            selectedEdges = {}
+    }
+    // The selected edges that still exist (an edge selected before an undo or a reconnection may be gone)
+    function validSelectedEdges() {
+        var names = []
+        if (!root.graph)
+            return names
+        for (var i = 0; i < root.graph.edges.count; i++) {
+            var edge = root.graph.edges.at(i)
+            if (root.selectedEdges[edge.dst.fullName])
+                names.push(edge.dst.fullName)
+        }
+        return names
+    }
+    // Selecting nodes, or another graph, unselects the edges (Delete then acts on the nodes)
+    Connections {
+        target: uigraph ? uigraph.nodeSelection : null
+        // Only when nodes get selected (clearing the node selection, e.g. a click on the graph, keeps the edges)
+        function onSelectionChanged() {
+            if (uigraph.nodeSelection.hasSelection)
+                root.clearEdgeSelection()
+        }
+    }
+    onGraphChanged: {
+        clearEdgeSelection()
+        cancelPendingEdge()
+    }
+    // The pulled edge is dropped when its node is removed
+    Connections {
+        target: root.graph
+        function onUpdated() {
+            if (root.pendingSource) {
+                var node = root.pendingSource.node
+                if (!node || !node.alive)
+                    root.cancelPendingEdge()
+            }
+        }
+    }
+
+    // Edge pulled from an output pin (a click on it): it follows the cursor; a click on an input connects
+    // it, Tab creates a node connected to it, Escape or a click on an empty area cancels it
+    property var pendingSource: null
+    // Where the node context menu was asked (graph editor coordinates)
+    property point menuPosition
+    function cancelPendingEdge() { pendingSource = null }
+    function handlePinClick(attribute) {
+        if (root.pendingSource) {
+            if (!attribute.isOutput) {
+                uigraph.connectAttributes(root.pendingSource, attribute)
+                root.pendingSource = null
+            } else {
+                // Another output: it becomes the pulled one (the same one: cancel)
+                root.pendingSource = attribute === root.pendingSource ? null : attribute
+            }
+            return
+        }
+        if (attribute.isOutput && attribute.type !== "ListAttribute" && attribute.type !== "GroupAttribute") {
+            root.pendingSource = attribute
+            // Tab (create a connected node) and Escape go to the graph editor
+            root.forceActiveFocus()
+        }
+    }
+    // Cursor position in the graph ('draggable' coordinates)
+    readonly property point cursorInGraph: {
+        var p = graphHover.point.position
+        draggable.x; draggable.y; draggable.scale  // Re-evaluated when the view moves
+        return root.mapToItem(draggable, p.x, p.y)
+    }
+
+    // Hidden edges (H): the hidden edges leaving an output, for the tooltip of its stub
+    function hiddenTargetsText(srcAttribute) {
+        var lines = []
+        if (!root.graph)
+            return ""
+        for (var i = 0; i < root.graph.edges.count; i++) {
+            var edge = root.graph.edges.at(i)
+            if (edge.src === srcAttribute && uigraph.isEdgeHidden(edge.dst))
+                lines.push("\u2192 " + edge.dst.node.label + "." + edge.dst.label)
+        }
+        return lines.join("\n")
+    }
+
     /// Get the InputNode delegate at the given position in 'draggable' coordinates, or null
     function inputNodeDelegateAt(draggableX, draggableY) {
         for (var i = 0; i < nodeRepeater.count; ++i) {
             var delegate = nodeRepeater.getItemAt(i)
-            if (delegate && delegate.node && delegate.node.isInputNode && !delegate.readOnly) {
+            if (delegate && delegate.visible && delegate.node && delegate.node.isInputNode && !delegate.readOnly) {
+                const delegateY = delegate.y - (delegate.foldShift || 0)
                 if (draggableX >= delegate.x && draggableX <= delegate.x + delegate.width &&
-                    draggableY >= delegate.y && draggableY <= delegate.y + delegate.height) {
+                    draggableY >= delegateY && draggableY <= delegateY + delegate.height) {
                     return delegate
                 }
             }
@@ -97,7 +215,7 @@ Item {
     function pasteNodes() {
         let finalPosition = undefined
         if (mouseArea.containsMouse) {
-            finalPosition = mapToItem(draggable, mouseArea.mouseX, mouseArea.mouseY)
+            finalPosition = toGraphPosition(mapToItem(draggable, mouseArea.mouseX, mouseArea.mouseY))
         } else {
             finalPosition = getCenterPosition()
         }
@@ -112,12 +230,81 @@ Item {
 
     /// Get the coordinates of the point at the center of the GraphEditor
     function getCenterPosition() {
-        return mapToItem(draggable, mouseArea.width / 2, mouseArea.height / 2)
+        return toGraphPosition(mapToItem(draggable, mouseArea.width / 2, mouseArea.height / 2))
+    }
+
+    /// Graph position of a point of the 'draggable' item: positions below folded chapters are displayed moved up
+    function toGraphPosition(point) {
+        return uigraph ? Qt.point(point.x, uigraph.unfoldY(point.y)) : point
+    }
+
+    // Compositing shortcuts, active in the compositing workspace while the mouse is over the graph editor,
+    // whatever has the keyboard focus (as in Nuke). Text fields keep the keys typed in them.
+    HoverHandler {
+        id: graphHover
+    }
+    readonly property bool compositingShortcuts: graphHover.hovered && !!uigraph && uigraph.graph.workspaceMode === "compositing"
+    Shortcut {
+        // Live compositing: disable / enable the selected nodes
+        sequence: "I"
+        enabled: root.compositingShortcuts
+        onActivated: uigraph.toggleDisableSelectedNodes()
+    }
+    Shortcut {
+        // Live compositing: display the result of the selected node
+        sequence: "E"
+        enabled: root.compositingShortcuts
+        onActivated: {
+            if (uigraph.selectedNode && uigraph.selectedNode.isImageOpNode)
+                uigraph.live.evaluate(uigraph.selectedNode)
+        }
+    }
+    // Live compositing: view 1 (Evaluate) / view 2 (Evaluate Compare), as the inputs of the Nuke viewer
+    Shortcut {
+        sequences: ["1", "Num+1"]
+        enabled: root.compositingShortcuts && !!uigraph.live.compareNode
+        onActivated: uigraph.live.showView(1)
+    }
+    Shortcut {
+        sequences: ["2", "Num+2"]
+        enabled: root.compositingShortcuts && !!uigraph.live.compareNode
+        onActivated: uigraph.live.showView(2)
+    }
+    Shortcut {
+        // Hide the selected edges (or the input edges of the selected nodes), or show them if they are hidden:
+        // a hidden edge leaves a stub on both pins, its tooltip giving the other end
+        sequence: "H"
+        enabled: root.compositingShortcuts
+        onActivated: {
+            if (root.validSelectedEdges().length > 0) {
+                uigraph.toggleHiddenEdges(root.validSelectedEdges())
+                root.clearEdgeSelection()
+            } else {
+                uigraph.toggleHiddenInputEdgesOfSelectedNodes()
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.pendingSource !== null && graphHover.hovered
+        onActivated: root.cancelPendingEdge()
+    }
+    Shortcut {
+        // Connect the output of the first selected node to the inputs of the other selected nodes
+        sequence: "&"
+        enabled: root.compositingShortcuts
+        onActivated: uigraph.connectSelectedNodes()
     }
 
     Keys.onPressed: function(event) {
         if (event.key === Qt.Key_F) {
             fit()
+        } else if (event.key === Qt.Key_Escape && root.pendingSource) {
+            root.cancelPendingEdge()
+        } else if (event.key === Qt.Key_Delete && root.validSelectedEdges().length > 0) {
+            // Selected edges first (the nodes stay)
+            uigraph.removeEdgesTo(root.validSelectedEdges())
+            root.clearEdgeSelection()
         } else if (event.key === Qt.Key_Delete) {
             if (event.modifiers === Qt.AltModifier) {
                 uigraph.removeNodesFrom(uigraph.getSelectedNodes())
@@ -147,10 +334,19 @@ Item {
             uigraph.alignVertically()
         } else if (event.key === Qt.Key_H && event.modifiers === Qt.ShiftModifier) {
             uigraph.alignHorizontally()
+        } else if (event.key === Qt.Key_L && event.modifiers === Qt.NoModifier) {
+            // Layout following the connections: the selected nodes, or the whole graph
+            var sizes = {}
+            for (var i = 0; i < nodeRepeater.count; ++i) {
+                var item = nodeRepeater.getItemAt(i)
+                if (item && item.node)
+                    sizes[item.node.name] = [item.width, item.height]
+            }
+            uigraph.layoutNodes(sizes)
         } else if (event.key === Qt.Key_Tab) {
             event.accepted = true
             if (mouseArea.containsMouse) {
-                newNodeMenu.spawnPosition = mouseArea.mapToItem(draggable, mouseArea.mouseX, mouseArea.mouseY)
+                newNodeMenu.spawnPosition = toGraphPosition(mouseArea.mapToItem(draggable, mouseArea.mouseX, mouseArea.mouseY))
                 newNodeMenu.popup()
             }
         }
@@ -184,9 +380,25 @@ Item {
             workspaceMoved()
         }
 
+        // Box selection of edges: right button drag on an empty area
+        property point edgeBoxStart
+        property bool edgeBoxActive: false
+        // The last right press made a box (no menu on its release)
+        property bool edgeBoxWasUsed: false
+        function edgeBoxUsed() { return edgeBoxWasUsed }
+
         onPressed: function(mouse) {
+            if (root.pendingSource && mouse.button == Qt.LeftButton) {
+                // A click on an empty area cancels the edge pulled from an output
+                root.cancelPendingEdge()
+            }
             if (mouse.button != Qt.MiddleButton && mouse.modifiers == Qt.NoModifier) {
                 uigraph.clearNodeSelection()
+                root.clearEdgeSelection()
+            }
+            if (mouse.button == Qt.RightButton || mouse.button == Qt.LeftButton) {
+                edgeBoxStart = Qt.point(mouse.x, mouse.y)
+                edgeBoxActive = false
             }
             if (mouse.button == Qt.LeftButton && (mouse.modifiers == Qt.NoModifier || mouse.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))) {
                 nodeSelectionBox.startSelection(mouse)
@@ -200,24 +412,88 @@ Item {
             }
         }
 
-        onReleased: {
+        onReleased: function(mouse) {
+            edgeBoxWasUsed = edgeBoxActive
+            if (edgeBoxActive) {
+                selectEdgesInBox(mouse.modifiers)
+                edgeBoxActive = false
+            }
             removingEdges = false
             edgeSelectionLine.endSelection()
+            var nodeBox = nodeSelectionBox.active && mouse.button == Qt.LeftButton
             nodeSelectionBox.endSelection()
+            // A selection box (left button) around no node selects the edges it crosses
+            if (nodeBox && !uigraph.nodeSelection.hasSelection &&
+                Math.abs(mouse.x - edgeBoxStart.x) + Math.abs(mouse.y - edgeBoxStart.y) > 6) {
+                edgeBox.setEnd(mouse.x, mouse.y)
+                selectEdgesInBox(mouse.modifiers)
+            }
             drag.target = null
             root.forceActiveFocus()
             workspaceClicked()
         }
 
-        onPositionChanged: {
+        onPositionChanged: function(mouse) {
             if (drag.active)
                 workspaceMoved()
+            if ((mouse.buttons & Qt.RightButton) && !edgeBoxActive &&
+                Math.abs(mouse.x - edgeBoxStart.x) + Math.abs(mouse.y - edgeBoxStart.y) > 6) {
+                edgeBox.setEnd(mouse.x, mouse.y)
+                edgeBoxActive = true
+            }
+            if (edgeBoxActive)
+                edgeBox.setEnd(mouse.x, mouse.y)
+        }
+
+        // Select the edges crossing the box (Shift: add, Ctrl: toggle)
+        function selectEdgesInBox(modifiers) {
+            var a = mapToItem(draggable, Math.min(edgeBoxStart.x, edgeBox.endX), Math.min(edgeBoxStart.y, edgeBox.endY))
+            var b = mapToItem(draggable, Math.max(edgeBoxStart.x, edgeBox.endX), Math.max(edgeBoxStart.y, edgeBox.endY))
+            var corners = [Qt.point(a.x, a.y), Qt.point(b.x, a.y), Qt.point(b.x, b.y), Qt.point(a.x, b.y)]
+            var names = []
+            for (var i = 0; i < edgesRepeater.count; i++) {
+                var item = edgesRepeater.itemAt(i)
+                if (!item || !item.visible || !item.edge)
+                    continue
+                var inside = function(x, y) { return x >= a.x && x <= b.x && y >= a.y && y <= b.y }
+                var hit = inside(item.point1x, item.point1y) || inside(item.point2x, item.point2y)
+                for (var k = 0; k < 4 && !hit; k++)
+                    hit = item.intersectsSegment(corners[k], corners[(k + 1) % 4])
+                if (hit)
+                    names.push(item.edge.dst.fullName)
+            }
+            root.selectEdges(names, (modifiers & Qt.ControlModifier) ? "toggle" : (modifiers & Qt.ShiftModifier) ? "add" : "replace")
+        }
+
+        // Box of the edge selection
+        Rectangle {
+            id: edgeBox
+            property real endX: 0
+            property real endY: 0
+            function setEnd(x, y) {
+                endX = x
+                endY = y
+            }
+            visible: mouseArea.edgeBoxActive
+            x: Math.min(mouseArea.edgeBoxStart.x, endX)
+            y: Math.min(mouseArea.edgeBoxStart.y, endY)
+            width: Math.abs(endX - mouseArea.edgeBoxStart.x)
+            height: Math.abs(endY - mouseArea.edgeBoxStart.y)
+            z: 10
+            color: Qt.rgba(1, 0.65, 0.2, 0.08)
+            border.color: "#F5A623"
+            border.width: 1
+        }
+
+        onCanceled: {
+            edgeBoxActive = false
+            edgeBoxWasUsed = false
         }
 
         onClicked: function(mouse) {
-            if (mouse.button == Qt.RightButton) {
+            if (mouse.button == Qt.RightButton && edgeBox.visible === false && !mouseArea.edgeBoxUsed()) {
                 // Store mouse click position in 'draggable' coordinates as new node spawn position
-                newNodeMenu.spawnPosition = mouseArea.mapToItem(draggable, mouse.x, mouse.y)
+                newNodeMenu.spawnPosition = toGraphPosition(mouseArea.mapToItem(draggable, mouse.x, mouse.y))
                 newNodeMenu.popup()
             }
         }
@@ -234,8 +510,15 @@ Item {
                 // "nodeType" might be a pipeline (artificially added in the "Pipelines" category) instead of a node
                 // If it is not a pipeline to import, then it must be a node
                 if (!importPipeline(nodeType)) {
-                    // Add node via the proper command in uigraph
-                    var node = uigraph.addNewNode(nodeType, spawnPosition)
+                    // Add node via the proper command in uigraph (connected to the pulled edge, if any)
+                    // Compositing: a node created while another one is selected comes after it (connected, on its right),
+                    // so that nodes created one after the other are chained (as in Nuke)
+                    var previous = uigraph.nodeSelection.hasSelection && uigraph.selectedNode && uigraph.selectedNode.isImageOpNode &&
+                                   root.nodeTypesModel[nodeType] && uigraph.graph.workspaceMode === "compositing" ? uigraph.selectedNode : null
+                    var node = root.pendingSource ? uigraph.addNewNodeConnectedTo(nodeType, spawnPosition, root.pendingSource)
+                             : previous ? uigraph.addNewNodeAfter(nodeType, previous)
+                             : uigraph.addNewNode(nodeType, spawnPosition)
+                    root.cancelPendingEdge()
                     uigraph.selectedNode = node
                     uigraph.selectNodes([node])
                 }
@@ -532,6 +815,190 @@ Item {
                 }
             }
 
+            // Hidden links of the Clones: shown (dashed) while the clone or the cloned node is selected
+            Repeater {
+                model: nodeRepeater.loaded && root.graph ? root.graph.nodes : undefined
+                delegate: Loader {
+                    active: object.nodeType === "Clone" && object.hasAttribute("source")
+                    sourceComponent: Shape {
+                        id: cloneLink
+                        readonly property var clone: object
+                        readonly property var reference: {
+                            var source = clone.attribute("source")
+                            return source.isLink && source.inputLink ? source.inputLink.node : null
+                        }
+                        readonly property var cloneItem: { nodeRepeater.count; return root.nodeDelegate(clone) }
+                        readonly property var referenceItem: { nodeRepeater.count; return reference ? root.nodeDelegate(reference) : null }
+                        visible: !!cloneItem && !!referenceItem && cloneItem.visible && referenceItem.visible &&
+                                 (uigraph.selectedNode === clone || uigraph.selectedNode === reference)
+                        readonly property real x1: referenceItem ? referenceItem.x + referenceItem.width : 0
+                        readonly property real y1: referenceItem ? referenceItem.y - (referenceItem.foldShift || 0) + 14 : 0
+                        readonly property real x2: cloneItem ? cloneItem.x : 0
+                        readonly property real y2: cloneItem ? cloneItem.y - (cloneItem.foldShift || 0) + 14 : 0
+                        ShapePath {
+                            strokeColor: "#C9C9C9"
+                            strokeWidth: 1.5
+                            strokeStyle: ShapePath.DashLine
+                            dashPattern: [4, 3]
+                            fillColor: "transparent"
+                            startX: cloneLink.x1
+                            startY: cloneLink.y1
+                            PathCubic {
+                                x: cloneLink.x2
+                                y: cloneLink.y2
+                                control1X: cloneLink.x1 + Math.max(40, Math.abs(cloneLink.x2 - cloneLink.x1) / 2)
+                                control1Y: cloneLink.y1
+                                control2X: cloneLink.x2 - Math.max(40, Math.abs(cloneLink.x2 - cloneLink.x1) / 2)
+                                control2Y: cloneLink.y2
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Menu of the stubs of hidden edges: copy the output or the input (to connect it elsewhere with the
+            // "Connect" item of a pin menu), or show the edges again
+            Menu {
+                id: stubMenu
+                property var edge: null
+                property var names: []
+                function openFor(edge, names, item) {
+                    stubMenu.edge = edge
+                    stubMenu.names = names
+                    parent = item
+                    popup()
+                }
+                MenuItem {
+                    text: stubMenu.edge ? "Copy Output (" + stubMenu.edge.src.node.label + "." + stubMenu.edge.src.label + ")" : ""
+                    onTriggered: uigraph.copyAttribute(stubMenu.edge.src)
+                }
+                MenuItem {
+                    text: stubMenu.edge ? "Copy Input (" + stubMenu.edge.dst.node.label + "." + stubMenu.edge.dst.label + ")" : ""
+                    onTriggered: uigraph.copyAttribute(stubMenu.edge.dst)
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: stubMenu.names.length > 1 ? "Show the Edges" : "Show the Edge"
+                    onTriggered: uigraph.toggleHiddenEdges(stubMenu.names)
+                }
+            }
+
+            // Stubs of the hidden edges (H): a pill next to each pin, colored as the node at the other end;
+            // its tooltip gives the other end, a click selects the other node(s)
+            Repeater {
+                model: nodeRepeater.loaded && root.graph ? root.graph.edges : undefined
+                delegate: Item {
+                    id: stub
+                    readonly property var edge: object
+                    readonly property bool hidden: {
+                        if (!edge || !edge.dst || !edge.dst.node.hasInternalAttribute("hiddenInputs"))
+                            return false
+                        edge.dst.node.internalAttribute("hiddenInputs").value
+                        return uigraph.isEdgeHidden(edge.dst)
+                    }
+                    readonly property var srcPin: { root._attributeToDelegate; return hidden ? root.pinOf(edge.src) : null }
+                    readonly property var dstPin: { root._attributeToDelegate; return hidden ? root.pinOf(edge.dst) : null }
+                    readonly property bool selected: hidden && !!root.selectedEdges[edge.dst.fullName]
+                    visible: hidden && !!srcPin && !!dstPin && srcPin.visible && dstPin.visible
+
+                    function nodeColor(node) { return node.color !== "" ? node.color : "#8A8A8A" }
+                    // The hidden edges leaving the same output (destination full names)
+                    function hiddenFromSource() {
+                        var names = []
+                        for (var i = 0; i < root.graph.edges.count; i++) {
+                            var e = root.graph.edges.at(i)
+                            if (e.src === stub.edge.src && uigraph.isEdgeHidden(e.dst))
+                                names.push(e.dst.fullName)
+                        }
+                        return names
+                    }
+
+                    // At the input: the source
+                    Rectangle {
+                        x: stub.dstPin ? stub.dstPin.globalX + stub.dstPin.inputAnchorPos.x - width - 6 : 0
+                        y: stub.dstPin ? stub.dstPin.globalY + stub.dstPin.inputAnchorPos.y - height / 2 : 0
+                        width: 16
+                        height: 8
+                        radius: 4
+                        color: stub.edge ? stub.nodeColor(stub.edge.src.node) : "grey"
+                        border.color: stub.selected ? "#F5A623" : (dstStubMouse.containsMouse ? "white" : Qt.rgba(0, 0, 0, 0.5))
+                        border.width: stub.selected || dstStubMouse.containsMouse ? 2 : 1
+                        MouseArea {
+                            id: dstStubMouse
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            // Double-click: the edge is shown again
+                            onDoubleClicked: uigraph.toggleHiddenEdges([stub.edge.dst.fullName])
+                            onPressed: function(mouse) {
+                                if (mouse.button === Qt.RightButton)
+                                    stubMenu.openFor(stub.edge, [stub.edge.dst.fullName], dstStubMouse)
+                            }
+                            ToolTip.visible: containsMouse
+                            ToolTip.delay: 300
+                            ToolTip.text: stub.edge ? "\u2190 " + stub.edge.src.node.label + "." + stub.edge.src.label +
+                                                      "\n(hidden edge: double-click to show it, right click to copy)" : ""
+                            onClicked: function(mouse) {
+                                if (mouse.button !== Qt.LeftButton)
+                                    return
+                                root.selectEdges([stub.edge.dst.fullName], (mouse.modifiers & Qt.ShiftModifier) ? "add" : "replace")
+                                root.forceActiveFocus()
+                            }
+                        }
+                    }
+                    // At the output: the destinations
+                    Rectangle {
+                        x: stub.srcPin ? stub.srcPin.globalX + stub.srcPin.outputAnchorPos.x + 6 : 0
+                        y: stub.srcPin ? stub.srcPin.globalY + stub.srcPin.outputAnchorPos.y - height / 2 : 0
+                        width: 16
+                        height: 8
+                        radius: 4
+                        color: stub.edge ? stub.nodeColor(stub.edge.dst.node) : "grey"
+                        border.color: stub.selected ? "#F5A623" : (srcStubMouse.containsMouse ? "white" : Qt.rgba(0, 0, 0, 0.5))
+                        border.width: stub.selected || srcStubMouse.containsMouse ? 2 : 1
+                        MouseArea {
+                            id: srcStubMouse
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            // Double-click: the hidden edges of this output are shown again
+                            onDoubleClicked: uigraph.toggleHiddenEdges(stub.hiddenFromSource())
+                            onPressed: function(mouse) {
+                                if (mouse.button === Qt.RightButton)
+                                    stubMenu.openFor(stub.edge, stub.hiddenFromSource(), srcStubMouse)
+                            }
+                            ToolTip.visible: containsMouse
+                            ToolTip.delay: 300
+                            ToolTip.text: containsMouse && stub.edge ? root.hiddenTargetsText(stub.edge.src) +
+                                                                      "\n(hidden edges: double-click to show them, right click to copy)" : ""
+                            onClicked: function(mouse) {
+                                if (mouse.button !== Qt.LeftButton)
+                                    return
+                                root.selectEdges(stub.hiddenFromSource(), (mouse.modifiers & Qt.ShiftModifier) ? "add" : "replace")
+                                root.forceActiveFocus()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Edge pulled from an output (click on an output pin), to the cursor
+            Edge {
+                id: pendingEdge
+                readonly property var pin: { root._attributeToDelegate; return root.pendingSource ? root.pinOf(root.pendingSource) : null }
+                visible: !!pin && pin.visible
+                enabled: false  // No mouse interaction: clicks go to the pins and the graph
+                z: 50
+                point1x: pin ? pin.globalX + pin.outputAnchorPos.x : 0
+                point1y: pin ? pin.globalY + pin.outputAnchorPos.y : 0
+                point2x: root.cursorInGraph.x
+                point2y: root.cursorInGraph.y
+                color: activePalette.highlight
+                thickness: 2
+            }
+
             // Edges
             Repeater {
                 id: edgesRepeater
@@ -540,49 +1007,18 @@ Item {
                 model: nodeRepeater.loaded && root.graph ? root.graph.edges : undefined
 
                 delegate: Edge {
-                    function getAttributePin(attribute, attributeToDelegate) {
-                        if (!attribute) {
-                            return null
-                        }
-
-                        // Get the first visible parent of "attribute"
-                        let dstAttributeDelegate = attributeToDelegate[attribute.uuid]                        
-
-                        if (dstAttributeDelegate && dstAttributeDelegate.visible) {
-                            return dstAttributeDelegate
-                        }
-
-                        if (!attribute || !attribute.root) {
-                            return null
-                        }
-
-                        let groupAttributeDelegate = null
-                        let groupAttribute = attribute
-
-                        while (groupAttribute && (!groupAttributeDelegate ||
-                               (groupAttributeDelegate && !groupAttributeDelegate.visible && groupAttribute && groupAttribute.root))) {
-                            groupAttribute = groupAttribute ? groupAttribute.root : null
-
-                            if (groupAttribute) {
-                                groupAttributeDelegate = attributeToDelegate[groupAttribute.uuid]
-                            }
-                        }
-
-                        if (groupAttributeDelegate && groupAttributeDelegate.visible) {
-                            return groupAttributeDelegate
-                        }
-
-                        return dstAttributeDelegate
+                    property var src: { root._attributeToDelegate; return root.pinOf(edge.src) }
+                    property var dst: { root._attributeToDelegate; return root.pinOf(edge.dst) }
+                    // Hidden with H (compositing nodes): replaced by stubs on its pins
+                    readonly property bool hidden: {
+                        if (!edge || !edge.dst || !edge.dst.node.hasInternalAttribute("hiddenInputs"))
+                            return false
+                        edge.dst.node.internalAttribute("hiddenInputs").value  // Re-evaluated when it changes
+                        return uigraph.isEdgeHidden(edge.dst)
                     }
-
-                    property var src: {
-                        return getAttributePin(edge.src, root._attributeToDelegate)
-                        }
-                    property var dst: {
-                        return getAttributePin(edge.dst, root._attributeToDelegate)
-                        }
+                    readonly property bool edgeSelected: !!edge && !!edge.dst && !!root.selectedEdges[edge.dst.fullName]
                     property bool isValidEdge: src != null && dst != null
-                    visible: isValidEdge && src.visible && dst.visible
+                    visible: isValidEdge && src.visible && dst.visible && !hidden
 
                     property var loopSource: edge.src && edge.src.root && edge.src.root.value ? edge.src.root : null
                     property bool forLoop: src != null && dst != null &&
@@ -597,12 +1033,12 @@ Item {
                     loopSize: forLoop ? loopSource.value.count : 0
 
                     iteration: forLoop ? loopSource.value.indexOf(edge.src) : 0
-                    color: edge.dst === root.edgeAboutToBeRemoved ? "red" : inFocus ? activePalette.highlight : activePalette.text
+                    color: edge.dst === root.edgeAboutToBeRemoved ? "red" : edgeSelected ? "#F5A623" : inFocus ? activePalette.highlight : activePalette.text
                     thickness: {
                         if (forLoop) {
                             return (inFocus) ? 4 : 3
                         }
-                        return (inFocus) ? 2 : 1
+                        return (inFocus || edgeSelected) ? 2 : 1
                     }
                     point1x: isValidEdge ? src.globalX + src.outputAnchorPos.x : 0
                     point1y: isValidEdge ? src.globalY + src.outputAnchorPos.y : 0
@@ -614,6 +1050,11 @@ Item {
                         if (event.button) {
                             if (canEdit && (event.modifiers & Qt.AltModifier)) {
                                 uigraph.removeEdge(edge)
+                            } else if (event.button == Qt.LeftButton) {
+                                // Select the edge (Shift: add, Ctrl: toggle); Delete removes the selected edges, H hides them
+                                root.selectEdges([edge.dst.fullName], (event.modifiers & Qt.ControlModifier) ? "toggle" :
+                                                                       (event.modifiers & Qt.ShiftModifier) ? "add" : "replace")
+                                root.forceActiveFocus()
                             } else if (event.button == Qt.RightButton) {
                                 edgeMenu.currentEdge = edge
                                 edgeMenu.forLoop = forLoop
@@ -737,9 +1178,68 @@ Item {
 
                     width: 220
 
-                    Component.onCompleted: popup()
+                    Component.onCompleted: {
+                        // Compositing node: the menu opens with "Evaluate" under the cursor (right click, then click).
+                        // Placed in the graph editor (not scaled by the zoom), at the cursor
+                        if (nodeMenu.currentNode.isImageOpNode) {
+                            parent = root
+                            var cursor = root.menuPosition
+                            popup(cursor.x - 40, cursor.y - topPadding - evaluateMenuItem.implicitHeight / 2)
+                        } else {
+                            popup()
+                        }
+                    }
                     onClosed: nodeMenuLoader.unload()
 
+                    MenuItem {
+                        id: evaluateMenuItem
+                        text: "Evaluate"
+                        visible: nodeMenu.currentNode.isImageOpNode
+                        height: visible ? implicitHeight : 0
+                        ToolTip.text: "Compute the branch of this node in memory and display the result: view 1 (E)"
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        onTriggered: uigraph.live.evaluate(nodeMenu.currentNode)
+                    }
+                    MenuItem {
+                        text: "Evaluate Compare"
+                        visible: nodeMenu.currentNode.isImageOpNode
+                        height: visible ? implicitHeight : 0
+                        ToolTip.text: "Display this node as view 2: keys 1 / 2 switch between Evaluate and Evaluate Compare (before / after)"
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        onTriggered: uigraph.live.evaluateCompare(nodeMenu.currentNode)
+                    }
+                    MenuItem {
+                        id: disableMenuItem
+                        // Same rule as toggleDisableSelectedNodes: enable only when every selected node is disabled
+                        readonly property bool isDisabled: uigraph.nodeSelection.selectedIndexes.every(function(idx) {
+                            const node = uigraph.graph.nodes.at(idx.row)
+                            return !node.isImageOpNode || node.internalAttribute("disable").value === true
+                        })
+                        text: isDisabled ? "Enable" : "Disable"
+                        visible: nodeMenu.currentNode.isImageOpNode
+                        height: visible ? implicitHeight : 0
+                        ToolTip.text: "Disabled nodes pass their first image input through (I)"
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        onTriggered: uigraph.toggleDisableSelectedNodes()
+                    }
+                    MenuItem {
+                        text: "Clone"
+                        visible: nodeMenu.currentNode.isImageOpNode && nodeMenu.currentNode.hasAttribute("output")
+                        height: visible ? implicitHeight : 0
+                        ToolTip.text: "Create a node that looks disconnected but outputs the result of this one (hidden link)"
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        onTriggered: {
+                            var clone = uigraph.cloneNode(nodeMenu.currentNode)
+                            if (clone) {
+                                uigraph.selectedNode = clone
+                                uigraph.selectNodes([clone])
+                            }
+                        }
+                    }
                     MenuItem {
                         id: computeMenuItem
                         text: nodeMenu.isSelectionFullyComputed ? "Re-Compute" : "Compute"
@@ -995,11 +1495,16 @@ Item {
                             mainSelected: uigraph.selectedNode === node
                             hovered: uigraph.hoveredNode === node
                             hasWarnings: node.hasInvalidAttribute
+                            liveController: uigraph.live
+                            // Chapter folding: hidden in a folded chapter, moved up below folded ones
+                            foldShift: { uigraph.foldRevision; return uigraph.foldShift(node.y) }
+                            visible: { uigraph.foldRevision; return !uigraph.isFoldedAway(node.y) }
 
                             // ItemSelectionModel.hasSelection triggers updates anytime the selectionChanged() signal is emitted.
                             selected: uigraph.nodeSelection.hasSelection ? uigraph.nodeSelection.isRowSelected(index) : false
 
                             onAttributePinCreated: function(attribute, pin) { registerAttributePin(attribute, pin) }
+                            onPinClicked: function(attribute) { root.handlePinClick(attribute) }
                             onAttributePinDeleted: function(attribute, pin) { unregisterAttributePin(attribute, pin) }
 
                             onShaked: {
@@ -1008,6 +1513,7 @@ Item {
 
                             onPressed: function(mouse) {
                                 nodeRepeater.updateSelectionOnClick = true
+                                root.clearEdgeSelection()
                                 nodeRepeater.ongoingDrag = true
 
                                 let selectionMode = ItemSelectionModel.NoUpdate
@@ -1050,8 +1556,10 @@ Item {
                                     uigraph.selectedNode = node
                                 }
 
-                                // Open the node context menu once selection has been updated.
+                                // Open the node context menu once selection has been updated, where the node was pressed
                                 if (mouse.button == Qt.RightButton) {
+                                    root.menuPosition = nodeDelegate.mapToItem(root, nodeDelegate.mousePosition.x,
+                                                                               nodeDelegate.mousePosition.y)
                                     nodeMenuLoader.load(node)
                                 }
                             }
@@ -1118,7 +1626,8 @@ Item {
 
                             // After drag: apply the final offset to all selected nodes
                             onMoved: function(position) {
-                                const offset = Qt.point(position.x - node.x, position.y - node.y)
+                                // Dropped where it is displayed: below folded chapters, the display is moved up
+                                const offset = Qt.point(position.x - node.x, uigraph.unfoldY(position.y - foldShift) - node.y)
                                 uigraph.moveSelectedNodesBy(offset)
                             }
 
@@ -1139,6 +1648,8 @@ Item {
                             id: backdropDelegate
                             node: object
                             modelInstantiator: nodeRepeater
+                            foldShift: { uigraph.foldRevision; return uigraph.foldShift(node.y) }
+                            visible: { uigraph.foldRevision; return !uigraph.isFoldedAway(node.y) }
 
                             mainSelected: uigraph.selectedNode === node
                             hovered: uigraph.hoveredNode === node
@@ -1148,6 +1659,7 @@ Item {
 
                             onPressed: function(mouse) {
                                 nodeRepeater.updateSelectionOnClick = true
+                                root.clearEdgeSelection()
                                 nodeRepeater.ongoingDrag = true
 
                                 ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
@@ -1250,7 +1762,8 @@ Item {
 
                             // After drag: apply the final offset to all selected nodes
                             onMoved: function(position) {
-                                const offset = Qt.point(position.x - node.x, position.y - node.y)
+                                // Dropped where it is displayed: below folded chapters, the display is moved up
+                                const offset = Qt.point(position.x - node.x, uigraph.unfoldY(position.y - foldShift) - node.y)
                                 uigraph.moveSelectedNodesBy(offset)
                             }
 
@@ -1265,7 +1778,43 @@ Item {
                         }
                     }
 
-                    sourceComponent: object.isBackdropNode ? backdropComponent : nodeComponent
+                    Component {
+                        id: chapterComponent
+                        ChapterLine {
+                            node: object
+                            uigraph: root.uigraph
+                            foldShift: { uigraph.foldRevision; return uigraph.foldShift(node.y) }
+                            mainSelected: uigraph.selectedNode === node
+                            hovered: uigraph.hoveredNode === node
+                            selected: uigraph.nodeSelection.hasSelection ? uigraph.nodeSelection.isRowSelected(index) : false
+
+                            onPressed: function(mouse) {
+                                nodeRepeater.ongoingDrag = true
+                                if (mouse.modifiers & Qt.ShiftModifier)
+                                    uigraph.selectNodeByIndex(index, ItemSelectionModel.Select)
+                                else if (!selected)
+                                    uigraph.selectNodeByIndex(index, ItemSelectionModel.ClearAndSelect)
+                                if (selected)
+                                    uigraph.selectedNode = node
+                                if (mouse.button === Qt.RightButton)
+                                    nodeMenuLoader.load(node)
+                            }
+                            onReleased: nodeRepeater.ongoingDrag = false
+                            onClicked: function(mouse) {
+                                if (mouse.button === Qt.LeftButton && !(mouse.modifiers & Qt.ShiftModifier))
+                                    uigraph.selectNodeByIndex(index)
+                            }
+                            onEntered: uigraph.hoveredNode = node
+                            onExited: uigraph.hoveredNode = null
+                            // A chapter line moves alone (the nodes of its section stay in place)
+                            onMoved: function(position) {
+                                uigraph.moveChapter(node, Qt.point(Math.round(position.x), Math.round(uigraph.unfoldY(position.y - foldShift))))
+                            }
+                        }
+                    }
+
+                    sourceComponent: object.nodeType === "Chapter" ? chapterComponent :
+                                     (object.isBackdropNode ? backdropComponent : nodeComponent)
 
                     onLoaded: {
                         nodeLoader.z = Qt.binding(function() { return nodeLoader.item ? nodeLoader.item.z : 0 })
@@ -1464,6 +2013,27 @@ Item {
                 ToolTip.text: "Auto-Layout"
                 onClicked: uigraph.layout.reset()
             }
+            // Add Chapter line
+            MaterialToolButton {
+                text: MaterialIcons.horizontal_rule
+                ToolTip.text: "Add Chapter Line (above the selected nodes)\nA chapter followed by another one can be folded with its arrow"
+                onClicked: {
+                    var selectedNodes = uigraph.getSelectedNodes()
+                    var position = getCenterPosition()
+                    if (selectedNodes.length > 0) {
+                        var minX = Number.MAX_VALUE
+                        var minY = Number.MAX_VALUE
+                        for (var i = 0; i < selectedNodes.length; i++) {
+                            minX = Math.min(minX, selectedNodes[i].x)
+                            minY = Math.min(minY, selectedNodes[i].y)
+                        }
+                        position = Qt.point(minX, minY - uigraph.layout.gridSpacing - 28)
+                    }
+                    var chapter = uigraph.addChapter(position)
+                    uigraph.selectedNode = chapter
+                    uigraph.selectNodes([chapter])
+                }
+            }
             // Add Backdrop
             MaterialToolButton {
                 text: MaterialIcons.sticky_note_2
@@ -1639,13 +2209,24 @@ Item {
         if (first === null) {
             return Qt.rect(0, 0, 0, 0)
         }
-        var bbox = Qt.rect(first.x, first.y, first.x + first.width, first.y + first.height)
+        // Displayed items only: hidden in folded chapters, or moved up below them (foldShift)
+        var bbox = null
         for (var i = 0; i < root.graph.nodes.count; ++i) {
             var item = nodeRepeater.getItemAt(i)
+            if (!item || !item.visible)
+                continue
+            var itemY = item.y - (item.foldShift || 0)
+            if (bbox === null) {
+                bbox = Qt.rect(item.x, itemY, item.x + item.width, itemY + item.height)
+                continue
+            }
             bbox.x = Math.min(bbox.x, item.x)
-            bbox.y = Math.min(bbox.y, item.y)
+            bbox.y = Math.min(bbox.y, itemY)
             bbox.width = Math.max(bbox.width, item.x + item.width)
-            bbox.height = Math.max(bbox.height, item.y + item.height)
+            bbox.height = Math.max(bbox.height, itemY + item.height)
+        }
+        if (bbox === null) {
+            return Qt.rect(0, 0, 0, 0)
         }
         bbox.width -= bbox.x
         bbox.height -= bbox.y

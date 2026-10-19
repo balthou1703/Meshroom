@@ -22,10 +22,13 @@ SelectionBox {
         const mappedSelectionRect = mapToItem(container, selectionRect)
         for (var i = 0; i < modelInstantiator.count; ++i) {
             const delegate = modelInstantiator.getItemAt(i)
-            if (!delegate)
+            // Nodes hidden in a folded chapter are not selected
+            if (!delegate || !delegate.visible)
                 continue
             // For backdrop nodes, only select when the selection rect intersects the titlebar.
-            const delegateRect = Qt.rect(delegate.x, delegate.y, delegate.width, delegate.isBackdropNode ? delegate.headerHeight : delegate.height)
+            // Delegates below folded chapters are drawn moved up by their foldShift.
+            const delegateRect = Qt.rect(delegate.x, delegate.y - (delegate.foldShift || 0), delegate.width,
+                                         delegate.isBackdropNode ? delegate.headerHeight : delegate.height)
             if (Geom2D.rectRectIntersect(mappedSelectionRect, delegateRect)) {
                 selectedIndices.push(i)
 

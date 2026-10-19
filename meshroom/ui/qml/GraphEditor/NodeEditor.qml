@@ -290,6 +290,37 @@ Panel {
             }
         }
 
+        // Live compositing: render time of the node and enable / disable toggle
+        Label {
+            readonly property real milliseconds: {
+                if (!node || !node.isImageOpNode || !_currentScene)
+                    return -1
+                _currentScene.live.statusRevision  // Refresh with the evaluation
+                return _currentScene.live.nodeStatus(node) === "SUCCESS" ? _currentScene.live.nodeRenderTime(node) : -1
+            }
+            visible: milliseconds >= 0
+            text: milliseconds >= 1000 ? (milliseconds / 1000).toFixed(2) + " s" : milliseconds.toFixed(0) + " ms"
+            font.italic: true
+            padding: 2
+            ToolTip.text: "Render time of this node at the current frame (inputs excluded, 0 ms: passed through)"
+            ToolTip.visible: liveTimeMA.containsMouse
+            MouseArea {
+                id: liveTimeMA
+                anchors.fill: parent
+                hoverEnabled: true
+            }
+        }
+        MaterialToolButton {
+            readonly property bool nodeDisabled: !!node && node.isImageOpNode && node.hasInternalAttribute("disable") &&
+                                                 node.internalAttribute("disable").value === true
+            visible: !!node && node.isImageOpNode && node.hasInternalAttribute("disable")
+            text: nodeDisabled ? MaterialIcons.visibility_off : MaterialIcons.visibility
+            font.pointSize: 11
+            padding: 2
+            ToolTip.text: nodeDisabled ? "Enable the node (I)" : "Disable the node: pass its first input through (I)"
+            onClicked: _currentScene.setAttribute(node.internalAttribute("disable"), !nodeDisabled)
+        }
+
         SearchBar {
             id: searchBar
             toggle: true  // Enable toggling the actual text field by the search button

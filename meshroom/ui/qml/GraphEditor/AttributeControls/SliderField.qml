@@ -9,14 +9,17 @@ RowLayout {
     required property var checked
     required property var type
     required property int length
-    required property int start
-    required property int end
-    required property int step
+    // Reals: the range of a FloatParam (e.g. a 0.01 step) must not be truncated to integers
+    required property real start
+    required property real end
+    required property real step
 	property bool editable
     signal editingFinished(bool hasExprError, var evaluatedValue, var text, var displayValue)
     signal accepted(bool hasExprError, var evaluatedValue, var text, var displayValue)
     signal destruction(bool activeFocus, bool hasExprError, var text)
     signal pressedChanged(bool pressed, var formattedValue)
+    // Emitted while the slider is dragged (for live updates)
+    signal moved(var formattedValue)
     ExpressionTextField {
         id: expressionTextField
         implicitWidth: 100
@@ -64,6 +67,7 @@ RowLayout {
             stepSize: root.step
             snapMode: Slider.SnapAlways
             onPressedChanged: root.pressedChanged(pressed, formattedValue)
+            onMoved: root.moved(formattedValue)
         }
     }
 }

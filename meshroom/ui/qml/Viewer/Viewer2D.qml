@@ -1919,6 +1919,8 @@ FocusScope {
         id: rFilterAction
 
         shortcut: "R"
+        // Inactive while the viewer is hidden (e.g. in the compositing workspace, whose viewer has the same keys)
+        enabled: root.visible
         onTriggered: {
             hdrImageToolbar.toggleChannel("r", "rgba")
         }
@@ -1928,6 +1930,8 @@ FocusScope {
         id: gFilterAction
 
         shortcut: "G"
+        // Inactive while the viewer is hidden (e.g. in the compositing workspace, whose viewer has the same keys)
+        enabled: root.visible
         onTriggered: {
             hdrImageToolbar.toggleChannel("g", "rgba")
         }
@@ -1937,6 +1941,8 @@ FocusScope {
         id: bFilterAction
 
         shortcut: "B"
+        // Inactive while the viewer is hidden (e.g. in the compositing workspace, whose viewer has the same keys)
+        enabled: root.visible
         onTriggered: {
             hdrImageToolbar.toggleChannel("b", "rgba")
         }
@@ -1946,6 +1952,8 @@ FocusScope {
         id: aFilterAction
 
         shortcut: "A"
+        // Inactive while the viewer is hidden (e.g. in the compositing workspace, whose viewer has the same keys)
+        enabled: root.visible
         onTriggered: {
             hdrImageToolbar.toggleChannel("a", "rgba")
         }
@@ -1956,6 +1964,8 @@ FocusScope {
         id: metadataAction
 
         shortcut: "I"
+        // Inactive while the viewer is hidden (e.g. in the compositing workspace, whose viewer has the same keys)
+        enabled: root.visible
         onTriggered: {
             metadataCB.checked = !metadataCB.checked
         }
@@ -1966,6 +1976,8 @@ FocusScope {
         id: switchSourceAction
 
         shortcut: "S"
+        // Inactive while the viewer is hidden (e.g. in the compositing workspace, whose viewer has the same keys)
+        enabled: root.visible
         onTriggered: {
             if (outputAttribute.name === "gallery") {
                 outputAttribute.setName(outputAttribute.lastOutputName)
