@@ -73,7 +73,7 @@ if platform.system() == "Linux":
 
 build_exe_options = {
     # include dynamically loaded plugins
-    "packages": ["meshroom.nodes", "meshroom.submitters"],
+    "packages": ["meshroom.nodes", "meshroom.submitters", "meshroom.live"],
     "includes": [
         "timeit",
         "pickletools",
