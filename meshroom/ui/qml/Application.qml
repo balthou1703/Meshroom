@@ -23,7 +23,7 @@ Page {
 
     readonly property var scenefile: _currentScene ? _currentScene.graph.filepath : "";
     // Live compositing workspace: viewer of the evaluated node instead of the photogrammetry viewers
-    readonly property bool compositingMode: _currentScene ? _currentScene.graph.workspaceMode === "compositing" : false
+    readonly property bool compositingMode: _currentScene ? _currentScene.workspaceMode === "compositing" : false
 
     onScenefileChanged: {
         // Check if we are not currently saving and emit the currentProjectChanged signal

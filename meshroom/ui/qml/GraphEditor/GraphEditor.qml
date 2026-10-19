@@ -243,7 +243,7 @@ Item {
     HoverHandler {
         id: graphHover
     }
-    readonly property bool compositingShortcuts: graphHover.hovered && !!uigraph && uigraph.graph.workspaceMode === "compositing"
+    readonly property bool compositingShortcuts: graphHover.hovered && !!uigraph && uigraph.workspaceMode === "compositing"
     Shortcut {
         // Live compositing: disable / enable the selected nodes
         sequence: "I"
@@ -532,7 +532,7 @@ Item {
                     // Compositing: a node created while another one is selected comes after it (connected, on its right),
                     // so that nodes created one after the other are chained (as in Nuke)
                     var previous = uigraph.nodeSelection.hasSelection && uigraph.selectedNode && uigraph.selectedNode.isImageOpNode &&
-                                   root.nodeTypesModel[nodeType] && uigraph.graph.workspaceMode === "compositing" ? uigraph.selectedNode : null
+                                   root.nodeTypesModel[nodeType] && uigraph.workspaceMode === "compositing" ? uigraph.selectedNode : null
                     var node = root.pendingSource ? uigraph.addNewNodeConnectedTo(nodeType, spawnPosition, root.pendingSource)
                              : previous ? uigraph.addNewNodeAfter(nodeType, previous)
                              : uigraph.addNewNode(nodeType, spawnPosition)
@@ -798,6 +798,18 @@ Item {
                     }
 
                     MaterialToolButton {
+                        font.pointSize: 13
+                        ToolTip.text: "Disconnect and Bake: keep the value received by the input (animated: as keys, over the frame range)"
+                        visible: !!edgeMenu.currentEdge && !edgeMenu.forLoop
+                        enabled: !!edgeMenu.currentEdge && uigraph.canBakeEdge(edgeMenu.currentEdge)
+                        text: MaterialIcons.link_off
+                        onClicked: {
+                            uigraph.disconnectAndBake(edgeMenu.currentEdge)
+                            edgeMenu.close()
+                        }
+                    }
+
+                    MaterialToolButton {
                         id: expandButton
 
                         property bool canExpand: edgeMenu.currentEdge && edgeMenu.forLoop
@@ -1051,7 +1063,18 @@ Item {
                     loopSize: forLoop ? loopSource.value.count : 0
 
                     iteration: forLoop ? loopSource.value.indexOf(edge.src) : 0
-                    color: edge.dst === root.edgeAboutToBeRemoved ? "red" : edgeSelected ? "#F5A623" : inFocus ? activePalette.highlight : activePalette.text
+                    // Camera, geo and matrix streams of the compositing nodes have their own color
+                    readonly property color streamColor: {
+                        var streamType = edge && edge.dst && edge.dst.isStream ? edge.dst.streamType : ""
+                        if (streamType === "camera")
+                            return "#E3B341"
+                        if (streamType === "geo")
+                            return "#59C27A"
+                        if (streamType === "matrix")
+                            return "#B48EE0"
+                        return activePalette.text
+                    }
+                    color: edge.dst === root.edgeAboutToBeRemoved ? "red" : edgeSelected ? "#F5A623" : inFocus ? activePalette.highlight : streamColor
                     thickness: {
                         if (forLoop) {
                             return (inFocus) ? 4 : 3
@@ -1213,6 +1236,8 @@ Item {
                         id: evaluateMenuItem
                         text: "Evaluate"
                         visible: nodeMenu.currentNode.isImageOpNode || nodeMenu.currentNode.nodeType === "SubGraph"
+                        // A node without image output (Camera, ReadGeo...) cannot be displayed
+                        enabled: uigraph.live.canEvaluate(nodeMenu.currentNode)
                         height: visible ? implicitHeight : 0
                         ToolTip.text: "Compute the branch of this node in memory and display the result: view 1 (E)"
                         ToolTip.visible: hovered
@@ -1222,6 +1247,7 @@ Item {
                     MenuItem {
                         text: "Evaluate Compare"
                         visible: nodeMenu.currentNode.isImageOpNode || nodeMenu.currentNode.nodeType === "SubGraph"
+                        enabled: uigraph.live.canEvaluate(nodeMenu.currentNode)
                         height: visible ? implicitHeight : 0
                         ToolTip.text: "Display this node as view 2: keys 1 / 2 switch between Evaluate and Evaluate Compare (before / after)"
                         ToolTip.visible: hovered

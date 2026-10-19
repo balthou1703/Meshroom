@@ -560,8 +560,9 @@ RowLayout {
         id: inputField
 
         sourceComponent: {
-            // PushButtonParam, Flow and Image (compositing) always have value == undefined: exclude them from this check
-            if (attribute.type != "PushButtonParam" && attribute.type != "Flow" && attribute.type != "Image" &&
+            // PushButtonParam, Flow and the streams of the compositing nodes (Image, Camera, Geo, Matrix) always have
+            // value == undefined: exclude them from this check
+            if (attribute.type != "PushButtonParam" && attribute.type != "Flow" && !attribute.isStream &&
                 !attribute.keyable && attribute.value === undefined) {
                 return notComputedComponent
             }
@@ -605,11 +606,15 @@ RowLayout {
                     return colorComponent
                 case "Flow":
                 case "Image":
+                case "Camera":
+                case "Geo":
+                case "Matrix":
                     return flowComponent
                 case "File":
                     if (attribute.desc.semantic === "imageSequence" && !attribute.isOutput)
                         return sequenceFieldComponent
-                    if (attribute.desc.semantic.startsWith("saveFile") && !attribute.isOutput && !attribute.isLink)
+                    if ((attribute.desc.semantic.startsWith("saveFile") || attribute.desc.semantic.startsWith("openFile")) &&
+                        !attribute.isOutput && !attribute.isLink)
                         return saveFileComponent
                     return textFieldComponent
                 default:
@@ -711,7 +716,7 @@ RowLayout {
         }
 
         // File written by a node (e.g. the USD exports of a CameraTracker): text field and a "save as" dialog;
-        // "saveFile:Name (*.ext)" gives the name filter
+        // "saveFile:Name (*.ext)" gives the name filter. "openFile:Name (*.ext)": a file read by the node (open dialog)
         Component {
             id: saveFileComponent
             RowLayout {
@@ -721,20 +726,21 @@ RowLayout {
                     text: attribute.value
                     readOnly: !root.editable
                     selectByMouse: true
-                    placeholderText: "Path of the file to write"
+                    readonly property bool opening: attribute.desc.semantic.startsWith("openFile")
+                    placeholderText: opening ? "Path of the file to read" : "Path of the file to write"
                     onEditingFinished: setTextFieldAttribute(text.trim())
                 }
                 MaterialToolButton {
                     text: MaterialIcons.folder
                     enabled: root.editable
                     font.pointSize: 11
-                    ToolTip.text: "Choose where to write the file"
+                    ToolTip.text: attribute.desc.semantic.startsWith("openFile") ? "Choose the file" : "Choose where to write the file"
                     onClicked: saveFileDialog.open()
                 }
                 FileDialog {
                     id: saveFileDialog
-                    title: "Save " + attribute.label
-                    fileMode: FileDialog.SaveFile
+                    title: (attribute.desc.semantic.startsWith("openFile") ? "Open " : "Save ") + attribute.label
+                    fileMode: attribute.desc.semantic.startsWith("openFile") ? FileDialog.OpenFile : FileDialog.SaveFile
                     readonly property string filter: attribute.desc.semantic.indexOf(":") >= 0
                                                      ? attribute.desc.semantic.split(":").slice(1).join(":") : ""
                     nameFilters: filter ? [filter, "All files (*)"] : ["All files (*)"]

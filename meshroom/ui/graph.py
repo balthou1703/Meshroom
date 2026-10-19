@@ -498,6 +498,7 @@ class UIGraph(QObject):
         self._graph.updated.connect(self.onGraphUpdated)
         self._graph.statusUpdated.connect(self.updateChunkMonitor)
         self._graph.frameRangeChanged.connect(self._onFrameRangeChanged)
+        self._graph.workspaceModeChanged.connect(self.workspaceModeChanged)
         self._live.setGraph(self._graph)
         self._rangeSourceUid = None
         self._updateFrameRange()
@@ -528,6 +529,7 @@ class UIGraph(QObject):
         self._copiedPin = None
         self.copiedAttributeChanged.emit()
         self.graphChanged.emit()
+        self.workspaceModeChanged.emit()
 
     # Subgraphs
 
@@ -551,6 +553,9 @@ class UIGraph(QObject):
         self._nodeSelection.setModel(self._graph.nodes)
         # The Run Live statuses are those of the nodes of the graph shown before
         self._setLiveNodeStatuses({})
+        # The viewer evaluates the nodes of the graph shown (its cache is kept)
+        self._live.showGraph(self._graph)
+        self._rangeSourceUid = None
         self.graphChanged.emit()
         self.subGraphChanged.emit()
 
@@ -1705,6 +1710,46 @@ class UIGraph(QObject):
                 return
             self.push(commands.RemoveEdgeCommand(self._graph, edge))
 
+    # Disconnect and Bake (edge menu): the value the input received stays, as keys when it changes over time
+
+    @Slot(Edge, result=bool)
+    def canBakeEdge(self, edge) -> bool:
+        """ Whether "Disconnect and Bake" applies to an edge: a parameter, or a stream its node turns into parameters. """
+        from meshroom.live import bake
+        return edge is not None and not edge.dst.node.locked and not edge.dst.isReadOnly and bake.canBake(edge.dst)
+
+    def _bakeFrames(self) -> list:
+        """ The frames baked: the frame range of the timeline, or the current frame. """
+        live = self._live
+        if live.hasFrameRange and live.lastFrame >= live.firstFrame:
+            return list(range(int(live.firstFrame), int(live.lastFrame) + 1))
+        return [int(live.currentFrame)]
+
+    @Slot(Edge)
+    def disconnectAndBake(self, edge):
+        """
+        Remove an edge, keeping in its input the value it received: the value at the current frame, or keys when it
+        changes over time (an animated parameter, or a camera / matrix stream turned into the parameters of the node,
+        over the frame range of the timeline: see meshroom/live/bake.py). Undoable.
+        """
+        from meshroom.live import Evaluator, bake
+        if not self.canBakeEdge(edge):
+            return
+        node, frame = edge.dst.node, int(self._live.currentFrame)
+        try:
+            baked = bake.bakedValues(edge.dst, self._bakeFrames(), frame, Evaluator(cache=self._live._evaluator.cache))
+            changes, animation = bake.applyToNode(node, baked, frame)
+        except Exception as e:
+            logging.exception("Disconnect and Bake")
+            self.parent().showMessage(f"Disconnect and Bake: {getattr(e, 'message', e)}", "error")
+            return
+        with self.groupedGraphModification(f"Disconnect and Bake {edge.dst.fullName}"):
+            self.removeEdge(edge)
+            for attribute, value in changes:
+                self.push(commands.SetAttributeCommand(self._graph, attribute, value))
+            if animation is not None:
+                self.push(commands.SetAttributeCommand(self._graph, node.internalAttribute("animation"), animation))
+
     @Slot(list)
     def deleteEdgesByIndices(self, indices):
         with self.groupedGraphModification("Remove Edges"):
@@ -1753,15 +1798,25 @@ class UIGraph(QObject):
 
     # Frame range of the timeline (compositing), saved with the graph (Graph.frameRange)
 
+    @property
+    def rootGraph(self) -> Graph:
+        """ The project graph (the graph shown, or the outermost one when a subgraph is entered). """
+        return self._subGraphStack.rootGraph if len(self._subGraphStack) else self._graph
+
     def _updateFrameRange(self):
-        """ Keep the frame range of the timeline (entered by the user, or following the first Read: see meshroom/live/frameRange.py). """
+        """
+        Keep the frame range of the timeline (entered by the user, or following the first Read of the graph shown: see
+        meshroom/live/frameRange.py). It is the range of the project, saved in its header (also inside a subgraph).
+        """
         from meshroom.live.frameRange import followedFrameRange
-        value, self._rangeSourceUid = followedFrameRange(self._graph, self._live.nodeInfo, self._rangeSourceUid)
+        root = self.rootGraph
+        value, self._rangeSourceUid = followedFrameRange(self._graph, self._live.nodeInfo, self._rangeSourceUid,
+                                                         frameRange=root.frameRange)
         if value is not None:
-            self._graph.setFrameRange(value)
+            root.setFrameRange(value)
 
     def _onFrameRangeChanged(self):
-        frameRange = self._graph.frameRange
+        frameRange = self.rootGraph.frameRange
         if "first" in frameRange and "last" in frameRange:
             self._live.setProjectRange(int(frameRange["first"]), int(frameRange["last"]))
         else:
@@ -1774,17 +1829,18 @@ class UIGraph(QObject):
         first, last = int(first), int(last)
         if last < first:
             first, last = last, first
-        self.push(commands.SetFrameRangeCommand(self._graph, {"first": first, "last": last, "source": ""}))
+        self.push(commands.SetFrameRangeCommand(self.rootGraph, {"first": first, "last": last, "source": ""}))
 
     @Slot()
     def resetFrameRange(self):
         """ The frame range of the timeline follows the first Read of the graph again. Undoable. """
         from meshroom.live.frameRange import followedFrameRange
         value, self._rangeSourceUid = followedFrameRange(self._graph, self._live.nodeInfo, None, frameRange={})
-        self.push(commands.SetFrameRangeCommand(self._graph, value or {}))
+        self.push(commands.SetFrameRangeCommand(self.rootGraph, value or {}))
 
     frameRangeChanged = Signal()
-    frameRangeIsUser = Property(bool, lambda self: bool(self._graph.frameRange) and self._graph.frameRange.get("source", "") == "",
+    frameRangeIsUser = Property(bool, lambda self: bool(self.rootGraph.frameRange) and
+                                self.rootGraph.frameRange.get("source", "") == "",
                                 notify=frameRangeChanged)
 
     # Animation of the parameters of compositing nodes (keys per frame, see meshroom/live/animation.py)
@@ -2494,9 +2550,45 @@ class UIGraph(QObject):
 
     @Slot(str)
     def setWorkspaceMode(self, mode: str):
-        """ Switch the workspace of the graph (e.g. "compositing", "" for the default one). Undoable. """
-        if mode != self._graph.workspaceMode:
-            self.push(commands.SetWorkspaceModeCommand(self._graph, mode))
+        """
+        Switch the workspace of the project (e.g. "compositing", "" for the default one). Undoable. In the compositing
+        workspace, the compositing is done in a SubGraph node (see ensureCompositingSubGraph).
+        """
+        if mode != self.rootGraph.workspaceMode:
+            self.push(commands.SetWorkspaceModeCommand(self.rootGraph, mode))
+        if mode == "compositing":
+            self.ensureCompositingSubGraph()
+
+    @Slot()
+    def ensureCompositingSubGraph(self):
+        """
+        In the compositing workspace, the project graph shows the compositing in a SubGraph node: the first one meant
+        for compositing is entered, or a new one ("compositing_1") is created and entered. A project with compositing
+        nodes in its own graph (made before) is left as it is, as well as a subgraph already entered.
+        """
+        from meshroom.core.subgraph import editing
+        if len(self._subGraphStack) or self.isComputingLocally():
+            return
+        graph = self._graph
+        existing = editing.compositingSubGraphs(graph)
+        if not existing:
+            if any(getattr(node, "isImageOpNode", False) for node in graph.nodes):
+                return
+            bbox = self._layout.boundingBox() if len(graph.nodes) else [0, 0, 0, 0]
+            position = Position(bbox[0], bbox[1] + bbox[3] + (100 if len(graph.nodes) else 0))
+            name = editing.newCompositingLabel(graph)
+            with self.groupedGraphModification("Create Compositing SubGraph"):
+                node = self.addNewNode("SubGraph", position=position)
+                # Named and labelled "compositing_1"
+                if graph.node(name) is None:
+                    self.push(commands.RenameNodeCommand(self._graph, node, name))
+                self.setAttribute(node.internalAttribute("label"), name)
+            existing = [node]
+        self.enterSubGraph(existing[0])
+
+    workspaceModeChanged = Signal()
+    # The workspace of the project (also when a subgraph is entered)
+    workspaceMode = Property(str, lambda self: self.rootGraph.workspaceMode, notify=workspaceModeChanged)
 
     @Slot(Attribute)
     def resetAttribute(self, attribute):
@@ -2884,7 +2976,9 @@ class UIGraph(QObject):
 
     subGraphChanged = Signal()
     # Names of the entered SubGraph nodes, from the project graph
-    subGraphPath = Property("QVariantList", lambda self: self._subGraphStack.names(), notify=subGraphChanged)
+    # Labels of the entered SubGraph nodes (their names without label), from the outermost one
+    subGraphPath = Property("QVariantList", lambda self: [level.node.label for level in self._subGraphStack.levels],
+                            notify=subGraphChanged)
     isInSubGraph = Property(bool, lambda self: len(self._subGraphStack) > 0, notify=subGraphChanged)
     liveRunDone = Signal(str, bool)
     liveNodeEvent = Signal(str, str, str)

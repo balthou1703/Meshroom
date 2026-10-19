@@ -317,6 +317,33 @@ class LiveController(QObject):
         if graph is not None:
             graph.updated.connect(self._onGraphUpdated)
 
+    def showGraph(self, graph):
+        """
+        Follow another graph of the same project (entering / leaving a subgraph): the cache is kept, the
+        evaluation of a node of the previous graph stops.
+        """
+        if graph is self._graph:
+            return
+        if self._graph is not None:
+            try:
+                self._graph.updated.disconnect(self._onGraphUpdated)
+            except (RuntimeError, TypeError):
+                pass
+        self._graph = graph
+        self._setPickAttribute(None)
+        self.stopTracking()
+        self.stopAction()
+        self._operationGeneration += 1
+        self._resetOperations()
+        self.clear()
+        self._mainNode = None
+        if self._compareNode is not None:
+            self._compareNode = None
+            self.compareNodeChanged.emit()
+        self._setActiveView(1)
+        if graph is not None:
+            graph.updated.connect(self._onGraphUpdated)
+
     def _onGraphUpdated(self):
         self._checkPickAttribute()
         node = self._evaluatedNode
@@ -416,6 +443,11 @@ class LiveController(QObject):
             self._branchUids = set()
 
     # Evaluation
+
+    @Slot(QObject, result=bool)
+    def canEvaluate(self, node) -> bool:
+        """ Whether a node gives an image to evaluate (not a Camera, a ReadGeo...). """
+        return node is not None and isEvaluable(node)
 
     @Slot(QObject)
     def evaluate(self, node):
@@ -1458,6 +1490,45 @@ class LiveController(QObject):
         qimage = QImage(canvas.data, size, size, size * 4, QImage.Format.Format_RGBA8888).copy()
         self._imageProvider.setPatch(key, qimage)
         return "image://live/patch/" + key
+
+    # Resection (meshroom/nodes/compositing/ThreeDNodes.py): pins put on the geometry in the viewer
+
+    def _resectionContext(self, node):
+        """ A render context of a Resection node at the current frame (full resolution), or None. """
+        from meshroom.live.evaluator import RenderContext
+        if node is None or not isImageOpNode(node) or not hasattr(node.nodeDesc, "pickPoint"):
+            return None
+        plan = buildPlan(node)
+        return RenderContext(plan.targetNode, self._currentFrame, self._evaluator, plan)
+
+    @Slot(QObject, float, float, result="QVariantList")
+    def pickGeometryPoint(self, node, x, y):
+        """
+        The point [x, y, z] of the geometry of a Resection under the image position (x, y) (Nuke pixels of the
+        plate), seen from its solved camera at the current frame; [] if no geometry there.
+        """
+        try:
+            ctx = self._resectionContext(node)
+            point = node.nodeDesc.pickPoint(ctx, float(x), float(y)) if ctx is not None else None
+        except (EvaluationError, RuntimeError) as e:
+            self._setError(f"Add pin: {getattr(e, 'message', e)}", node.name)
+            return []
+        return [round(float(v), 6) for v in point] if point is not None else []
+
+    @Slot(QObject, result=str)
+    def resectionSummary(self, node):
+        """ Pins used at the current frame and their reprojection error, for the toolbar of the viewer. """
+        try:
+            ctx = self._resectionContext(node)
+            if ctx is None:
+                return ""
+            info = ctx.inputInfo("input")
+            count = len(node.nodeDesc._pinsAt(node.nodeDesc.pins(ctx, info), self._currentFrame)[0])
+            if not count:
+                return "no pin at this frame"
+            return f"{count} pin{'s' if count > 1 else ''}, error {node.nodeDesc.reprojectionError(ctx):.2f} px"
+        except Exception as e:
+            return str(getattr(e, "message", e))
 
     def _inputImageAt(self, node, frame):
         """ The cached image entering the "input" of `node` at a frame, or None. """

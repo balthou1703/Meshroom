@@ -962,6 +962,11 @@ Item {
                                         attribute: modelData
                                         expanded: Boolean(modelData.expanded)
 
+                                        // A stream output not exposed (e.g. the "matrix" of the compositing nodes):
+                                        // shown when the node is expanded, or when it is connected
+                                        collapsed: Boolean(modelData.isStream) && !modelData.desc.exposed &&
+                                                   !m.displayParams && !modelData.hasAnyOutputLinks
+
                                         property real globalX: root.x + nodeAttributes.x + outputs.x + outputLoader.x + outPin.x
                                         property real globalY: root.y - root.foldShift + nodeAttributes.y + outputs.y + outputLoader.y + outPin.y
 

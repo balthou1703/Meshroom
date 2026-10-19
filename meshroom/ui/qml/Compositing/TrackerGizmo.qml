@@ -34,6 +34,9 @@ Item {
 
     // Tracks shown but not edited (CameraTracker: the autotrack)
     property bool readOnly: false
+    // Pins of a Resection: tracks stuck to a point of its geometry ("point"), added by clicking on the geometry
+    readonly property bool pinMode: !!node && node.nodeType === "Resection"
+    readonly property string itemName: pinMode ? "pin" : "track"
     property bool adding: false
     property var selectedNames: []
     // Color the paths by the match score of the tracked frames
@@ -261,19 +264,29 @@ Item {
             }
             var x = root.nukeX(mouse.x), y = root.nukeY(mouse.y)
             if (root.adding) {
+                var point = null
+                if (root.pinMode) {
+                    // The point of the geometry under the click, seen from the solved camera
+                    point = root.live.pickGeometryPoint(root.node, x, y)
+                    if (point.length !== 3)
+                        return  // Not on the geometry: still adding
+                }
                 var count = 1
                 var names = root.tracks.map(function(t) { return t.name })
-                while (names.indexOf("track" + count) >= 0)
+                while (names.indexOf(root.itemName + count) >= 0)
                     count++
                 var keys = {}
                 keys[String(root.frame)] = [x, y]
                 var newTracks = root.copy(root.rawTracks)
                 // Tracked in the format of the displayed image (keys scaled when used on another resolution)
-                newTracks.push({ "name": "track" + count, "enabled": true, "pattern": 21, "search": 61, "keys": keys,
-                                 "keyframes": [root.frame], "format": [root.formatWidth, root.formatHeight] })
+                var newTrack = { "name": root.itemName + count, "enabled": true, "pattern": 21, "search": 61, "keys": keys,
+                                 "keyframes": [root.frame], "format": [root.formatWidth, root.formatHeight] }
+                if (point)
+                    newTrack["point"] = point
+                newTracks.push(newTrack)
                 root.begin()
                 root.apply(newTracks)
-                root.selectedNames = ["track" + count]
+                root.selectedNames = [root.itemName + count]
                 dragged = newTracks.length - 1
                 startMouse = Qt.point(mouse.x, mouse.y)
                 startPosition = [x, y]
@@ -440,14 +453,15 @@ Item {
             anchors.centerIn: parent
             spacing: 2
 
-            Label { text: "Tracker"; font.bold: true; leftPadding: 4; rightPadding: 6 }
+            Label { text: root.pinMode ? "Resection" : "Tracker"; font.bold: true; leftPadding: 4; rightPadding: 6 }
             MaterialToolButton {
                 font.pointSize: 16
                 text: MaterialIcons.add_location_alt
                 checked: root.adding
                 enabled: !root.tracking
                 onClicked: root.adding = !root.adding
-                ToolTip.text: "Add a track: click on a feature to track"
+                ToolTip.text: root.pinMode ? "Add a pin: click on the geometry, then drag the pin onto its place in the plate"
+                                           : "Add a track: click on a feature to track"
             }
             MaterialToolButton {
                 font.pointSize: 16
@@ -489,7 +503,7 @@ Item {
                 text: MaterialIcons.delete_outline
                 enabled: !root.tracking && root.selectedNames.length > 0
                 onClicked: root.deleteSelection()
-                ToolTip.text: "Delete the selected tracks (Delete)"
+                ToolTip.text: root.pinMode ? "Delete the selected pins (Delete)" : "Delete the selected tracks (Delete)"
             }
             MaterialToolButton {
                 font.pointSize: 16
@@ -498,9 +512,24 @@ Item {
                 onClicked: root.showError = !root.showError
                 ToolTip.text: "Error: color the paths by match quality (green: good, red: poor)"
             }
+            // Pins of the Resection at this frame and their reprojection error
+            Label {
+                visible: root.pinMode
+                leftPadding: 6
+                rightPadding: 4
+                text: {
+                    if (!root.pinMode || !root.live)
+                        return ""
+                    root.live.statusRevision  // Refreshed with the renders
+                    root.frame
+                    root.tracks
+                    return root.live.resectionSummary(root.node)
+                }
+            }
             MaterialToolButton {
                 font.pointSize: 16
                 text: MaterialIcons.crop_free
+                visible: !root.pinMode
                 enabled: !root.tracking && root.selectedNames.length === 4
                 onClicked: _currentScene.createCornerPinFromTracks(root.node, root.selectedNames, root.frame)
                 ToolTip.text: "Create a CornerPin driven by the 4 selected tracks (reference: the current frame)"

@@ -527,6 +527,12 @@ class Scene(UIGraph):
         logging.info(f"Load project file: '{filepath}'")
         try:
             loadFunction(filepath)
+            if self.workspaceMode == "compositing":
+                # The compositing is shown in its SubGraph node
+                try:
+                    self.ensureCompositingSubGraph()
+                except Exception:
+                    logging.exception("Cannot enter the compositing subgraph")
             # warn about pre-release projects being automatically upgraded
             if Version(self._graph.fileReleaseVersion).major == "0":
                 self.warning.emit(Message(
@@ -871,12 +877,15 @@ class Scene(UIGraph):
             bbox = self.layout.boundingBox() if self.nodes else [0, 0, 0, 0]
             position = QPoint(int(bbox[0]), int(bbox[1] + bbox[3] + 200))
         data = json.dumps(temporary.serializePartial(list(temporary.nodes)))
+        if self.workspaceMode != "compositing":
+            # The compositing workspace (and its compositing subgraph, where the nodes are added)
+            self.setWorkspaceMode("compositing")
+            bbox = self.layout.boundingBox() if self.nodes else [0, 0, 0, 0]
+            position = QPoint(int(bbox[0]), int(bbox[1] + bbox[3] + 200))
         with self.groupedGraphModification(f"Import Nuke Script {os.path.basename(path)}"):
-            if self._graph.workspaceMode != "compositing":
-                self.setWorkspaceMode("compositing")
             nodes = self.pasteNodes(data, position)
             frameRange = nuke.rootFrameRange(root)
-            if frameRange and self._graph.frameRange.get("source", None) != "":
+            if frameRange and self.rootGraph.frameRange.get("source", None) != "":
                 self.setFrameRange(*frameRange)
         details = "\n".join(report) if report else "Every node was imported."
         self.info.emit(Message("Nuke Script Import",

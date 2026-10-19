@@ -174,7 +174,10 @@ RowLayout {
     objectName: attribute ? attribute.name + "." : ""
     layoutDirection: Qt.LeftToRight
     spacing: 3
-    height: attribute && attribute.isOutput ? outputAnchor.height : inputAnchor.height
+    // Collapsed: no pin (e.g. an output shown only when the node is expanded)
+    property bool collapsed: false
+    height: collapsed ? 0 : (attribute && attribute.isOutput ? outputAnchor.height : inputAnchor.height)
+    visible: !collapsed
 
     function getCurrentAttributePinColor(hasChildrenConnected) {
         if (root.isDynamic) {

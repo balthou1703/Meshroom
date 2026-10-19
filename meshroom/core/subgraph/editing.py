@@ -345,3 +345,45 @@ def collapseIntoSubGraph(graph: Graph, nodes, position=None):
     for portName, dst in outgoing:
         graph.addEdge(subGraphNode.outs.value.get(portName), dst)
     return subGraphNode, snapshot
+
+
+# Compositing workspace: the compositing is done in SubGraph nodes ("compositing_1"...)
+
+COMPOSITING_LABEL = "compositing"
+
+
+def compositingSubGraphs(graph) -> list:
+    """
+    The SubGraph nodes of a graph meant for compositing, sorted by label: labelled "compositing...", or holding
+    compositing nodes (desc.ImageOpNode).
+    """
+    from meshroom.core import desc, pluginManager
+    from meshroom.core.subgraph.executor import readGraphData
+    from meshroom.core.subgraph.nodes import nodeGraphSource
+    result = []
+    for node in graph.nodes:
+        if not isSubGraphNode(node):
+            continue
+        if node.label.lower().startswith(COMPOSITING_LABEL) or node.name.lower().startswith(COMPOSITING_LABEL):
+            result.append(node)
+            continue
+        try:
+            source = nodeGraphSource(node)
+            data = readGraphData(source) if source is not None else {}
+        except Exception:
+            continue
+        nodes = data.get("graph", data) if isinstance(data, dict) else {}
+        nodeTypes = {nodeData.get("nodeType") for nodeData in nodes.values() if isinstance(nodeData, dict)}
+        providers = [pluginManager.getNodeDescProvider(nodeType) for nodeType in nodeTypes if nodeType]
+        if any(provider is not None and issubclass(provider.nodeDescClass, desc.ImageOpNode) for provider in providers):
+            result.append(node)
+    return sorted(result, key=lambda node: node.label)
+
+
+def newCompositingLabel(graph) -> str:
+    """ The label of a new compositing SubGraph node: "compositing_1", or the next free number. """
+    labels = {node.label for node in graph.nodes} | {node.name for node in graph.nodes}
+    index = 1
+    while f"{COMPOSITING_LABEL}_{index}" in labels:
+        index += 1
+    return f"{COMPOSITING_LABEL}_{index}"
