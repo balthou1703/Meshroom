@@ -195,6 +195,151 @@ def _batchDependencyError(node) -> Optional[str]:
     return None
 
 
+# Subgraphs: a SubGraph node containing compositing nodes is evaluated through its subgraph, as if its
+# nodes were in the graph (each one keeps its own cache); the nodes inside an entered subgraph reach the
+# nodes connected to the SubGraph node through its GraphInput.
+
+class _Scope:
+    """
+    Where a node of a plan is: the project graph (subGraphNode None), or the subgraph of `subGraphNode`.
+    `prefix` makes the names of its nodes unique in the plan ("" for the graph of the evaluated node).
+    """
+
+    def __init__(self, subGraphNode=None, parent: Optional["_Scope"] = None, prefix: str = ""):
+        self.subGraphNode = subGraphNode
+        self.parent = parent
+        self.prefix = prefix
+        # Values outside of the nodes that their result depends on: the SubGraph nodes they are in
+        self.signature = ""
+        if subGraphNode is not None:
+            # The values of its inputs are not all in its uid (the children of an AnySet)
+            from meshroom.core.subgraph.executor import plainValue
+            values = json.dumps(plainValue(subGraphNode.attribute("ins")), sort_keys=True, default=str)
+            self.signature = hashlib.sha1(f"{subGraphNode._uid}|{values}|{parent.signature if parent else ''}"
+                                          .encode()).hexdigest()[:12]
+
+    def child(self, subGraphNode) -> "_Scope":
+        return _Scope(subGraphNode, self, f"{self.prefix}{subGraphNode.name}/")
+
+
+def _scopeOf(graph, prefix: str = "") -> _Scope:
+    """ The scope of the nodes of a graph: an entered subgraph knows the SubGraph node running it. """
+    subGraphNode = getattr(graph, "subGraphNode", None)
+    if subGraphNode is None:
+        return _Scope(None, None, prefix)
+    return _Scope(subGraphNode, _scopeOf(subGraphNode.graph, prefix + "../"), prefix)
+
+
+_INNER_GRAPHS: "OrderedDict[tuple, object]" = OrderedDict()
+
+
+def _innerGraph(subGraphNode):
+    """ The Graph of the subgraph of a SubGraph node (built once per content, a few kept). """
+    from meshroom.core.subgraph.editing import buildSubGraph
+    content = subGraphNode.subGraph.value or subGraphNode.template.value
+    key = (subGraphNode.name, hashlib.sha1(str(content).encode()).hexdigest())
+    graph = _INNER_GRAPHS.get(key)
+    if graph is None:
+        graph = buildSubGraph(subGraphNode)
+        _INNER_GRAPHS[key] = graph
+        while len(_INNER_GRAPHS) > 16:
+            _INNER_GRAPHS.popitem(last=False)
+    _INNER_GRAPHS.move_to_end(key)
+    return graph
+
+
+def _isSubGraphNode(node) -> bool:
+    return getattr(node, "nodeType", "") == "SubGraph" and node.hasAttribute("outs")
+
+
+def _subGraphRole(node) -> str:
+    return getattr(getattr(node, "nodeDesc", None), "subGraphRole", "")
+
+
+def _portPath(attribute) -> list:
+    """ ["port", "child"...] of an attribute under the "ports" of a GraphInput / GraphOutput node ([] if not). """
+    path = attribute.fullName.split(".")[1:]
+    return path[1:] if len(path) > 1 and path[0] == "ports" else []
+
+
+def _child(attribute, path: list):
+    """ The child of an attribute at a path of names (None if missing). """
+    for name in path:
+        value = attribute.value
+        attribute = value.get(name) if hasattr(value, "get") and name in value.keys() else None
+        if attribute is None:
+            return None
+    return attribute
+
+
+def _resolveImageSource(attr, scope: _Scope):
+    """
+    The compositing node (and its scope) whose image an image input `attr` of a node of `scope` reads:
+    through the GraphInput of the subgraph (the input of the SubGraph node) and through the SubGraph nodes
+    (the node connected to the port of their GraphOutput). (None, None) if not connected to one.
+    """
+    for _ in range(64):
+        if attr is None or not attr.isLink:
+            return None, None
+        source = attr.inputRootLink
+        node = source.node
+        if _subGraphRole(node) == "input" and scope.subGraphNode is not None:
+            # An input of the subgraph: what is connected to the SubGraph node, in the parent scope
+            path = _portPath(source)
+            attr = _child(scope.subGraphNode.attribute("ins"), path) if path else None
+            scope = scope.parent
+            continue
+        if _isSubGraphNode(node):
+            # An output of a SubGraph node: the node connected to that port of its GraphOutput
+            path = source.fullName.split(".")[2:] if source.fullName.split(".")[1:2] == ["outs"] else []
+            inner = _innerGraph(node)
+            graphOutput = next((n for n in inner.nodes if _subGraphRole(n) == "output"), None)
+            attr = _child(graphOutput.attribute("ports"), path) if graphOutput is not None and path else None
+            scope = scope.child(node)
+            continue
+        if isImageOpNode(node):
+            return node, scope
+        return None, None
+    return None, None
+
+
+def _subGraphImageSource(subGraphNode):
+    """ (compositing node, scope) giving the first image output of a SubGraph node, (None, None) if none. """
+    from meshroom.core import desc
+    scope = _scopeOf(subGraphNode.graph)
+    for port in subGraphNode.attribute("outs").value:
+        if not isinstance(port.desc, desc.Image):
+            continue
+        inner = _innerGraph(subGraphNode)
+        graphOutput = next((n for n in inner.nodes if _subGraphRole(n) == "output"), None)
+        attr = _child(graphOutput.attribute("ports"), [port.name]) if graphOutput is not None else None
+        source, sourceScope = _resolveImageSource(attr, scope.child(subGraphNode))
+        if source is not None:
+            return source, sourceScope
+    return None, None
+
+
+def isEvaluable(node) -> bool:
+    """ Whether a node can be evaluated live: a compositing node, or a SubGraph node giving an image. """
+    if isImageOpNode(node):
+        return True
+    try:
+        return _isSubGraphNode(node) and _subGraphImageSource(node)[0] is not None
+    except Exception:
+        return False
+
+
+def _valueInScope(attr, scope: _Scope):
+    """ The value of a parameter; connected to the GraphInput of a subgraph: the value of the SubGraph input. """
+    while attr.isLink and scope.subGraphNode is not None and _subGraphRole(attr.inputRootLink.node) == "input":
+        path = _portPath(attr.inputRootLink)
+        outer = _child(scope.subGraphNode.attribute("ins"), path) if path else None
+        if outer is None:
+            break
+        attr, scope = outer, scope.parent
+    return _snapshotValue(attr)
+
+
 def proxyKey(uid: str, proxy: float = 1.0) -> str:
     """ The key of a node in a plan rendered at a proxy scale (its uid at full resolution). """
     return uid if proxy == 1.0 else f"{uid}@proxy{proxy:g}"
@@ -211,8 +356,12 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
                and the nodes are keyed by `proxyKey` (their images are cached apart from the full ones).
     """
     from meshroom.core import desc
+    target = node, _scopeOf(node.graph)
     if not isImageOpNode(node):
-        raise ValueError(f"'{node.name}' is not a live compositing node.")
+        # A SubGraph node: the compositing node giving its first image output
+        target = _subGraphImageSource(node) if _isSubGraphNode(node) else (None, None)
+        if target[0] is None:
+            raise ValueError(f"'{node.name}' is not a live compositing node.")
     nodes: Dict[str, PlanNode] = {}
     # Key of each visited node: its uid at the proxy scale, with an extra key for the nodes reading
     # values outside of their own attributes (desc.ImageOpNode.planContext, e.g. a Switch expression)
@@ -220,10 +369,11 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
     keys: Dict[str, str] = {}
     extraKeys: Dict[str, str] = {}
 
-    def visit(current):
-        if current.name in keys:
+    def visit(current, scope: _Scope):
+        name = scope.prefix + current.name
+        if name in keys:
             return
-        keys[current.name] = None  # Being visited
+        keys[name] = None  # Being visited
         inputs = OrderedDict()
         upstreamExtras = []
         optional = []
@@ -237,17 +387,19 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
                     optional.append(attr.name)
                 if attr.desc.infoOnly:
                     formatInputs.append(attr.name)
-                source = upstreamImageNode(attr)
+                source, sourceScope = _resolveImageSource(attr, scope)
                 if source is None:
                     inputs[attr.name] = None
-                elif not isImageOpNode(source):
-                    inputs[attr.name] = None
                 else:
-                    visit(source)
-                    inputs[attr.name] = keys[source.name]
-                    upstreamExtras.append(extraKeys.get(source.name, ""))
+                    visit(source, sourceScope)
+                    sourceName = sourceScope.prefix + source.name
+                    inputs[attr.name] = keys[sourceName]
+                    upstreamExtras.append(extraKeys.get(sourceName, ""))
+                    if sourceScope is not scope:
+                        # Through the boundary of a subgraph: the uid of the node does not carry the upstream one
+                        upstreamExtras.append(keys[sourceName])
                 continue
-            values[attr.name] = _snapshotValue(attr)
+            values[attr.name] = _valueInScope(attr, scope)
         disabled = current.hasInternalAttribute("disable") and bool(current.internalAttribute("disable").value)
         try:
             context = current.nodeDesc.planContext(current) if hasattr(current.nodeDesc, "planContext") else None
@@ -255,17 +407,18 @@ def buildPlan(node, proxy: float = 1.0) -> RenderPlan:
             logging.debug("[Live] planContext failed on %s:\n%s", current.name, traceback.format_exc())
             context = None
         ownExtra = json.dumps(context, sort_keys=True, default=str) if context is not None else ""
-        extras = [extra for extra in [ownExtra] + upstreamExtras if extra]
-        extraKeys[current.name] = hashlib.sha1("|".join(extras).encode()).hexdigest()[:12] if extras else ""
-        key = proxyKey(current._uid, proxy) + (f"#{extraKeys[current.name]}" if extras else "")
-        keys[current.name] = key
+        # A node in a subgraph also depends on the SubGraph node (the values of its inputs)
+        extras = [extra for extra in [ownExtra, scope.signature] + upstreamExtras if extra]
+        extraKeys[name] = hashlib.sha1("|".join(extras).encode()).hexdigest()[:12] if extras else ""
+        key = proxyKey(current._uid, proxy) + (f"#{extraKeys[name]}" if extras else "")
+        keys[name] = key
         nodes[key] = PlanNode(
-            name=current.name, uid=key, nodeDesc=current.nodeDesc, values=values,
+            name=name, uid=key, nodeDesc=current.nodeDesc, values=values,
             inputs=inputs, optionalInputs=optional, error=None if disabled else _batchDependencyError(current),
             disabled=disabled, formatInputs=formatInputs, animation=_nodeAnimation(current), context=context)
 
-    visit(node)
-    return RenderPlan(keys[node.name], nodes, proxy)
+    visit(*target)
+    return RenderPlan(keys[target[1].prefix + target[0].name], nodes, proxy)
 
 
 # Rendering

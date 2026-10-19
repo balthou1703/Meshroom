@@ -17,7 +17,8 @@ from PySide6.QtGui import QImage
 from PySide6.QtQuick import QQuickImageProvider
 
 from meshroom.live import (
-    BBox, CancelToken, EvaluationCancelled, EvaluationError, Evaluator, ImageBuffer, RGBA, buildPlan, isImageOpNode,
+    BBox, CancelToken, EvaluationCancelled, EvaluationError, Evaluator, ImageBuffer, RGBA, buildPlan, isEvaluable,
+    isImageOpNode,
 )
 from meshroom.live import color
 from meshroom.live.cache import systemMemory
@@ -378,6 +379,11 @@ class LiveController(QObject):
 
     def _key(self, node):
         """ The key of a node in the evaluator (its uid, at the proxy scale of the viewer). """
+        plan = self._plan
+        if getattr(node, "nodeType", "") == "SubGraph" and plan is not None \
+                and plan.targetNode.name.startswith(f"{node.name}/"):
+            # The evaluated SubGraph node: the compositing node giving its image
+            return plan.target
         uid = getattr(node, "_uid", None)
         if uid is None:
             return None
@@ -413,8 +419,8 @@ class LiveController(QObject):
 
     @Slot(QObject)
     def evaluate(self, node):
-        """ Display the result of `node`, computing the branch it depends on (view 1). """
-        if node is None or not isImageOpNode(node):
+        """ Display the result of `node` (a compositing node, or a SubGraph of them), computing its branch (view 1). """
+        if node is None or not isEvaluable(node):
             return
         # Re-read the file information (frame ranges) on explicit evaluations
         self._evaluator.clearInfos()
@@ -431,7 +437,7 @@ class LiveController(QObject):
         Make `node` the compare node (view 2) and display it: views 1 (Evaluate) and 2 (Evaluate Compare)
         are then switched with showView (keys 1 / 2), for before / after comparisons.
         """
-        if node is None or not isImageOpNode(node):
+        if node is None or not isEvaluable(node):
             return
         if node is not self._compareNode:
             self._compareNode = node
@@ -1398,7 +1404,11 @@ class LiveController(QObject):
         Return the evaluation status of a node at the current frame: "RUNNING", "SUCCESS", "ERROR",
         "UPSTREAM_ERROR", or "" if it is not part of the evaluated branch or not evaluated yet.
         """
-        if node is None or self._evaluatedNode is None or self._key(node) not in self._branchUids:
+        if node is None or self._evaluatedNode is None:
+            return ""
+        if getattr(node, "nodeType", "") == "SubGraph":
+            return self._subGraphStatus(node)[0]
+        if self._key(node) not in self._branchUids:
             return ""
         status, _ = self._evaluator.status(self._key(node), self._currentFrame)
         if status.name == "NONE":
@@ -1575,8 +1585,32 @@ class LiveController(QObject):
         return (info.width, info.height)
 
     @Slot(QObject, result=str)
+    def _subGraphStatus(self, node) -> tuple:
+        """
+        (status, message) of a SubGraph node in the evaluated branch: from the nodes of its subgraph (named
+        "<SubGraph>/<node>" in the plan), the worst one.
+        """
+        plan = self._plan
+        if plan is None:
+            return "", ""
+        prefix = f"{node.name}/"
+        order = {"ERROR": 0, "UPSTREAM_ERROR": 1, "RUNNING": 2, "SUCCESS": 3}
+        worst = ("", "")
+        for key, planNode in plan.nodes.items():
+            if not planNode.name.startswith(prefix):
+                continue
+            status, message = self._evaluator.status(key, self._currentFrame)
+            if status.name == "NONE":
+                status, message = self._evaluator.lastStatus(key)
+            name = status.name
+            if name in order and (worst[0] == "" or order[name] < order[worst[0]]):
+                worst = (name, f"{planNode.name}: {message}" if message else "")
+        return worst
+
     def nodeMessage(self, node):
         """ Return the evaluation error message of a node at the current frame, if any. """
+        if node is not None and getattr(node, "nodeType", "") == "SubGraph":
+            return self._subGraphStatus(node)[1]
         if node is None or self._key(node) not in self._branchUids:
             return ""
         return self._evaluator.status(self._key(node), self._currentFrame)[1]

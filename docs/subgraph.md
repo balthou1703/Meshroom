@@ -78,6 +78,16 @@ In a loop, a node runs again at each step only if it depends on the loop: it rea
 
 The nodes read the loop state from the outputs of `GraphInput` (live nodes also with `ctx.iteration`, `ctx.frame`); the current frame of Houdini / Maya / Nuke follows the frame loop. A nested `SubGraph` without its own loop sees the frame of its parent.
 
+## Compositing nodes in a subgraph
+
+A `SubGraph` node containing compositing nodes (`desc.ImageOpNode`) is evaluated live like them: the evaluation of
+a node downstream (or of the SubGraph node itself, Evaluate / E: its first image output) goes through the subgraph,
+its image ports (`Image` ports, created when compositing nodes are put in a SubGraph with Ctrl+G) and its other
+inputs (a parameter of a node of the subgraph connected to its GraphInput takes the value typed on the SubGraph
+node). Each node of the subgraph keeps its own image in the cache: changing a parameter only renders again the
+nodes after it. In an entered subgraph, a node is evaluated with the nodes connected to the SubGraph node. The
+outline of the SubGraph node shows the status of its nodes (the worst one, its message in the tooltip).
+
 ## User interface
 
 - **Ctrl+G** (or the subgraph button of the bottom-left toolbar of the Graph Editor) puts the selected nodes in a new `SubGraph` node: their connections from other nodes become its inputs, their connections to other nodes its outputs (undoable).

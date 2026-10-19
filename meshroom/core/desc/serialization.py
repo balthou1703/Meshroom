@@ -3,6 +3,7 @@ Full serialization of attribute descriptions (type, value, choices, range, child
 attribute of any type from data: e.g. the ports of a subgraph or the children of an AnySet, which can be
 groups (a frame range), choices (formats) or lists. Callables (enabled / visible lambdas) are not kept.
 """
+import inspect
 import logging
 
 from meshroom.core import desc
@@ -30,7 +31,19 @@ def describeAttribute(attributeDesc) -> dict:
         data["exclusive"] = attributeDesc._exclusive
     if isinstance(attributeDesc, (desc.IntParam, desc.FloatParam)) and attributeDesc._range:
         data["range"] = list(attributeDesc._range)
+    for key in ("optional", "infoOnly"):
+        # Image inputs of the compositing nodes
+        if getattr(attributeDesc, "_" + key, False):
+            data[key] = True
     return data
+
+
+def _accepted(attributeClass, kwargs: dict) -> dict:
+    """ The arguments the constructor of an attribute class accepts (e.g. no value for an Image). """
+    parameters = inspect.signature(attributeClass.__init__).parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in parameters}
 
 
 def buildAttributeDesc(data: dict, name: str = None, label: str = None):
@@ -59,7 +72,10 @@ def buildAttributeDesc(data: dict, name: str = None, label: str = None):
             kwargs["range"] = tuple(data["range"])
         if "value" in data:
             kwargs["value"] = data["value"]
-        attributeDesc = attributeClass(name=name, **kwargs)
+        for key in ("optional", "infoOnly"):
+            if data.get(key):
+                kwargs[key] = True
+        attributeDesc = attributeClass(name=name, **_accepted(attributeClass, kwargs))
         if issubclass(attributeClass, desc.ChoiceParam) and not attributeDesc._values and attributeDesc._value is None:
             # Choices unknown (saved without them): any text
             attributeDesc._valueType = str

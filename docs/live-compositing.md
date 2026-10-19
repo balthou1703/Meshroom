@@ -508,3 +508,7 @@ comparaison des EXR produits avec ceux de Nuke.
 | `meshroom/core/chapters.py`, `meshroom/nodes/general/Chapter.py` | chapitres repliables du graphe |
 | `meshroom/ui/qml/GraphEditor/` | menu Evaluate, contours de statut, éditeurs (couleur, 2D, formes), lignes de chapitre |
 | `tests/test_liveCompositing.py` | tests du moteur et des nœuds |
+
+## Subgraphs
+
+Compositing nodes can be put in a `SubGraph` node (Ctrl+G): it is evaluated live through its subgraph, see [subgraph.md](subgraph.md#compositing-nodes-in-a-subgraph).

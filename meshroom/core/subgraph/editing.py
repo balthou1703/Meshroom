@@ -153,6 +153,8 @@ class SubGraphStack:
         if node.subGraph.isLink or node.template.isLink:
             raise ValueError(f"The subgraph of '{node.name}' comes from a connection: it cannot be edited.")
         graph = buildSubGraph(node, parent)
+        # The node running this subgraph, e.g. for the compositing evaluation of its nodes (meshroom.live)
+        graph.subGraphNode = node
         # Nodes of unknown types (their plugin is not loaded): their connections cannot be restored, and
         # writing the subgraph back would lose them
         unknown = sorted(f"{n.name} ({n.nodeType})" for n in graph.nodes if n.isCompatibilityNode)

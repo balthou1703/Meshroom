@@ -255,7 +255,8 @@ Item {
         sequence: "E"
         enabled: root.compositingShortcuts
         onActivated: {
-            if (uigraph.selectedNode && uigraph.selectedNode.isImageOpNode)
+            // A compositing node, or a SubGraph node of compositing nodes (ignored if it gives no image)
+            if (uigraph.selectedNode && (uigraph.selectedNode.isImageOpNode || uigraph.selectedNode.nodeType === "SubGraph"))
                 uigraph.live.evaluate(uigraph.selectedNode)
         }
     }
@@ -1211,7 +1212,7 @@ Item {
                     MenuItem {
                         id: evaluateMenuItem
                         text: "Evaluate"
-                        visible: nodeMenu.currentNode.isImageOpNode
+                        visible: nodeMenu.currentNode.isImageOpNode || nodeMenu.currentNode.nodeType === "SubGraph"
                         height: visible ? implicitHeight : 0
                         ToolTip.text: "Compute the branch of this node in memory and display the result: view 1 (E)"
                         ToolTip.visible: hovered
@@ -1220,7 +1221,7 @@ Item {
                     }
                     MenuItem {
                         text: "Evaluate Compare"
-                        visible: nodeMenu.currentNode.isImageOpNode
+                        visible: nodeMenu.currentNode.isImageOpNode || nodeMenu.currentNode.nodeType === "SubGraph"
                         height: visible ? implicitHeight : 0
                         ToolTip.text: "Display this node as view 2: keys 1 / 2 switch between Evaluate and Evaluate Compare (before / after)"
                         ToolTip.visible: hovered

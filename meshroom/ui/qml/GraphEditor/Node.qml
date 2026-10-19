@@ -72,7 +72,8 @@ Item {
     readonly property bool liveRendering: !!liveController && liveController.rendering
     // "", "RUNNING", "SUCCESS", "ERROR" or "UPSTREAM_ERROR" at the current frame
     readonly property string evalStatus: {
-        if (!liveController || !node || !node.isImageOpNode)
+        // A SubGraph node of compositing nodes: the status of the nodes of its subgraph
+        if (!liveController || !node || (!node.isImageOpNode && node.nodeType !== "SubGraph"))
             return ""
         liveController.statusRevision  // Re-evaluate the binding when statuses change
         return liveController.nodeStatus(node)

@@ -15,11 +15,12 @@ from .evaluator import (
     RenderContext,
     RenderPlan,
     buildPlan,
+    isEvaluable,
     isImageOpNode,
 )
 
 __all__ = [
     "BBox", "ImageBuffer", "ImageInfo", "RGBA", "RGBA_CHANNELS", "ImageCache",
     "CancelToken", "EvalStatus", "EvaluationCancelled", "EvaluationError", "Evaluator",
-    "PlanNode", "RenderContext", "RenderPlan", "buildPlan", "isImageOpNode",
+    "PlanNode", "RenderContext", "RenderPlan", "buildPlan", "isEvaluable", "isImageOpNode",
 ]
