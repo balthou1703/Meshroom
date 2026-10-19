@@ -540,8 +540,12 @@ class UIGraph(QObject):
         self._graph.updated.disconnect(self.onGraphUpdated)
         self._graph.statusUpdated.disconnect(self.updateChunkMonitor)
         self._sortedDFSChunks.clear()
-        # The commands of the undo stack refer to the nodes of the graph shown when they were done
+        # The commands of the undo stack refer to the nodes of the graph shown when they were done. Clearing them marks
+        # the stack clean: the unsaved changes of the project stay flagged
+        modified = not self._undoStack.isClean()
         self._undoStack.clear()
+        if modified:
+            self._undoStack.resetClean()
         self._graph = g
         self._graph.updated.connect(self.onGraphUpdated)
         self._graph.statusUpdated.connect(self.updateChunkMonitor)
@@ -556,6 +560,10 @@ class UIGraph(QObject):
         # The viewer evaluates the nodes of the graph shown (its cache is kept)
         self._live.showGraph(self._graph)
         self._rangeSourceUid = None
+        try:
+            self._updateFrameRange()
+        except Exception:
+            logging.exception("Cannot update the frame range of the timeline")
         self.graphChanged.emit()
         self.subGraphChanged.emit()
 
@@ -1732,12 +1740,13 @@ class UIGraph(QObject):
         changes over time (an animated parameter, or a camera / matrix stream turned into the parameters of the node,
         over the frame range of the timeline: see meshroom/live/bake.py). Undoable.
         """
-        from meshroom.live import Evaluator, bake
+        from meshroom.live import bake
         if not self.canBakeEdge(edge):
             return
         node, frame = edge.dst.node, int(self._live.currentFrame)
         try:
-            baked = bake.bakedValues(edge.dst, self._bakeFrames(), frame, Evaluator(cache=self._live._evaluator.cache))
+            # With the evaluator of the viewer: the values already computed (e.g. solved poses) are reused
+            baked = bake.bakedValues(edge.dst, self._bakeFrames(), frame, self._live._evaluator)
             changes, animation = bake.applyToNode(node, baked, frame)
         except Exception as e:
             logging.exception("Disconnect and Bake")
@@ -2551,13 +2560,17 @@ class UIGraph(QObject):
     @Slot(str)
     def setWorkspaceMode(self, mode: str):
         """
-        Switch the workspace of the project (e.g. "compositing", "" for the default one). Undoable. In the compositing
-        workspace, the compositing is done in a SubGraph node (see ensureCompositingSubGraph).
+        Switch the workspace of the project (e.g. "compositing", "" for the default one). In the compositing workspace,
+        the compositing is done in a SubGraph node, entered (see ensureCompositingSubGraph); leaving it goes back to the
+        project graph. Undoable as long as no subgraph is entered or left (the undo history is then cleared).
         """
         if mode != self.rootGraph.workspaceMode:
             self.push(commands.SetWorkspaceModeCommand(self.rootGraph, mode))
         if mode == "compositing":
             self.ensureCompositingSubGraph()
+        elif len(self._subGraphStack):
+            # Back to the project graph (the subgraphs are written back)
+            self.exitSubGraphTo(0)
 
     @Slot()
     def ensureCompositingSubGraph(self):
@@ -2570,10 +2583,11 @@ class UIGraph(QObject):
         if len(self._subGraphStack) or self.isComputingLocally():
             return
         graph = self._graph
+        if any(getattr(node, "isImageOpNode", False) for node in graph.nodes):
+            # Compositing nodes in the project graph (a project made before): it stays as it is
+            return
         existing = editing.compositingSubGraphs(graph)
         if not existing:
-            if any(getattr(node, "isImageOpNode", False) for node in graph.nodes):
-                return
             bbox = self._layout.boundingBox() if len(graph.nodes) else [0, 0, 0, 0]
             position = Position(bbox[0], bbox[1] + bbox[3] + (100 if len(graph.nodes) else 0))
             name = editing.newCompositingLabel(graph)
@@ -2964,6 +2978,8 @@ class UIGraph(QObject):
     undoStack = Property(QObject, lambda self: self._undoStack, constant=True)
     graphChanged = Signal()
     graph = Property(Graph, lambda self: self._graph, notify=graphChanged)
+    # The project graph (the outermost one when a subgraph is entered): file path, cache folder, template...
+    projectGraph = Property(Graph, lambda self: self.rootGraph, notify=graphChanged)
     taskManager = Property(TaskManager, lambda self: self._taskManager, constant=True)
     nodes = Property(QObject, lambda self: self._graph.nodes, notify=graphChanged)
     layout = Property(GraphLayout, lambda self: self._layout, constant=True)

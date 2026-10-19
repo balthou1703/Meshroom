@@ -1494,12 +1494,18 @@ class LiveController(QObject):
     # Resection (meshroom/nodes/compositing/ThreeDNodes.py): pins put on the geometry in the viewer
 
     def _resectionContext(self, node):
-        """ A render context of a Resection node at the current frame (full resolution), or None. """
+        """
+        (render context of a Resection node at the current frame, proxy scale): in the plan of the viewer when the node is
+        in it (its solved camera is cached there), else in a full resolution plan. (None, 1) if not a Resection.
+        """
         from meshroom.live.evaluator import RenderContext
         if node is None or not isImageOpNode(node) or not hasattr(node.nodeDesc, "pickPoint"):
-            return None
-        plan = buildPlan(node)
-        return RenderContext(plan.targetNode, self._currentFrame, self._evaluator, plan)
+            return None, 1.0
+        plan, key = self._plan, self._key(node)
+        if plan is None or key not in plan.nodes:
+            plan = buildPlan(node)
+            key = plan.target
+        return RenderContext(plan.nodes[key], self._currentFrame, self._evaluator, plan), plan.proxy
 
     @Slot(QObject, float, float, result="QVariantList")
     def pickGeometryPoint(self, node, x, y):
@@ -1508,25 +1514,39 @@ class LiveController(QObject):
         plate), seen from its solved camera at the current frame; [] if no geometry there.
         """
         try:
-            ctx = self._resectionContext(node)
-            point = node.nodeDesc.pickPoint(ctx, float(x), float(y)) if ctx is not None else None
-        except (EvaluationError, RuntimeError) as e:
-            self._setError(f"Add pin: {getattr(e, 'message', e)}", node.name)
+            ctx, proxy = self._resectionContext(node)
+            # The viewer shows the image at full resolution: (x, y) in the pixels of the rendered (proxy) image
+            point = node.nodeDesc.pickPoint(ctx, float(x) * proxy, float(y) * proxy) if ctx is not None else None
+        except Exception as e:
+            logging.debug("[Live] Add pin", exc_info=True)
+            self._setError(f"Add pin: {getattr(e, 'message', e) or e.__class__.__name__}", node.name)
             return []
         return [round(float(v), 6) for v in point] if point is not None else []
 
     @Slot(QObject, result=str)
     def resectionSummary(self, node):
-        """ Pins used at the current frame and their reprojection error, for the toolbar of the viewer. """
+        """
+        Pins used at the current frame and their reprojection error, for the toolbar of the viewer: from the camera
+        solved by the render of the viewer (nothing is solved here, in the thread of the interface).
+        """
+        from meshroom.live.evaluator import RenderContext
+        plan, key = self._plan, self._key(node)
+        if node is None or plan is None or key not in plan.nodes:
+            return ""
         try:
-            ctx = self._resectionContext(node)
-            if ctx is None:
-                return ""
+            camera = self._evaluator.cachedData(key, "cameraOutput", self._currentFrame)
+            ctx = RenderContext(plan.nodes[key], self._currentFrame, self._evaluator, plan)
             info = ctx.inputInfo("input")
-            count = len(node.nodeDesc._pinsAt(node.nodeDesc.pins(ctx, info), self._currentFrame)[0])
-            if not count:
+            points, positions = node.nodeDesc._pinsAt(node.nodeDesc.pins(ctx, info), self._currentFrame)
+            if not len(points):
                 return "no pin at this frame"
-            return f"{count} pin{'s' if count > 1 else ''}, error {node.nodeDesc.reprojectionError(ctx):.2f} px"
+            count = f"{len(points)} pin{'s' if len(points) > 1 else ''}"
+            if camera is None or info is None:
+                return count
+            xy, _, _ = camera.project(points, info.width, info.height)
+            # In the pixels of the full resolution image
+            error = float(np.sqrt(np.mean(np.sum((xy - positions) ** 2, axis=1)))) / plan.proxy
+            return f"{count}, error {error:.2f} px"
         except Exception as e:
             return str(getattr(e, "message", e))
 
