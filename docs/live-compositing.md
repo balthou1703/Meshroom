@@ -484,7 +484,8 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
 - **ReadGeo** : OBJ, PLY (ascii / binaire), USD, Alembic, FBX (mêmes conditions), échantillons de temps lus à chaque
   frame ; translate / rotate / scale / uniform scale ou « Input Matrix ». **MergeGeo** : jusqu'à 4 géométries.
 - **Resection** (à la GeoTracker) : entrées plaque, géométrie, caméra (optique et pose de départ ; sans caméra :
-  35 mm sur 36 mm, cadrant la géométrie). Sorties : **Camera** (en premier : la caméra résolue, la géométrie fixe),
+  35 mm sur 36 mm, cadrant la géométrie ; « Center Geometry » recule la caméra de départ le long de son axe jusqu'à
+  centrer toute la géométrie, utile quand une grande géométrie entoure la caméra). Sorties : **Camera** (en premier : la caméra résolue, la géométrie fixe),
   **Camera Matrix**, **Geo Matrix** (la transformation de la géométrie vue depuis la caméra d'entrée, à brancher
   dans l'« Input Matrix » d'un ReadGeo), et l'image (la plaque avec la géométrie en fil de fer, les points des pins
   reprojetés et leur écart). Dans le viewer (Resection sélectionnée) : « Add pin » puis clic sur la géométrie (lancer

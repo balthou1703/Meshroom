@@ -247,7 +247,8 @@ the geometry are moved onto the plate, and tracked.
   the frames where pins were placed by hand are their keyframes.
 
 The lens (focal length, film back) and the starting pose come from "Camera" (without it: 35 mm on a 36 mm film
-back, looking at the geometry). The solve keeps the geometry still: "Camera" is the camera moving around it,
+back, looking at the geometry). "Center Geometry" steps the starting camera back along its view axis until the whole
+geometry is centered in the view (a large geometry, the camera close to its center: hard to find or to grab). The solve keeps the geometry still: "Camera" is the camera moving around it,
 "Camera Matrix" its transform; "Geo Matrix" is the transform moving the geometry in front of the input camera
 instead (connect it to the "Input Matrix" of a ReadGeo). Right click on an edge > "Disconnect and Bake" turns them
 into keys of a Camera or a ReadGeo.
@@ -257,6 +258,10 @@ into keys of a Camera or a ReadGeo.
         desc.Geo(name="geo", label="Geo", description="The geometry to match (e.g. a ReadGeo)."),
         desc.Camera(name="camera", label="Camera", optional=True,
                     description="The lens and the starting pose (the pose of the frames without pins)."),
+        desc.BoolParam(name="centerGeometry", label="Center Geometry", value=False,
+                       description="Start from the camera stepped back along its view axis until the whole geometry is "
+                                   "centered in the view (e.g. a large geometry, the camera close to its center: hard to "
+                                   "find or to grab). The pins then solve from there."),
         desc.StringParam(name="tracks", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position (as the tracks of a Tracker) and its point "
                                      "on the geometry (\"point\": [x, y, z]). Edited in the viewer."),
@@ -314,11 +319,20 @@ into keys of a Camera or a ReadGeo.
             return camera
         return scene3d.framingCamera(ctx.inputData("geo", frame))
 
+    def startCamera(self, ctx, frame=None, info=None):
+        """ The pose the solve starts from: the input camera, or with "Center Geometry", stepped back to center it. """
+        camera = self.inputCamera(ctx, frame)
+        if not ctx.value("centerGeometry"):
+            return camera
+        info = info or ctx.inputInfo("input")
+        aspect = info.width / float(info.height) if info is not None and info.height else 16.0 / 9.0
+        return scene3d.centeredCamera(camera, ctx.inputData("geo", frame), aspect)
+
     # Solve
 
     def _solve(self, ctx, frame, initial, pins, info):
         points, positions = self._pinsAt(pins, frame)
-        camera = self.inputCamera(ctx, frame)
+        camera = self.startCamera(ctx, frame, info)
         if not len(points):
             return camera.copy(matrix=initial if initial is not None else camera.matrix), 0.0
         start = initial if initial is not None else camera.matrix
@@ -339,7 +353,7 @@ into keys of a Camera or a ReadGeo.
             raise RuntimeError("Connect the plate to the input.")
         pins = self.pins(ctx, info)
         if not pins:
-            return self.inputCamera(ctx)
+            return self.startCamera(ctx, info=info)
         # Solved frame after frame from the nearest frame with pins placed by hand (each pose starts from the one
         # of the previous frame): the poses on the way are cached
         keyframes = sorted({int(f) for pin in pins for f in (pin.get("keyframes") or [])} or

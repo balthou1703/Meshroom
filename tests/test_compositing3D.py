@@ -580,3 +580,19 @@ def test_compositingSubGraphsInNaturalOrder():
     for label in ("compositing_10", "compositing_2"):
         graph.addNewNode("SubGraph").internalAttribute("label").value = label
     assert [node.label for node in compositingSubGraphs(graph)] == ["compositing_2", "compositing_10"]
+
+
+def test_resectionCenterGeometry(tmp_path):
+    """ "Center Geometry": the starting camera steps back along its view axis until the geometry is centered. """
+    graph, plate, readGeo, camera, resection = resectionGraph(tmp_path)
+    # A camera inside the cube, looking along -Z
+    camera.translate.value = {"x": 0.2, "y": 0.1, "z": 0.5}
+    resection.centerGeometry.value = True
+    graph.update()
+    solved = data(resection, "cameraOutput")
+    np.testing.assert_allclose(solved.matrix[:3, :3], np.eye(3), atol=1e-9)
+    xy, _, inFront = solved.project(_CUBE, 640, 360)
+    assert inFront.all()
+    assert (xy[:, 0] > 0).all() and (xy[:, 0] < 640).all() and (xy[:, 1] > 0).all() and (xy[:, 1] < 360).all()
+    center, _, _ = solved.project(np.zeros((1, 3)), 640, 360)
+    np.testing.assert_allclose(center[0], [320, 180], atol=1e-6)

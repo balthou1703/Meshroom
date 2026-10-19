@@ -361,6 +361,26 @@ def framingCamera(geo: Optional[GeoData], focalLength=35.0, horizontalAperture=3
     return camera
 
 
+def centeredCamera(camera: CameraData, geo: Optional[GeoData], aspect: float = 16.0 / 9.0) -> CameraData:
+    """
+    The camera moved along its view axis (same orientation and lens) to have the whole geometry centered in its view:
+    e.g. a camera inside a large geometry stepped back out of it. `aspect`: width / height of the image.
+    """
+    if geo is None or geo.isEmpty:
+        return camera
+    low, high = geo.bounds()
+    center = (low + high) / 2.0
+    radius = max(float(np.linalg.norm(high - low)) / 2.0, 1e-6)
+    halfWidth = math.atan(camera.horizontalAperture / 2.0 / camera.focalLength)
+    halfHeight = math.atan(camera.horizontalAperture / max(aspect, 1e-6) / 2.0 / camera.focalLength)
+    distance = radius / math.sin(min(halfWidth, halfHeight)) * 1.1
+    matrix = camera.matrix.copy()
+    back = matrix[:3, 2] / max(np.linalg.norm(matrix[:3, 2]), 1e-12)
+    matrix[:3, 3] = center + back * distance
+    return camera.copy(matrix=matrix, near=min(camera.near, max(distance - radius * 2, distance * 1e-3)),
+                       far=max(camera.far, distance + radius * 4))
+
+
 def raycast(geo: GeoData, origin: np.ndarray, direction: np.ndarray) -> Optional[np.ndarray]:
     """ The nearest point of the faces of a geometry hit by a ray (Moller-Trumbore), or None. """
     triangles = geo.triangles()
