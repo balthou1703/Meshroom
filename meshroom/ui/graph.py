@@ -1839,6 +1839,8 @@ class UIGraph(QObject):
         if last < first:
             first, last = last, first
         self.push(commands.SetFrameRangeCommand(self.rootGraph, {"first": first, "last": last, "source": ""}))
+        # The timeline follows (also if the change came from a graph whose signal is not followed)
+        self._onFrameRangeChanged()
 
     @Slot()
     def resetFrameRange(self):
@@ -1846,6 +1848,7 @@ class UIGraph(QObject):
         from meshroom.live.frameRange import followedFrameRange
         value, self._rangeSourceUid = followedFrameRange(self._graph, self._live.nodeInfo, None, frameRange={})
         self.push(commands.SetFrameRangeCommand(self.rootGraph, value or {}))
+        self._onFrameRangeChanged()
 
     frameRangeChanged = Signal()
     frameRangeIsUser = Property(bool, lambda self: bool(self.rootGraph.frameRange) and
