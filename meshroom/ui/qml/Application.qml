@@ -1585,6 +1585,9 @@ Page {
                         nodeTypesModel: _nodeTypes
 
                         onNodeDoubleClicked: function(mouse, node) {
+                            // A SubGraph node opens its subgraph
+                            if (_currentScene.isSubGraphNode(node) && _currentScene.enterSubGraph(node))
+                                return
                             _currentScene.setActiveNode(node);
                             workspaceView.viewNode(node, mouse);
                         }

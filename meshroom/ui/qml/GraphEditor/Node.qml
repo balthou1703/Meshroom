@@ -60,6 +60,9 @@ Item {
     property point mousePosition: Qt.point(mouseArea.mouseX, mouseArea.mouseY)
     property bool hasWarnings: false
 
+    // Status shown on the outline: the compositing evaluation, else the Run Live of a subgraph
+    readonly property string outlineStatus: evalDisplay.status !== "" ? evalDisplay.status : liveStatus
+    readonly property string outlineMessage: evalDisplay.status !== "" ? evalMessage : liveMessage
     // Live compositing evaluation (LiveController), to outline the nodes of the evaluated branch
     property var liveController: null
     // A disabled compositing node passes its first input through
@@ -78,6 +81,20 @@ Item {
         if (evalStatus !== "ERROR" && evalStatus !== "UPSTREAM_ERROR")
             return ""
         return liveController.nodeMessage(node)
+    }
+    // Run Live of a subgraph (UIGraph): status of this node, shown on its outline
+    property var liveGraph: null
+    readonly property string liveStatus: {
+        if (!liveGraph || !node)
+            return ""
+        liveGraph.liveStatusRevision  // Re-evaluate the binding when the statuses change
+        return liveGraph.liveNodeStatus(node.name)
+    }
+    readonly property string liveMessage: {
+        if (!liveGraph || !node || liveStatus === "")
+            return ""
+        liveGraph.liveStatusRevision
+        return liveGraph.liveNodeMessage(node.name)
     }
 
     Item {
@@ -407,29 +424,32 @@ Item {
             root.endShaking();
         }
 
-        // Live evaluation status outline, drawn outside of the selection border
+        // Status outline, drawn outside of the selection border: compositing evaluation (live viewer) or Run Live
+        // of a subgraph. Orange while running, green when done, red on error (dark red: not run after an
+        // error), grey when not needed in this context (Run Live)
         Rectangle {
             id: evalOutline
-            readonly property real outlineWidth: root.isEvaluated ? 3 : 1.5
+            readonly property real outlineWidth: root.isEvaluated ? 3 : (root.liveStatus !== "" ? 2 : 1.5)
             anchors.fill: nodeContent
             anchors.margins: -(4 + outlineWidth)
-            visible: evalDisplay.status !== ""
+            visible: root.outlineStatus !== ""
             border.width: outlineWidth
             border.color: {
-                switch (evalDisplay.status) {
+                switch (root.outlineStatus) {
                     case "SUCCESS": return Colors.green
                     case "RUNNING": return Colors.orange
                     case "ERROR": return Colors.red
                     case "UPSTREAM_ERROR": return Qt.darker(Colors.red, 1.8)
+                    case "SKIPPED": return Colors.lightgrey
                 }
                 return "transparent"
             }
-            opacity: 0.85
+            opacity: root.outlineStatus === "SKIPPED" ? 0.5 : 0.85
             radius: background.radius + 4 + outlineWidth
             color: "transparent"
 
-            ToolTip.visible: root.hovered && root.evalMessage !== ""
-            ToolTip.text: root.evalMessage
+            ToolTip.visible: root.hovered && root.outlineMessage !== ""
+            ToolTip.text: root.outlineMessage
             ToolTip.delay: 300
         }
 

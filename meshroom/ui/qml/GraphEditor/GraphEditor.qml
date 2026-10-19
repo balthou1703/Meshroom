@@ -343,6 +343,23 @@ Item {
                     sizes[item.node.name] = [item.width, item.height]
             }
             uigraph.layoutNodes(sizes)
+        } else if (event.key === Qt.Key_G && event.modifiers === Qt.ControlModifier) {
+            // Put the selected nodes in a SubGraph
+            uigraph.groupSelectedIntoSubGraph()
+        } else if (event.key === Qt.Key_I && event.modifiers === Qt.NoModifier
+                   && uigraph.selectedNode && uigraph.isSubGraphNode(uigraph.selectedNode)) {
+            // Enter the selected SubGraph node
+            uigraph.enterSubGraph(uigraph.selectedNode)
+        } else if (event.key === Qt.Key_U && event.modifiers === Qt.NoModifier && uigraph.isInSubGraph) {
+            // Up: leave the current subgraph
+            uigraph.exitSubGraph()
+        } else if (event.key === Qt.Key_Backspace && event.modifiers === Qt.ControlModifier) {
+            // Leave the current subgraph
+            uigraph.exitSubGraph()
+        } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && event.modifiers === Qt.ControlModifier) {
+            // Enter the selected SubGraph node
+            if (uigraph.selectedNode)
+                uigraph.enterSubGraph(uigraph.selectedNode)
         } else if (event.key === Qt.Key_Tab) {
             event.accepted = true
             if (mouseArea.containsMouse) {
@@ -1491,6 +1508,7 @@ Item {
 
                             node: object
                             width: uigraph.layout.nodeWidth
+                            liveGraph: uigraph
 
                             mainSelected: uigraph.selectedNode === node
                             hovered: uigraph.hoveredNode === node
@@ -2034,6 +2052,13 @@ Item {
                     uigraph.selectNodes([chapter])
                 }
             }
+            // Put the selected nodes in a SubGraph
+            MaterialToolButton {
+                text: MaterialIcons.account_tree
+                ToolTip.text: "Put Selected Nodes in a SubGraph (Ctrl+G)"
+                enabled: uigraph ? uigraph.nodeSelection.hasSelection : false
+                onClicked: uigraph.groupSelectedIntoSubGraph()
+            }
             // Add Backdrop
             MaterialToolButton {
                 text: MaterialIcons.sticky_note_2
@@ -2274,5 +2299,15 @@ Item {
         // Recenter
         draggable.x = bbox.x * draggable.scale * -1 + (root.width - bbox.width * draggable.scale) * 0.5
         draggable.y = bbox.y * draggable.scale * -1 + (root.height - bbox.height * draggable.scale) * 0.5
+    }
+
+    // Subgraph navigation (breadcrumb) and Run Live
+    SubGraphBar {
+        id: subGraphBar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        z: 10
+        uigraph: root.uigraph
     }
 }
