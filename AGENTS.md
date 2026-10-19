@@ -33,18 +33,21 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   ├── core/                   # Engine logic (Graph, Node, Attribute, execution, (de)serialization,
 │   │                           #   chapters.py: folding geometry of the graph editor Chapter lines,
 │   │                           #   graphLayout.py: tree layout of the nodes along their connections, key L)
-│   │   └── desc/               # Node/attribute DESCRIPTORS: desc.Node, desc.CommandLineNode, desc.*Param
-│   │                           #   (imported as `from meshroom.core import desc`)
+│   │   ├── desc/               # Node/attribute DESCRIPTORS: desc.Node, desc.CommandLineNode, desc.*Param
+│   │   │                       #   (imported as `from meshroom.core import desc`)
+│   │   └── subgraph/           # Subgraphs: executor, contexts (Python/Houdini/Maya/Nuke), ports,
+│   │                           #   editing (enter/leave), runner (Run Live in another interpreter) — docs/subgraph.md
 │   ├── live/                   # Live compositing engine: in-memory pull evaluation of desc.ImageOpNode
 │   │                           #   nodes (ImageBuffer, ImageCache, Evaluator, image IO, pixel ops, roto, tracking, curves,
 │   │                           #   geometry, camera solve, optical flow, 3DE lens distortion, animation, timeline frame range, node actions,
 │   │                           #   Nuke script import, color management: OCIO or builtin colorspaces, Python expressions of the Switch)
-│   ├── nodes/                  # Concrete node types, grouped by category (e.g. general/, compositing/)
+│   ├── nodes/                  # Concrete node types, grouped by category (e.g. general/, compositing/, subgraph/, houdini/)
 │   ├── submitters/             # Built-in render-farm submitters (drive meshroom_submit; e.g. localFarm)
 │   ├── ui/                     # User Interface layer (PySide6 / QML-based components)
 │   │   ├── qml/                # QML design layouts (GraphEditor, NodeEditor, 3D/2D Viewers, RTI Viewer)
 │   │   ├── components/         # Qt helper components exposed to QML (scene3D, scriptEditor, clipboard, ...)
 │   │   └── ...                 # Python backends (app.py, graph.py, commands.py, scene.py) binding core to Qt
+│   ├── subgraph.py             # meshroom.subgraph.run: run a subgraph template from a software's Python shell
 │   ├── env.py                  # EnvVar registry: MESHROOM_PLUGINS_PATH / NODES_PATH / PIPELINE_TEMPLATES_PATH, etc.
 │   └── multiview.py            # Image-extension lists & helpers for building multiview/photogrammetry pipelines
 ├── tests/                      # Comprehensive suite of unit tests and pipeline validation tests
@@ -65,6 +68,7 @@ A few distinctions are easy to confuse. Keep them straight before changing engin
 * **Persistence.** Graphs are saved as **`.mg`** JSON files (`meshroom/core/graphIO.py`): a versioned `header` plus a `graph` payload. On load, `nodeFactory` reconciles descriptor changes so old projects still open — a node that no longer matches its current descriptor becomes a **`CompatibilityNode`** instead of failing. Pipeline **templates** are just `.mg` files registered at startup. Output nodes are excluded from a template by default and retained only when explicitly requested, allowing `meshroom_batch -o/--output` and the UI startup `-o/--output` to configure export destinations.
 * **Discovery.** Node types and pipeline templates are loaded at import time (`meshroom/core/__init__.py`, `meshroom/core/plugins.py`) from the built-in `meshroom/nodes/` plus any plugin/template paths (see [INSTALL_PLUGINS.md](INSTALL_PLUGINS.md)).
 * **Live compositing.** `desc.ImageOpNode` nodes (`MrNodeType.IMAGEOP`, e.g. `meshroom/nodes/compositing/`) are not computed in batch: they have no chunks, no cache folder and no flow pins. They are connected through `desc.Image` attributes, whose UID carries the upstream node UID, and are rendered frame by frame in memory by `meshroom/live/` (`buildPlan` snapshots a branch, `Evaluator.render` pulls a frame, cached in RAM by `(uid, frame)`). The `Write` node is a regular batch node that evaluates its branch in `processChunk`. A graph whose header has `workspaceMode: "compositing"` opens in the compositing workspace; its `frameRange` (timeline in / out) is saved in the header too. Compositing nodes hold no computed data, so a compatibility issue on one of them is upgraded automatically when loading. Any parameter of a compositing node can be animated: its keys are in the `animation` internal attribute (`meshroom/live/animation.py`); the evaluator reads them per frame (`RenderContext.value`), and the stored value of an animated parameter only mirrors the viewer frame, so it is excluded from the node UID (the keys are in it). See [docs/live-compositing.md](docs/live-compositing.md).
+* **Subgraphs.** A `SubGraph` node (`meshroom/nodes/subgraph/`) runs a whole subgraph as one task, in one context opened once (Python, Houdini, Maya, Nuke — `meshroom/core/subgraph/contexts.py`); `meshroom.subgraph.run` runs it from a software's shell, in its session. The subgraph is stored as serialized JSON (embedded in the node or a `.mgt` template); `meshroom/core/subgraph/executor.py` builds a headless `Graph` from it and runs the needed nodes in-process, in order: task nodes (`desc.Node`) through their `processChunk`, live nodes (`desc.LiveNode`, never computed on their own) through `execute(ctx, inputs)`; values go from node to node in memory. A node can ignore inputs in a context (`desc.BaseNode.ignoredInputs`), so their upstream nodes are skipped. `GraphInput`/`GraphOutput` ports are the `ins`/`outs` AnySet children of the node. In the UI, entering a node swaps the shown graph (`UIGraph` keeps a `SubGraphStack`) and leaving writes the subgraph back. See [docs/subgraph.md](docs/subgraph.md).
 * **UI bridge.** The engine is Qt-agnostic: `meshroom/common/` selects either a Qt or a headless backend for `BaseObject`, so the core runs without a UI. The `meshroom/ui/*.py` layer wraps it for Qt — `app.py` (application/entry), `graph.py` (a `UIGraph` exposing the core `Graph` as Qt models + async compute), `commands.py` (undo/redo command stack), `scene.py`. QML in `meshroom/ui/qml/` binds to these.
 
 ## Development & Verification
