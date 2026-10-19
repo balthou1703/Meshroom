@@ -848,3 +848,35 @@ class Flow(Attribute):
 
     def checkValueTypes(self):
         return "", ValueTypeErrors.NONE
+
+
+class Image(Flow):
+    """
+    An image stream connection used by live compositing nodes (see `ImageOpNode`).
+
+    Like Flow, it holds no value: only its connections are serialized.
+    Unlike Flow, its UID carries the UID of the upstream node, so that any change upstream
+    invalidates the downstream nodes (and their in-memory cached images).
+    An Image attribute can only be connected to another Image attribute.
+    """
+    def __init__(self, name, label=None, description=None, advanced=False, enabled=True,
+                 visible=True, exposed=True, optional=False, infoOnly=False):
+        super().__init__(name=name, label=label, description=description, advanced=advanced,
+                         enabled=enabled, visible=visible, exposed=exposed)
+        # An optional input (e.g. a mask) does not make the evaluation fail when disconnected
+        self._optional = optional
+        # An input only used for its format / frame range: its pixels are not rendered
+        self._infoOnly = infoOnly
+
+    def getInstanceType(self):
+        # Import within the method to prevent cyclic dependencies
+        from meshroom.core.attribute import Image
+        return Image
+
+    def clone(self):
+        return self.__class__(name=self.name, label=self.label, description=self.description,
+                              advanced=self.advanced, enabled=self.enabled, visible=self.visible,
+                              exposed=self.exposed, optional=self.optional, infoOnly=self.infoOnly)
+
+    optional = Property(bool, lambda self: self._optional, constant=True)
+    infoOnly = Property(bool, lambda self: self._infoOnly, constant=True)

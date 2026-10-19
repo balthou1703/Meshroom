@@ -236,6 +236,8 @@ class Graph(BaseObject):
     def clear(self):
         self._clearGraphContent()
         self.header.clear()
+        self.workspaceModeChanged.emit()
+        self.frameRangeChanged.emit()
         self._unsetFilepath()
 
     def _clearGraphContent(self):
@@ -250,6 +252,40 @@ class Graph(BaseObject):
     def fileFeatures(self):
         """ Get loaded file supported features based on its version. """
         return GraphIO.getFeaturesForVersion(self.header.get(GraphIO.Keys.FileVersion, "0.0"))
+
+    def _getWorkspaceMode(self) -> str:
+        """ Return the workspace this graph is meant to be edited in ("" for the default one). """
+        return self.header.get(GraphIO.Keys.WorkspaceMode, "")
+
+    def _setWorkspaceMode(self, mode: str):
+        """ Set the workspace this graph is meant to be edited in (e.g. "compositing"). """
+        if mode == self._getWorkspaceMode():
+            return
+        if mode:
+            self.header[GraphIO.Keys.WorkspaceMode] = mode
+        else:
+            self.header.pop(GraphIO.Keys.WorkspaceMode, None)
+        self.workspaceModeChanged.emit()
+
+    @property
+    def frameRange(self) -> dict:
+        """
+        The frame range of the timeline saved with the graph (compositing): {"first", "last", "source"},
+        "source" being the name of the Read node it follows ("" if the user entered it); {} if not set.
+        A range following a Read may have no "first" / "last" yet (its file has no frame range).
+        """
+        value = self.header.get(GraphIO.Keys.FrameRange)
+        return dict(value) if isinstance(value, dict) else {}
+
+    def setFrameRange(self, value: Optional[dict]):
+        """ Set the frame range of the timeline (see frameRange); None or {} to unset it. """
+        if (value or {}) == self.frameRange:
+            return
+        if value:
+            self.header[GraphIO.Keys.FrameRange] = dict(value)
+        else:
+            self.header.pop(GraphIO.Keys.FrameRange, None)
+        self.frameRangeChanged.emit()
 
     @property
     def isLoading(self):
@@ -322,6 +358,8 @@ class Graph(BaseObject):
         self.header.clear()
 
         self.header = graphData.get(GraphIO.Keys.Header, {})
+        self.workspaceModeChanged.emit()
+        self.frameRangeChanged.emit()
         fileVersion = Version(self.header.get(GraphIO.Keys.FileVersion, "0.0"))
         graphContent = self._normalizeGraphContent(graphData, fileVersion)
         isTemplate = self.header.get(GraphIO.Keys.Template, False)
@@ -1908,6 +1946,9 @@ class Graph(BaseObject):
     fileDateVersion = Property(float, fileDateVersion.fget, fileDateVersion.fset, notify=filepathChanged)
     cacheDirChanged = Signal()
     cacheDir = Property(str, cacheDir.fget, cacheDir.fset, notify=cacheDirChanged)
+    workspaceModeChanged = Signal()
+    workspaceMode = Property(str, _getWorkspaceMode, _setWorkspaceMode, notify=workspaceModeChanged)
+    frameRangeChanged = Signal()
     updated = Signal()
     statusUpdated = Signal()
     canComputeLeavesChanged = Signal()

@@ -2050,3 +2050,30 @@ class Flow(Attribute):
 
     # Override
     isDefault = Property(bool, _isDefault, notify=Attribute.valueChanged)
+
+
+class Image(Flow):
+    """
+    Image stream connection between live compositing nodes.
+
+    Like a Flow it holds no value, but its UID propagates the UID of the upstream node:
+    an output Image attribute derives its UID from its node, and a connected input Image
+    attribute inherits the UID of the output it is connected to.
+    """
+
+    def __init__(self, node, attributeDesc: desc.Image, isOutput: bool,
+                 root=None, parent=None):
+        super().__init__(node, attributeDesc, isOutput, root, parent)
+
+    # Override
+    def uid(self):
+        if self.isOutput:
+            return hashValue((self.name, self.node._uid))
+        if self.isLink:
+            return self._getInputLink(recursive=True).uid()
+        return hashValue(None)
+
+    # Override
+    def _validateIncomingConnection(self, connectingAttribute: Attribute) -> bool:
+        """ Only accept connections from another image stream. """
+        return isinstance(connectingAttribute, Image)

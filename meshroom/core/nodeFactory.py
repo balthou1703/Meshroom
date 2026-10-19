@@ -34,6 +34,7 @@ def nodeFactory(
 def getNodeConstructor(nodeType: str, position: Optional[Position]=None, **kwargs) -> Union[BackdropNode, Node]:
     constructors = {
         "Backdrop": BackdropNode,
+        "Chapter": BackdropNode,
     }
     constructor = constructors.get(nodeType, Node)
     return constructor(nodeType, position=position, **kwargs)
@@ -193,8 +194,11 @@ class _NodeCreator:
         return self._checkAttributesNamesStrictlyMatch(refAttributes, self.outputs)
 
     def _checkInternalAttributesNames(self) -> bool:
-        # Required: all invalidating internal attributes must be present.
-        invalidatingDescAttributes = [attr.name for attr in self.nodeDesc.internalInputs if attr.invalidate]
+        # Required: all invalidating internal attributes must be present, except the compositing ones:
+        # live compositing nodes have no cache folder whose uid would no longer match.
+        optionalInternalNames = {attr.name for attr in desc.InternalAttributesFactory.COMPOSITING}
+        invalidatingDescAttributes = [attr.name for attr in self.nodeDesc.internalInputs
+                                      if attr.invalidate and attr.name not in optionalInternalNames]
         if not all(attr in self.internalInputs.keys() for attr in invalidatingDescAttributes):
             return False
         # Optional: internal Flow attributes may optionally appear in internalInputs
@@ -277,6 +281,11 @@ class _NodeCreator:
         # Nodes in templates are not meant to hold computation data.
         if self.inTemplate:
             logging.warning(f"Compatibility issue in template: performing automatic upgrade on '{self.name}'")
+            return node.upgrade()
+
+        # Live compositing nodes hold no computed data (they are rendered in memory).
+        if self.nodeDesc is not None and issubclass(self.nodeDesc, desc.ImageOpNode):
+            logging.info(f"Compatibility issue on a compositing node: performing automatic upgrade on '{self.name}'")
             return node.upgrade()
 
         # Backward compatibility: "uid" was not serialized.

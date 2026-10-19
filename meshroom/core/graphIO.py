@@ -26,6 +26,11 @@ class GraphIO:
         CacheDir = "cacheDir"
         Graph = "graph"
         Template = "template"
+        # Workspace the graph is meant to be edited in (e.g. "compositing"); absent for the default one
+        WorkspaceMode = "workspaceMode"
+        # Frame range of the timeline (compositing): {"first", "last", "source"}, "source" being the Read
+        # node it follows ("" when entered by the user); absent when not set
+        FrameRange = "frameRange"
 
     class Features(Enum):
         """File Features."""
@@ -95,6 +100,10 @@ class GraphSerializer:
         header[GraphIO.Keys.ReleaseVersion] = meshroom.__version__
         header[GraphIO.Keys.FileVersion] = GraphIO.__version__
         header[GraphIO.Keys.NodesVersions] = self._getNodeTypesVersions()
+        if self._graph.workspaceMode:
+            header[GraphIO.Keys.WorkspaceMode] = self._graph.workspaceMode
+        if self._graph.frameRange:
+            header[GraphIO.Keys.FrameRange] = dict(self._graph.frameRange)
         if self._graph._hasExplicitCacheDir:
             # We store the absolute but also the relative cacheDir path (to the scene file)
             # to make sure that if we move the scene+cacheDir we can still retrieve the cache

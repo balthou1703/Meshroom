@@ -910,6 +910,34 @@ class BaseNode(BaseObject):
             "nodeSourceCodeFolder": self.sourceCodeFolder
         }
 
+    def _animationKeys(self) -> dict:
+        """ The keys of the parameters animated by keys (compositing nodes, "animation" internal attribute). """
+        if not self.hasInternalAttribute("animation"):
+            return {}
+        value = self.internalAttribute("animation").value
+        if not value:
+            return {}
+        try:
+            animation = json.loads(value)
+        except ValueError:
+            return {}
+        return {name: keys for name, keys in animation.items() if keys} if isinstance(animation, dict) else {}
+
+    def _animatedAttributeNames(self) -> set:
+        """ Names of the parameters animated by keys (compositing nodes, "animation" internal attribute). """
+        return set(self._animationKeys())
+
+    @staticmethod
+    def _animatedLinkKeys(attr):
+        """ The keys of the animated parameter a linked parameter takes its value from (None if not animated). """
+        source = attr.inputRootLink
+        if source is None or source.isOutput or source.root is not None:
+            return None
+        sourceNode = source.node
+        if sourceNode is attr.node or not hasattr(sourceNode, "_animationKeys"):
+            return None
+        return sourceNode._animationKeys().get(source.name)
+
     def __getattr__(self, k):
         try:
             # Throws exception if not in prototype chain
@@ -960,8 +988,12 @@ class BaseNode(BaseObject):
             default color (nodeDesc.color), or empty string if neither is defined.
         """
         if self.hasInternalAttribute("color"):
-            return self.internalAttribute("color").value.strip()
-        return ""
+            color = self.internalAttribute("color").value.strip()
+            if color:
+                return color
+        if self.nodeDesc is None:
+            return ""
+        return getattr(self.nodeDesc, "color", "") or ""
 
     def getInvalidationMessage(self) -> str:
         """
@@ -1177,9 +1209,18 @@ class BaseNode(BaseObject):
         # UID is computed by hashing the sorted list of tuple (name, value) of all attributes
         # impacting this UID
         uidAttributes = []
+        animated = self._animatedAttributeNames()
         for attr in self.invalidatingAttributes:
             if not attr.enabled:
                 continue  # Disabled params do not contribute to the uid
+            if attr.name in animated and not attr.isLink:
+                continue  # Animated params: their keys ("animation" internal attribute) make the uid
+            if attr.isLink:
+                # Linked to an animated param: its keys make the uid (its stored value follows the viewer frame)
+                linkKeys = self._animatedLinkKeys(attr)
+                if linkKeys is not None:
+                    uidAttributes.append((attr.name, hashValue(json.dumps(linkKeys, sort_keys=True))))
+                    continue
             dynamicOutputAttr = attr.isLink and attr.inputRootLink.desc.isDynamicValue
             # For dynamic output attributes, the UID does not depend on the attribute value.
             # In particular, when loading a project file, the UIDs are updated first,
@@ -1378,7 +1419,7 @@ class BaseNode(BaseObject):
         """
         # Ambiguous case for NONE, which could be used for compatibility nodes if we do not have
         # any information about the node descriptor.
-        return self.getMrNodeType() != MrNodeType.INIT and self.getMrNodeType() != MrNodeType.BACKDROP
+        return self.getMrNodeType() not in (MrNodeType.INIT, MrNodeType.BACKDROP, MrNodeType.IMAGEOP)
 
     def clearData(self):
         """ Delete this Node internal folder.
@@ -2041,6 +2082,10 @@ class BaseNode(BaseObject):
     def _isInitNode(self):
         return isinstance(self.nodeDesc, desc.InitNode)
 
+    def _isImageOpNode(self):
+        """ Return True if this node is a live compositing node, evaluated in memory. """
+        return isinstance(self.nodeDesc, desc.ImageOpNode)
+
     def _isInputNode(self):
         return isinstance(self.nodeDesc, desc.InputNode)
 
@@ -2369,6 +2414,7 @@ class BaseNode(BaseObject):
     isInputNode = Property(bool, lambda self: self._isInputNode(), constant=True)
     isIONode = Property(bool, lambda self: self._isIONode(), constant=True)
     isBackdropNode = Property(bool, lambda self: self._isBackdropNode(), constant=True)
+    isImageOpNode = Property(bool, lambda self: self._isImageOpNode(), constant=True)
 
     globalExecMode = Property(str, globalExecMode.fget, notify=globalStatusChanged)
     jobName = Property(str, lambda self: self._getJobName(), notify=globalStatusChanged)
@@ -2825,6 +2871,9 @@ class CompatibilityNode(BaseNode):
         # If it is a GroupAttribute, all the attributes within the group should be matched
         # individually so that links can correctly be evaluated.
         if isinstance(attrDesc, desc.GroupAttribute):
+            # A value of another type (e.g. a float that became a group) does not match
+            if not isinstance(value, dict):
+                return None
             for k, v in value.items():
                 if CompatibilityNode.attributeDescFromName(attrDesc.items,
                                                            k, v, strict=True) is None:

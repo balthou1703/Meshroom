@@ -21,7 +21,7 @@ from meshroom.core.desc.anySet import AnySet
 from meshroom.core.utils import VERBOSE_LEVEL
 
 from .computation import Level, StaticNodeSize
-from .attribute import Attribute, ChoiceParam, ColorParam, File, Flow, IntParam, StringParam, ListAttribute
+from .attribute import Attribute, BoolParam, ChoiceParam, ColorParam, File, Flow, IntParam, StringParam, ListAttribute
 
 if TYPE_CHECKING:
     from meshroom.core.attribute import Attribute as CoreAttribute
@@ -71,6 +71,7 @@ class MrNodeType(enum.Enum):
     COMMANDLINE = enum.auto()
     INIT = enum.auto()
     BACKDROP = enum.auto()
+    IMAGEOP = enum.auto()
 
 
 class InternalAttributesFactory:
@@ -162,6 +163,48 @@ class InternalAttributesFactory:
         ),
     ]
 
+    # Live compositing nodes (ImageOpNode)
+    COMPOSITING = [
+        BoolParam(
+            name="disable",
+            label="Disable",
+            description="Disable the node: its first image input is passed through unchanged.",
+            value=False,
+            invalidate=True,
+        ),
+        StringParam(
+            name="animation",
+            label="Animation",
+            description="Keys of the animated parameters (JSON, see meshroom/live/animation.py).",
+            value="",
+            invalidate=True,
+            # Not shown in the attribute editor (edited with the key buttons of the parameters).
+            # Enabled: the keys are part of the uid (nothing animated: the uid is unchanged).
+            uidIgnoreValue="",
+            visible=False,
+        ),
+        StringParam(
+            name="hiddenInputs",
+            label="Hidden Inputs",
+            description="Names of the inputs whose edges are hidden in the graph editor (UI state, key H).",
+            value="",
+            invalidate=False,
+            # Not shown in the attribute editor
+            enabled=False,
+            visible=False,
+        ),
+        StringParam(
+            name="splitVec2",
+            label="Split 2D Values",
+            description="Names of the linkable 2D values edited as separate x / y fields (UI state).",
+            value="",
+            invalidate=False,
+            # Not shown in the attribute editor
+            enabled=False,
+            visible=False,
+        ),
+    ]
+
     FLOW_IN = [
         ListAttribute(
             name="flowInputs",
@@ -196,6 +239,7 @@ class InternalAttributesFactory:
             MrNodeType.COMMANDLINE: cls.INVALIDATION + cls.BASIC,
             MrNodeType.INIT: cls.BASIC,
             MrNodeType.BACKDROP: cls.BASIC + cls.RESIZABLE,
+            MrNodeType.IMAGEOP: cls.INVALIDATION + cls.BASIC + cls.COMPOSITING,
         }
 
         return paramMap.get(mrNodeType)
@@ -208,7 +252,7 @@ class InternalAttributesFactory:
         These are added to internal attributes so they appear as connection pins in
         the graph editor header while remaining separate from the regular attribute list.
         """
-        if mrNodeType == MrNodeType.BACKDROP:
+        if mrNodeType in (MrNodeType.BACKDROP, MrNodeType.IMAGEOP):
             return []
         return cls.FLOW_IN
 
@@ -220,7 +264,7 @@ class InternalAttributesFactory:
         These are added to internal attributes so they appear as connection pins in
         the graph editor header while remaining separate from the regular attribute list.
         """
-        if mrNodeType == MrNodeType.BACKDROP:
+        if mrNodeType in (MrNodeType.BACKDROP, MrNodeType.IMAGEOP):
             return []
         return cls.FLOW_OUT
 
@@ -564,6 +608,147 @@ class BackdropNode(BaseNode):
 
     def getMrNodeType(self):
         return self._mrNodeType
+
+    def processChunk(self, chunk):
+        pass
+
+    def process(self, node):
+        pass
+
+
+class ImageOpNode(BaseNode):
+    """
+    Live compositing node, evaluated in memory on demand (pull model) by
+    `meshroom.live.Evaluator`, frame by frame, instead of being computed in batch.
+
+    It has no chunks, no cache folder and no flow pins: it is not computable in batch mode.
+    Its image inputs and output are `desc.Image` attributes; the other inputs are its parameters.
+
+    Subclasses implement `render` and, when the output format or frame range differs from
+    the first input, `getInfo`. See docs/live-compositing.md.
+    """
+    _mrNodeType: MrNodeType = MrNodeType.IMAGEOP
+    internalInputs = InternalAttributesFactory.getInternalAttributes(_mrNodeType)
+    internalFlowInputs = InternalAttributesFactory.getInternalFlowInputs(_mrNodeType)
+    internalFlowOutputs = InternalAttributesFactory.getInternalFlowOutputs(_mrNodeType)
+    category = "Compositing"
+
+    def __init__(self):
+        super(ImageOpNode, self).__init__()
+        # Image outputs hold no value: they are not dynamic outputs to load from a values file
+        from .attribute import Image
+        self.hasDynamicOutputAttribute = any(
+            (output.isDynamicValue and not isinstance(output, Image)) or isinstance(output, AnySet)
+            for output in self.outputs)
+
+    def getMrNodeType(self):
+        return self._mrNodeType
+
+    @classmethod
+    def imageInputs(cls):
+        """ Return the descriptions of the image inputs, in declaration order. """
+        from .attribute import Image
+        return [attr for attr in cls.inputs if isinstance(attr, Image)]
+
+    # A time-based node (TimeOffset, FrameHold, Retime...) renders the frames of its inputs it needs
+    # itself, with ctx.renderInput(name, frame): its inputs are not rendered at the current frame.
+    timeBased = False
+    # A node only passing its first input through (Dot, Clone): ctx.inputValues() looks through it
+    passThroughValues = False
+    # Image inputs only read for the values of their node (ctx.inputValues, e.g. the tracks of a
+    # Tracker) or by a UI operation: neither rendered nor asked for their ImageInfo
+    valuesOnlyInputs = ()
+
+    # Each output pixel only depends on the input pixels at the same place (color nodes, merges...):
+    # a region of interest is passed as is to the inputs (see inputRegions)
+    pointwise = False
+
+    def planContext(self, node):
+        """
+        Values outside of the node's own attributes that its result depends on (e.g. the parameters of
+        other nodes read by a Switch expression), snapshotted with the branch: a JSON-like dict, or None.
+        Called on the thread owning the graph; the render reads it with `ctx.planContext`. It is part of
+        the cache key of the node and of the nodes downstream. None by default.
+        """
+        return None
+
+    @staticmethod
+    def hiddenInputsAfterRemoval(hiddenInputs: str, listName: str, index: int) -> str:
+        """
+        The "hiddenInputs" value (comma-separated input names relative to the node, e.g. "inputs[2]")
+        once the element `index` of the list attribute `listName` is removed: its own hidden edge is
+        forgotten and the hidden elements after it move down by one, like the elements themselves.
+        """
+        import re
+        pattern = re.compile(r"^" + re.escape(listName) + r"\[(\d+)\](.*)$")
+        names = []
+        for name in (hiddenInputs or "").split(","):
+            match = pattern.match(name)
+            if match:
+                position = int(match.group(1))
+                if position == index:
+                    continue
+                if position > index:
+                    name = f"{listName}[{position - 1}]{match.group(2)}"
+            if name:
+                names.append(name)
+        return ",".join(names)
+
+    def inputRegions(self, ctx, region):
+        """
+        Return the regions of the image inputs needed to render `region` of the output (region of
+        interest, Nuke coordinates): {input name: BBox} (an input not listed, or None: the whole input).
+        By default, pointwise nodes need the same region of their inputs, the others their whole inputs.
+        """
+        from .attribute import Image
+        if not self.pointwise:
+            return None
+        return {attr.name: region for attr in self.inputs if isinstance(attr, Image)}
+
+    def infoOnlyInputs(self, ctx):
+        """
+        Return the names of the image inputs only used for their information (format, frame range,
+        read with ctx.inputInfo), which do not need to be rendered.
+        """
+        from .attribute import Image
+        return [attr.name for attr in self.inputs if isinstance(attr, Image) and attr.infoOnly]
+
+    def isIdentity(self, ctx):
+        """
+        Return the name of the image input to pass through unchanged when the parameters make the
+        node a no-op (e.g. a Blur of size 0), or None. A pass-through costs no computation and no memory.
+        """
+        return None
+
+    def getInfo(self, ctx, inputsInfo):
+        """
+        Return the `meshroom.live.ImageInfo` (format, frame range) of the node output.
+
+        Args:
+            ctx: the `meshroom.live.RenderContext` of the request.
+            inputsInfo: dict {image input name: ImageInfo or None if disconnected}.
+
+        Returns:
+            The info of the first connected image input by default.
+        """
+        for attr in self.imageInputs():
+            info = inputsInfo.get(attr.name)
+            if info is not None:
+                return info
+        raise RuntimeError("No connected image input: the node cannot determine its format.")
+
+    def render(self, ctx, inputs):
+        """
+        Compute one frame.
+
+        Args:
+            ctx: the `meshroom.live.RenderContext` of the request (frame, parameter values).
+            inputs: dict {image input name: ImageBuffer or None if disconnected}.
+
+        Returns:
+            meshroom.live.ImageBuffer: the output image.
+        """
+        raise NotImplementedError(f"No render implementation on node type: {self.__class__.__name__}")
 
     def processChunk(self, chunk):
         pass
