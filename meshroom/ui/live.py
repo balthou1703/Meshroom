@@ -672,7 +672,8 @@ class LiveController(QObject):
         (each tracked frame is shown with its keys); all the new keys are one undoable change.
         """
         from meshroom.live import tracking
-        if self._trackToken is not None or node is None or not node.hasAttribute("tracks"):
+        # Not while an action runs (e.g. the geometry tracking of a Resection: both would edit the node)
+        if self._trackToken is not None or self._actionToken is not None or node is None or not node.hasAttribute("tracks"):
             return
         input = node.attribute("input")
         if not input.isLink or not isImageOpNode(input.inputRootLink.node):
@@ -711,7 +712,8 @@ class LiveController(QObject):
                 raise EvaluationCancelled()
 
         # Tracks of a node linking them (the pins of a Resection, on one rigid geometry): tracked with its model
-        modelContext = self._trackingModelContext(node, info)
+        modelContext = self._trackingModelContext(node, token)
+        trackingModel = getattr(node.nodeDesc, "trackingModel", None)
 
         def run():
             results = {}
@@ -728,7 +730,15 @@ class LiveController(QObject):
                     # Stopped at the next keyframe (placed by hand) in the tracking direction, as in Nuke
                     keyframes = [f for f in track.get("keyframes") or [] if (f - start) * step > 0]
                     stopAt.append(min(keyframes, key=lambda f: abs(f - start)) if keyframes else None)
-                model = node.nodeDesc.trackingModel(modelContext, scaled) if modelContext is not None else None
+                model = None
+                if modelContext is not None:
+                    try:
+                        model = trackingModel(modelContext, scaled)
+                    except EvaluationCancelled:
+                        raise
+                    except Exception:
+                        # The tracks are still tracked, each on its own
+                        logging.warning("[Live] Tracking without the model of the node", exc_info=True)
 
                 def progress(done, count):
                     self._trackProgressed.emit(done / float(count))
@@ -755,7 +765,7 @@ class LiveController(QObject):
 
         threading.Thread(target=run, name="LiveTracking", daemon=True).start()
 
-    def _trackingModelContext(self, node, info):
+    def _trackingModelContext(self, node, token):
         """
         The render context of a node whose tracks are linked (its descriptor has `trackingModel`, e.g. a Resection), at
         the current frame, in a full resolution plan (the tracks are tracked at full resolution); None otherwise.
@@ -768,7 +778,10 @@ class LiveController(QObject):
         except Exception:
             logging.debug("[Live] Tracking model", exc_info=True)
             return None
-        return RenderContext(plan.nodes[plan.target], self._currentFrame, self._evaluator, plan)
+        context = RenderContext(plan.nodes[plan.target], self._currentFrame, self._evaluator, plan)
+        # "Stop" also stops what the model computes (e.g. the pose of the start frame)
+        context._token = token
+        return context
 
     @Slot()
     def stopTracking(self):

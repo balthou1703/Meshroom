@@ -413,13 +413,18 @@ into keys of a Camera or a ReadGeo.
                 nearest = min(poses, key=lambda f: (abs(f - frame), f))
                 return self.startCamera(ctx, frame, info).copy(matrix=poses[nearest])
             return self.startCamera(ctx, info=info)
-        # Solved frame after frame from the nearest frame with pins placed by hand (each pose starts from the one
-        # of the previous frame): the poses on the way are cached
-        anchor = min(keyframes, key=lambda f: (abs(f - frame), f)) if keyframes else frame
+        # Solved frame after frame from the nearest frame with pins placed by hand or a tracked pose (each pose starts
+        # from the one of the previous frame): the poses on the way are cached
+        anchors = set(keyframes) | set(poses)
+        anchor = min(anchors, key=lambda f: (abs(f - frame), f)) if anchors else frame
         step = 1 if frame >= anchor else -1
         evaluator, uid = ctx.evaluator, ctx.planNode.uid
         initial = None
         for current in range(anchor, frame + step, step):
+            if current in poses:
+                # A tracked pose (adjusted by the pins at their keyframes) is never replaced by a pins solve
+                initial = ctx.ownData("cameraOutput", current).matrix
+                continue
             cached = evaluator.cachedData(uid, "cameraOutput", current) if current != frame else None
             if cached is not None:
                 initial = cached.matrix
@@ -521,7 +526,8 @@ class _PinsModel:
         predicted = current @ np.linalg.inv(self.poses[-2]) @ current if len(self.poses) > 1 else current
         xy, depth = geotrack.projectPoints(predicted, np.array([self.points[i] for i in indices]), self.width,
                                            self.height, self.focalPixels)
-        return {index: (float(x), float(y)) for index, (x, y), d in zip(indices, xy, depth) if d > 0}
+        return {index: (float(x), float(y)) for index, (x, y), d in zip(indices, xy, depth)
+                if d > 0 and np.isfinite(x) and np.isfinite(y)}
 
     def reject(self, frame, positions):
         from meshroom.live import geotrack
@@ -529,11 +535,41 @@ class _PinsModel:
         if len(indices) < 3:
             return set()
         points = np.array([self.points[i] for i in indices])
-        matrix, inliers, _ = geotrack.robustPose(points, np.array([positions[i] for i in indices]), self.width,
-                                                 self.height, self.focalPixels, self.poses[-1])
+        found = np.array([positions[i] for i in indices])
+        matrix, inliers, _ = geotrack.robustPose(points, found, self.width, self.height, self.focalPixels, self.poses[-1])
+        rejected = {index for index, inlier in zip(indices, inliers) if not inlier} if len(indices) >= 5 else set()
+        if len(indices) == 4:
+            # 4 pins: the pose of the other 3 is always exact, the pin far from where it puts its point slipped
+            # (occlusion, a similar feature nearby) when the 4 do not fit together
+            matrix, errors = self._worstOfFour(points, found, matrix)
+            if errors is not None:
+                rejected = {indices[errors]}
+        if not np.all(np.isfinite(matrix)):
+            return rejected
         self.poses = [self.poses[-1], matrix]
-        # With 4 pins and more, a pin far from the others' pose slipped (occlusion, a similar feature nearby)
-        return {index for index, inlier in zip(indices, inliers) if not inlier} if len(indices) >= 4 else set()
+        return rejected
+
+    def _worstOfFour(self, points, found, matrix):
+        """
+        (the pose, the index of the slipped pin or None) of 4 pins: when they do not fit together, any 3 of them fit
+        exactly, so the slipped one is the pin farthest from where the pose of the previous frame, moving at constant
+        speed, puts it (relative to the others).
+        """
+        from meshroom.live import geotrack
+        xy, _ = geotrack.projectPoints(matrix, points, self.width, self.height, self.focalPixels)
+        if np.hypot(*(xy - found).T).max() <= 3.0:
+            return matrix, None
+        current = self.poses[-1]
+        predicted = current @ np.linalg.inv(self.poses[-2]) @ current if len(self.poses) > 1 else current
+        expected, _ = geotrack.projectPoints(predicted, points, self.width, self.height, self.focalPixels)
+        deviation = np.hypot(*(found - expected).T)
+        worst = int(np.argmax(deviation))
+        others = np.delete(deviation, worst)
+        if deviation[worst] <= 3.0 + 3.0 * float(np.median(others)):
+            return matrix, None
+        keep = np.arange(4) != worst
+        solved, _ = scene3d.solvePose(points[keep], found[keep], self.width, self.height, self.focalPixels, matrix)
+        return solved, worst
 
 
 class _GeoTrackAction:
@@ -602,7 +638,12 @@ class _GeoTrackAction:
             # The start frame is a keyframe of the track (its pose, from the pins or aligned, is the reference)
             self.poses[frame] = self.poseAt(frame)
             self.keyframes = sorted(set(self.keyframes) | {frame})
-            _, reason = self.track(sequence, lambda i, n: self.context.progress(i / float(n), "Track Geometry"))
+            tracked, reason = self.track(sequence, lambda i, n: self.context.progress(i / float(n), "Track Geometry"))
+            if reason:
+                # Lost or stopped: the poses of an earlier track after it would not join the new ones
+                for other in sequence[1:]:
+                    if other not in tracked and other not in self.keyframes:
+                        self.poses.pop(other, None)
         elif name == "alignGeo":
             others = [f for f in self.allKeyframes if f != frame]
             if not others:
@@ -640,7 +681,8 @@ class _GeoTrackAction:
             self.context.progress((done[0] + i) / float(total), "Refine")
         for first, last in spans:
             for frame in (first, last):
-                self.poses.setdefault(frame, self.poseAt(frame))
+                # The pose shown at the keyframe (at a keyframe of the pins: adjusted by them)
+                self.poses[frame] = self.poseAt(frame)
             forward, reason = geotrack.trackPose(self.samples, self.settings, list(range(first, last + 1)),
                                                  self.context.render, self.poses[first], self.info.width,
                                                  self.info.height, self.focalPixels, self.context.checkCancelled,

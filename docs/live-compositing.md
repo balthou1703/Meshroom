@@ -497,7 +497,7 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   à l'échelle, 3 pins et plus résolvent la pose (Gauss-Newton amorti vers la pose de départ ; DLT à partir de 6). Les
   pins se suivent comme les pistes d'un Tracker (avant / arrière), tous ensemble : à chaque frame, la pose est
   résolue avec les pins trouvés, un pin loin de l'endroit où elle met son point (glissement, occultation) s'arrête
-  là (à partir de 4 pins), et chaque pin est cherché à la frame suivante là où la pose, à vitesse constante, le met
+  là (à partir de 4 pins ; avec 4, celui qui s’écarte le plus de sa position prévue), et chaque pin est cherché à la frame suivante là où la pose, à vitesse constante, le met
   (à partir de 3 pins). La pose est résolue frame après frame depuis la keyframe la plus proche (chaque pose part de
   la précédente). La barre d'outils indique le nombre de pins de la frame et l'erreur de reprojection. Un pin compte
   entre sa première et sa dernière clé (un pin à une seule clé la tient).

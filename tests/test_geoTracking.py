@@ -284,3 +284,27 @@ def test_trackedPosesPrevailExceptAtThePinKeyframes(tmp_path):
     # At the keyframe of the pins, they solve from the stored pose (back to the truth); elsewhere the stored pose
     assert pixelError(cameraOutput(resection, 0).matrix, 0) < 0.01
     np.testing.assert_allclose(cameraOutput(resection, 5).matrix, shifted)
+
+
+def test_aFourPinSlipIsRejected():
+    from meshroom.nodes.compositing.ThreeDNodes import _PinsModel
+    focal = cameraAt(0).focalPixels(W)
+    points = _CUBE[[0, 2, 5, 7]]
+    model = _PinsModel([{"point": point.tolist()} for point in points], W, H, focal, cameraAt(0).matrix)
+    truth, _ = geotrack.projectPoints(cameraAt(1).matrix, points, W, H, focal)
+    positions = {index: tuple(xy) for index, xy in enumerate(truth)}
+    assert model.reject(1, positions) == set()
+    positions[2] = (positions[2][0] + 25.0, positions[2][1])
+    assert model.reject(1, positions) == {2}
+
+
+def test_trackedPosesAreNotReplacedByThePinsSolve(tmp_path):
+    graph, plate, resection = resectionGraph(tmp_path)
+    tracked = cameraAt(3).matrix
+    resection.geoTrack.value = geotrack.dumpPoses({3: tracked}, [])
+    graph.update()
+    plan = buildPlan(resection)
+    evaluator = Evaluator()
+    # Frame 5 solved first (its pins chain goes through frame 3), then frame 3: still the tracked pose
+    evaluator.data(plan, plan.target, "cameraOutput", 5)
+    np.testing.assert_allclose(evaluator.data(plan, plan.target, "cameraOutput", 3).matrix, tracked)

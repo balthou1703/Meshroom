@@ -382,6 +382,8 @@ def _trackStep(state: dict, previous: tuple, current: tuple, predicted, minScore
     centers.append((x, y))
     best, tried = None, []
     for center in centers:
+        if not (np.isfinite(center[0]) and np.isfinite(center[1])):
+            continue
         if any(abs(center[0] - other[0]) < 1.0 and abs(center[1] - other[1]) < 1.0 for other in tried):
             continue
         tried.append(center)

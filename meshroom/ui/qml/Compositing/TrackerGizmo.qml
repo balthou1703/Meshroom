@@ -467,6 +467,7 @@ Item {
                 font.pointSize: 16
                 text: MaterialIcons.fast_rewind
                 enabled: !root.tracking && root.tracks.length > 0
+                         && !(root.live && root.live.actionProgress >= 0)
                 onClicked: root.live.track(root.node, -1, root.selectedNames)
                 ToolTip.text: "Track backward from the current frame (selected tracks, or all)"
             }
@@ -481,6 +482,7 @@ Item {
                 font.pointSize: 16
                 text: MaterialIcons.fast_forward
                 enabled: !root.tracking && root.tracks.length > 0
+                         && !(root.live && root.live.actionProgress >= 0)
                 onClicked: root.live.track(root.node, 1, root.selectedNames)
                 ToolTip.text: "Track forward from the current frame (selected tracks, or all)"
             }
@@ -532,7 +534,7 @@ Item {
                 visible: root.pinMode
                 font.pointSize: 16
                 text: MaterialIcons.skip_previous
-                enabled: !root.tracking && root.live.actionProgress < 0
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.runAction(root.node, "trackGeoBackward")
                 ToolTip.text: "Track Geometry backward: many points of the geometry follow the plate, from the current " +
                               "frame back to the previous keyframe"
@@ -541,7 +543,7 @@ Item {
                 visible: root.pinMode
                 font.pointSize: 16
                 text: MaterialIcons.skip_next
-                enabled: !root.tracking && root.live.actionProgress < 0
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.runAction(root.node, "trackGeoForward")
                 ToolTip.text: "Track Geometry forward: many points of the geometry follow the plate, from the current " +
                               "frame to the next keyframe"
@@ -550,7 +552,7 @@ Item {
                 visible: root.pinMode
                 font.pointSize: 16
                 text: MaterialIcons.my_location
-                enabled: !root.tracking && root.live.actionProgress < 0
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.runAction(root.node, "alignGeo")
                 ToolTip.text: "Align: find the right position of the geometry at this frame (from a rough one), against " +
                               "the nearest keyframe; the frame becomes a keyframe"
@@ -559,7 +561,7 @@ Item {
                 visible: root.pinMode
                 font.pointSize: 16
                 text: MaterialIcons.auto_fix_high
-                enabled: !root.tracking && root.live.actionProgress < 0
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.runAction(root.node, "refineGeo")
                 ToolTip.text: "Refine: track the geometry again between each pair of keyframes, from both ends, and blend"
             }
@@ -567,7 +569,7 @@ Item {
                 visible: root.pinMode
                 font.pointSize: 16
                 text: MaterialIcons.layers_clear
-                enabled: !root.tracking && root.live.actionProgress < 0 && root.node.hasAttribute("geoTrack")
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0 && root.node.hasAttribute("geoTrack")
                          && root.node.attribute("geoTrack").value !== ""
                 onClicked: root.live.runAction(root.node, "clearGeoTrack")
                 ToolTip.text: "Clear the geometry track (the pins solve again)"
