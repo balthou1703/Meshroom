@@ -8,8 +8,8 @@ import MaterialIcons 2.2
  * List of the shapes of a Roto node (JSON "shapes" attribute, see meshroom/live/roto.py): name,
  * visibility, invert, feather, opacity, delete; animation keys; track links (RotoLinkRow): all the
  * tracks of a connected Tracker or some of them, and the transform fitted on them, moving the whole
- * shape or one of its points from the frame where the link is made. The "Roto links" at the top warp
- * all the shapes. The shapes are drawn in the viewer.
+ * shape or one of its points from the frame where the link is made ("Roto Links": RotoLinksField, all
+ * the shapes). The shapes are drawn in the viewer.
  */
 ColumnLayout {
     id: root
@@ -61,21 +61,6 @@ ColumnLayout {
     function setLinks(index, links) {
         _currentScene.setRotoShapeLinks(root.attribute.node, index, JSON.stringify(links), root.currentFrame)
     }
-    // Links of the whole Roto ("links" attribute): they warp all the shapes
-    readonly property var rotoLinks: {
-        var node = attribute.node
-        if (!node || !node.hasAttribute("links"))
-            return []
-        try {
-            var parsed = JSON.parse(node.attribute("links").value || "[]")
-            return Array.isArray(parsed) ? parsed : []
-        } catch (e) {
-            return []
-        }
-    }
-    function setRotoLinks(links) {
-        _currentScene.setRotoLinks(root.attribute.node, JSON.stringify(links), root.currentFrame)
-    }
     function replaced(links, index, newLink) {
         var result = JSON.parse(JSON.stringify(links))
         // Re-linked from the current frame: the shapes do not jump
@@ -124,55 +109,6 @@ ColumnLayout {
         else
             shapes[index][key] = value
         _currentScene.setAttribute(root.attribute, JSON.stringify(shapes))
-    }
-
-    // Roto links: [label] [add]; then one row per link
-    RowLayout {
-        Layout.fillWidth: true
-        visible: root.attribute.node && root.attribute.node.hasAttribute("links")
-        spacing: 4
-        Label { text: "Roto links"; font.pointSize: 8; opacity: 0.8 }
-        Label {
-            text: root.rotoLinks.length ? "" : "(none: the shapes are not warped as a whole)"
-            font.pointSize: 7
-            opacity: 0.5
-        }
-        Item { Layout.fillWidth: true }
-        MaterialToolButton {
-            text: MaterialIcons.add_link
-            font.pointSize: 8
-            padding: 2
-            enabled: root.editable && root.connectedInputs.length > 0
-            ToolTip.text: root.connectedInputs.length > 0 ?
-                              "Warp all the shapes with the tracks of a Tracker (all of them, or some), from the current frame" :
-                              "Connect a Tracker to a 'Tracker' input of the Roto to warp its shapes with its tracks"
-            onClicked: {
-                var links = JSON.parse(JSON.stringify(root.rotoLinks))
-                links.push({ "input": root.connectedInputs[0], "tracks": [], "transform": "translate rotate scale",
-                             "frame": root.currentFrame })
-                root.setRotoLinks(links)
-            }
-        }
-    }
-    Repeater {
-        model: root.rotoLinks
-        RotoLinkRow {
-            required property var modelData
-            required property int index
-            Layout.fillWidth: true
-            Layout.leftMargin: 8
-            link: modelData
-            pointCount: -1
-            trackNames: root.trackNames
-            inputLabels: root.inputLabels
-            editable: root.editable
-            onEdited: function(newLink) { root.setRotoLinks(root.replaced(root.rotoLinks, index, newLink)) }
-            onRemoved: {
-                var links = JSON.parse(JSON.stringify(root.rotoLinks))
-                links.splice(index, 1)
-                root.setRotoLinks(links)
-            }
-        }
     }
 
     Label {

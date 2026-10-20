@@ -589,6 +589,8 @@ RowLayout {
                 case "StringParam":
                     if (attribute.desc.semantic === "rotoShapes" && !attribute.isLink)
                         return rotoShapesComponent
+                    if (attribute.desc.semantic === "rotoLinks" && !attribute.isLink && !!_currentScene && !!_currentScene.live)
+                        return rotoLinksComponent
                     if (attribute.desc.semantic === "tracks" && !attribute.isLink)
                         return tracksComponent
                     if (attribute.desc.semantic.startsWith("trackNames") && !attribute.isLink && !!_currentScene && !!_currentScene.live)
@@ -1089,6 +1091,14 @@ RowLayout {
         Component {
             id: curvesComponent
             AttributeControls.CurveEditor {
+                attribute: root.attribute
+                editable: root.editable
+            }
+        }
+
+        Component {
+            id: rotoLinksComponent
+            AttributeControls.RotoLinksField {
                 attribute: root.attribute
                 editable: root.editable
             }

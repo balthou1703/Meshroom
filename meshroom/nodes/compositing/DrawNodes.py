@@ -341,7 +341,7 @@ change at another frame adds a key there; the points are interpolated between th
 Tracking: connect up to 3 Trackers to the "Tracker" inputs, then add links in the shape list: a link takes
 all the tracks of a Tracker or some of them, and the transform moving them from the link frame (translate,
 rotate, scale, translate rotate, translate rotate scale, or perspective: fitted by least squares, as the
-Stabilize node). The links at the top of the list ("Roto links") warp all the shapes; the links of a shape
+Stabilize node). The "Roto Links" warp all the shapes; the links of a shape
 move it, or one of its points (a point with its own link follows it instead of the links of the whole
 shape). Linking or changing a link keeps the shapes where they are at the current frame.
 
@@ -370,8 +370,9 @@ the matte).
         inputUsageParam(),
         desc.StringParam(name="shapes", label="Shapes", description="Shapes as JSON (edited in the viewer).",
                          value="[]", semantic="rotoShapes"),
-        desc.StringParam(name="links", label="Roto Links", value="[]", visible=False,
-                         description="Track links warping all the shapes (JSON, edited in the shape list)."),
+        desc.StringParam(name="links", label="Roto Links", value="[]", semantic="rotoLinks", visible=False,
+                         description="Track links warping all the shapes: the tracks of a Tracker (all of them, or the "
+                                     "ones checked) and the transform fitted on them, from the link frame."),
         desc.PushButtonParam(name="flowForward", label="Track Shapes Forward", semantic="liveAction",
                              description="Move the shapes along the optical flow from the current frame to the end of "
                                          "the frame range, with a key at each frame."),
