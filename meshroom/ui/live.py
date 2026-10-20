@@ -665,10 +665,11 @@ class LiveController(QObject):
     @Slot(QObject, int, "QVariantList")
     def track(self, node, direction, names):
         """
-        Track the tracks `names` (all the enabled ones if empty) of a Tracker node from the current
-        frame, forward (1) or backward (-1), to the end of the frame range of its input, in a worker
-        thread. The viewer follows the tracking (each tracked frame is shown with its keys); all the new
-        keys are one undoable change.
+        Track the tracks `names` (all the enabled ones if empty) of a Tracker node (or the pins of a Resection) from
+        the current frame, forward (1) or backward (-1), to the end of the frame range of its input, in a worker
+        thread. All the tracks move together frame after frame (each frame rendered once, see tracking.trackMany);
+        the pins of a Resection are linked by its pose (ThreeDNodes._PinsModel). The viewer follows the tracking
+        (each tracked frame is shown with its keys); all the new keys are one undoable change.
         """
         from meshroom.live import tracking
         if self._trackToken is not None or node is None or not node.hasAttribute("tracks"):
@@ -709,45 +710,65 @@ class LiveController(QObject):
             if token.cancelled:
                 raise EvaluationCancelled()
 
+        # Tracks of a node linking them (the pins of a Resection, on one rigid geometry): tracked with its model
+        modelContext = self._trackingModelContext(node, info)
+
         def run():
             results = {}
             error = ""
             lastFrame = start
             try:
-                for position, (trackIndex, track) in enumerate(selected):
-                    if token.cancelled:
-                        break
-                    # Tracked in the pixels of the input image, keys written back in the format of the track
-                    # (a track made on a proxy keeps its format)
+                # All the tracks together, frame after frame (each frame rendered once): tracked in the pixels of the
+                # input image, keys written back in the format of each track (a track made on a proxy keeps its format)
+                scaled, formats, stopAt = [], [], []
+                for trackIndex, track in selected:
                     trackFormat = track.get("format") or [info.width, info.height]
-                    backX, backY = trackFormat[0] / float(info.width), trackFormat[1] / float(info.height)
-                    track = tracking.scaleTracks([track], info.width, info.height)[0]
-
-                    def progress(done, count, position=position):
-                        self._trackProgressed.emit((position + done / float(count)) / len(selected))
-                    def onKey(frame, x, y, score, trackIndex=trackIndex, name=track.get("name"), bx=backX, by=backY,
-                              trackFormat=trackFormat):
-                        self._trackStepped.emit((generation, trackIndex, name, frame, round(x * bx, 3), round(y * by, 3),
-                                                 score, list(trackFormat)))
+                    formats.append((trackFormat, trackFormat[0] / float(info.width), trackFormat[1] / float(info.height)))
+                    scaled.append(tracking.scaleTracks([track], info.width, info.height)[0])
                     # Stopped at the next keyframe (placed by hand) in the tracking direction, as in Nuke
                     keyframes = [f for f in track.get("keyframes") or [] if (f - start) * step > 0]
-                    stopAt = min(keyframes, key=lambda f: abs(f - start)) if keyframes else None
-                    trackFramesList = [f for f in frames if stopAt is None or (stopAt - f) * step > 0]
-                    if len(trackFramesList) < 2:
-                        continue
-                    # Stopped or failing frames: the keys found so far are returned
-                    keys = tracking.trackFrames(track, trackFramesList, lambda f: self._evaluator.render(plan, f, token),
-                                                cancel=cancel, progress=progress, onKey=onKey)
+                    stopAt.append(min(keyframes, key=lambda f: abs(f - start)) if keyframes else None)
+                model = node.nodeDesc.trackingModel(modelContext, scaled) if modelContext is not None else None
+
+                def progress(done, count):
+                    self._trackProgressed.emit(done / float(count))
+
+                def onKey(position, frame, x, y, score):
+                    trackIndex, track = selected[position]
+                    trackFormat, backX, backY = formats[position]
+                    self._trackStepped.emit((generation, trackIndex, track.get("name"), frame, round(x * backX, 3),
+                                             round(y * backY, 3), score, list(trackFormat)))
+                # Stopped or failing frames: the keys found so far are returned
+                allKeys = tracking.trackMany(scaled, frames, lambda f: self._evaluator.render(plan, f, token),
+                                             cancel=cancel, progress=progress, onKey=onKey, stopAt=stopAt, model=model)
+                for (trackIndex, track), keys in zip(selected, allKeys):
                     # By index: two tracks may have the same name
                     results[trackIndex] = (track.get("name"), keys)
                     if keys:
-                        lastFrame = int(max(keys, key=lambda f: abs(int(f) - start)))
+                        last = int(max(keys, key=lambda f: abs(int(f) - start)))
+                        if abs(last - start) > abs(lastFrame - start):
+                            lastFrame = last
             except Exception as e:
                 logging.exception("[Live] Tracking error")
                 error = str(e)
             self._trackFinished.emit((node, generation, results, lastFrame, error))
 
         threading.Thread(target=run, name="LiveTracking", daemon=True).start()
+
+    def _trackingModelContext(self, node, info):
+        """
+        The render context of a node whose tracks are linked (its descriptor has `trackingModel`, e.g. a Resection), at
+        the current frame, in a full resolution plan (the tracks are tracked at full resolution); None otherwise.
+        """
+        from meshroom.live.evaluator import RenderContext
+        if not hasattr(node.nodeDesc, "trackingModel"):
+            return None
+        try:
+            plan = buildPlan(node)
+        except Exception:
+            logging.debug("[Live] Tracking model", exc_info=True)
+            return None
+        return RenderContext(plan.nodes[plan.target], self._currentFrame, self._evaluator, plan)
 
     @Slot()
     def stopTracking(self):
@@ -886,6 +907,13 @@ class LiveController(QObject):
                     pass
         values = {attr.name: _snapshotValue(attr) for attr in node.attributes
                   if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+        # The node itself (its camera / geo inputs and its own outputs, see ActionContext.nodeContext)
+        nodePlan = None
+        if isImageOpNode(node):
+            try:
+                nodePlan = buildPlan(node)
+            except Exception:
+                logging.debug(f"[Live] Action '{name}': no plan of the node", exc_info=True)
         # Parameter values of the nodes connected to the image inputs (through Dot, Clone, disabled nodes)
         inputValues = {}
         for attr in node.attributes:
@@ -905,7 +933,7 @@ class LiveController(QObject):
             result, error = None, ""
             try:
                 context = ActionContext(values, self._evaluator, plan, self._currentFrame, token, inputPlans=inputPlans,
-                                        inputValues=inputValues,
+                                        inputValues=inputValues, nodePlan=nodePlan,
                                         progress=lambda f, text="": self._actionProgressed.emit((f, text or label)),
                                         publish=lambda stepValues, frame: self._actionStepped.emit(
                                             (node, generation, stepValues, frame)))
@@ -1571,14 +1599,17 @@ class LiveController(QObject):
             return []
         for attr in node.attributes:
             semantic = getattr(attr.desc, "semantic", "")
-            if semantic not in ("tracks", "rotoShapes", "timeCurve") or attr.isOutput:
+            if semantic not in ("tracks", "rotoShapes", "timeCurve", "geoTrack") or attr.isOutput:
                 continue
             try:
                 data = json.loads(attr.value or "null")
             except (TypeError, ValueError):
                 continue
             try:
-                if semantic == "tracks":
+                if semantic == "geoTrack":
+                    # The poses tracked with "Track Geometry" of a Resection
+                    frames.update(int(f) for f in ((data or {}).get("poses") or {}))
+                elif semantic == "tracks":
                     for track in data or []:
                         frames.update(int(f) for f in (track.get("keys") or {}))
                 elif semantic == "rotoShapes":

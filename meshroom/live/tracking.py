@@ -251,8 +251,7 @@ def trackFrames(track: dict, frames: List[int], imageAt, cancel=None, minScore: 
                 progress=None, onKey=None, scores: Optional[Dict[str, float]] = None) -> Dict[str, List[float]]:
     """
     Track a point through `frames` (consecutive, forward or backward), starting from its position at
-    the first of them. The pattern is taken at the previous frame each time (it follows slow changes
-    of appearance).
+    the first of them: `trackMany` with one track.
 
     Args:
         imageAt: function(frame) -> ImageBuffer, the image to track in.
@@ -263,24 +262,78 @@ def trackFrames(track: dict, frames: List[int], imageAt, cancel=None, minScore: 
         scores: filled with the match score of each tracked frame {"frame": score} (1: perfect).
 
     Returns:
-        The new keys {"frame": [x, y]} (the start frame excluded). When stopped (`cancel` or `imageAt`
+        The new keys {"frame": [x, y]} (the start frame excluded).
+    """
+    def onTrackKey(index, frame, x, y, score):
+        if scores is not None:
+            scores[str(frame)] = round(float(score), 4)
+        if onKey:
+            onKey(frame, x, y, score)
+    return trackMany([track], frames, imageAt, cancel=cancel, minScore=minScore, progress=progress, onKey=onTrackKey)[0]
+
+
+class TrackingModel:
+    """
+    What links tracks tracked together (e.g. the pins of a Resection, all on one rigid geometry): it predicts where
+    to search them in the next frame and rejects the positions that do not fit (the other tracks go on).
+    """
+
+    def predict(self, frame: int, positions: Dict[int, Tuple[float, float]]) -> Dict[int, Tuple[float, float]]:
+        """ Where to search the tracks at `frame` ({track index: (x, y)}), from their `positions` at the previous frame. """
+        return {}
+
+    def reject(self, frame: int, positions: Dict[int, Tuple[float, float]]) -> set:
+        """ The indices of the tracks whose position found at `frame` does not fit (they stop there). """
+        return set()
+
+
+def trackMany(tracks: List[dict], frames: List[int], imageAt, cancel=None, minScore: float = 0.5, progress=None,
+              onKey=None, stopAt: Optional[List[Optional[int]]] = None,
+              model: Optional[TrackingModel] = None) -> List[Dict[str, List[float]]]:
+    """
+    Track several points together through `frames` (consecutive, forward or backward), each from its position at the
+    first of them: each frame is rendered once and all the tracks move to it before the next one. The pattern of a
+    track is taken at the previous frame each time (it follows slow changes of appearance); it is searched around its
+    position moved by its last motion (constant speed), or where `model` predicts it.
+
+    Args:
+        tracks: the tracks, in the pixels of the images (see scaleTracks).
+        imageAt: function(frame) -> ImageBuffer, the image to track in.
+        cancel: function raising to stop.
+        minScore: a track stops when its match is worse than this.
+        progress: function(index, count) called after each frame.
+        onKey: function(track index, frame, x, y, score) called for each tracked position (live display).
+        stopAt: for each track, a frame it does not reach (e.g. its next keyframe), or None.
+        model: links the tracks (see TrackingModel).
+
+    Returns:
+        For each track, its new keys {"frame": [x, y]} (the start frame excluded). When stopped (`cancel` or `imageAt`
         raising EvaluationCancelled) or when a frame cannot be rendered, the keys found so far.
     """
     from .evaluator import EvaluationCancelled, EvaluationError
-    size = int(track.get("pattern", 21)) | 1  # Odd sizes: the pattern has a center pixel
-    searchSize = int(track.get("search", 61)) | 1
-    start = trackPosition(track, frames[0])
-    if start is None:
-        return {}
-    x, y = start
-    keys = {}
+    keys = [{} for _ in tracks]
+    if len(frames) < 2:
+        return keys
+    step = 1 if frames[-1] >= frames[0] else -1
+    states = {}
+    for index, track in enumerate(tracks):
+        start = trackPosition(track, frames[0])
+        if start is None:
+            continue
+        # Odd sizes: the pattern has a center pixel
+        states[index] = {"position": start, "motion": (0.0, 0.0), "size": int(track.get("pattern", 21)) | 1,
+                         "search": int(track.get("search", 61)) | 1,
+                         "stopAt": stopAt[index] if stopAt and index < len(stopAt) else None}
+    if not states:
+        return keys
     try:
         previous = luminance(imageAt(frames[0]))
     except (EvaluationCancelled, EvaluationError):
         return keys
-    for index, frame in enumerate(frames[1:], start=1):
-        pattern = _patch(previous[0], previous[1], x, y, size)
-        if pattern is None:
+    for frameIndex, frame in enumerate(frames[1:], start=1):
+        active = {index: state for index, state in states.items()
+                  if state["stopAt"] is None or (state["stopAt"] - frame) * step > 0}
+        if not active:
             break
         try:
             if cancel:
@@ -288,16 +341,56 @@ def trackFrames(track: dict, frames: List[int], imageAt, cancel=None, minScore: 
             current = luminance(imageAt(frame))
         except (EvaluationCancelled, EvaluationError):
             break
-        match = matchPattern(pattern, current[0], current[1], x, y, searchSize)
-        if match is None or match[2] < minScore:
-            break
-        x, y = refine(pattern, current[0], current[1], match[0], match[1])
-        keys[str(frame)] = [round(float(x), 3), round(float(y), 3)]
-        if scores is not None:
-            scores[str(frame)] = round(float(match[2]), 4)
-        if onKey:
-            onKey(frame, keys[str(frame)][0], keys[str(frame)][1], float(match[2]))
+        predicted = model.predict(frame, {index: state["position"] for index, state in active.items()}) if model else {}
+        found = {}
+        for index, state in active.items():
+            match = _trackStep(state, previous, current, predicted.get(index), minScore)
+            if match is not None:
+                found[index] = match
+        rejected = model.reject(frame, {index: match[:2] for index, match in found.items()}) if model and found else set()
+        for index in list(states):
+            if index not in active:
+                continue
+            if index not in found or index in rejected:
+                del states[index]
+                continue
+            x, y, score = found[index]
+            state = states[index]
+            state["motion"] = (x - state["position"][0], y - state["position"][1])
+            state["position"] = (x, y)
+            keys[index][str(frame)] = [round(float(x), 3), round(float(y), 3)]
+            if onKey:
+                onKey(index, frame, keys[index][str(frame)][0], keys[index][str(frame)][1], float(score))
         previous = current
         if progress:
-            progress(index, len(frames) - 1)
+            progress(frameIndex, len(frames) - 1)
+        if not states:
+            break
     return keys
+
+
+def _trackStep(state: dict, previous: tuple, current: tuple, predicted, minScore: float):
+    """ The position (x, y, score) of a tracked point in the `current` image, or None if it is lost. """
+    x, y = state["position"]
+    pattern = _patch(previous[0], previous[1], x, y, state["size"])
+    if pattern is None:
+        return None
+    # Searched where it is expected (its last motion, or the prediction of the model), then where it was
+    centers = [predicted] if predicted is not None else []
+    motion = state["motion"]
+    centers.append((x + motion[0], y + motion[1]))
+    centers.append((x, y))
+    best, tried = None, []
+    for center in centers:
+        if any(abs(center[0] - other[0]) < 1.0 and abs(center[1] - other[1]) < 1.0 for other in tried):
+            continue
+        tried.append(center)
+        match = matchPattern(pattern, current[0], current[1], center[0], center[1], state["search"])
+        if match is not None and (best is None or match[2] > best[2]):
+            best = match
+        if best is not None and best[2] >= max(minScore, 0.9):
+            break
+    if best is None or best[2] < minScore:
+        return None
+    refinedX, refinedY = refine(pattern, current[0], current[1], best[0], best[1])
+    return refinedX, refinedY, best[2]
