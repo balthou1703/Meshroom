@@ -500,6 +500,31 @@ Item {
                 onClicked: root.deleteKeyOnSelection()
                 ToolTip.text: "Delete the key of the current frame of the selected tracks"
             }
+            // Keys removed after / before the current frame (its key kept), or the tracked ones (keyframes kept)
+            MaterialToolButton {
+                font.pointSize: 16
+                text: MaterialIcons.first_page
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
+                onClicked: root.live.deleteKeys(root.node, root.selectedNames, "backward")
+                ToolTip.text: "Delete the keys before the current frame (its key kept), of the selected tracks or all" +
+                              (root.pinMode ? ", and the geometry track before it" : "")
+            }
+            MaterialToolButton {
+                font.pointSize: 16
+                text: MaterialIcons.last_page
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
+                onClicked: root.live.deleteKeys(root.node, root.selectedNames, "forward")
+                ToolTip.text: "Delete the keys after the current frame (its key kept), of the selected tracks or all" +
+                              (root.pinMode ? ", and the geometry track after it" : "")
+            }
+            MaterialToolButton {
+                font.pointSize: 16
+                text: MaterialIcons.auto_delete
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
+                onClicked: root.live.deleteKeys(root.node, root.selectedNames, "tracked")
+                ToolTip.text: "Delete the tracked keys, keeping the keyframes placed by hand, of the selected tracks or all" +
+                              (root.pinMode ? " (and the tracked poses of the geometry, its keyframes kept)" : "")
+            }
             MaterialToolButton {
                 font.pointSize: 16
                 text: MaterialIcons.delete_outline

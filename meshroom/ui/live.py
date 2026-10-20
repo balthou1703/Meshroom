@@ -816,6 +816,43 @@ class LiveController(QObject):
         context._token = token
         return context
 
+    @Slot(QObject, "QVariantList", str)
+    def deleteKeys(self, node, names, mode):
+        """
+        Remove keys of the tracks `names` (all if empty) of a Tracker or a Resection (and the poses of its geometry
+        track), keeping the current frame (see tracking.deleteKeys): "forward", "backward", or "tracked" (the keys
+        found by the tracking, the keyframes placed by hand kept). One undoable change.
+        """
+        import json
+        from meshroom.live import geotrack, tracking
+        if node is None or self._trackToken is not None or self._actionToken is not None:
+            return
+        changes = []
+        try:
+            if node.hasAttribute("tracks"):
+                tracks, removed = tracking.deleteKeys(tracking.parseTracks(node.attribute("tracks").value), list(names or []),
+                                                      self._currentFrame, mode)
+                if removed:
+                    changes.append((node.attribute("tracks"), json.dumps(tracks)))
+            if node.hasAttribute("geoTrack") and node.attribute("geoTrack").value:
+                text, removed = geotrack.deletePoses(node.attribute("geoTrack").value, self._currentFrame, mode)
+                if removed:
+                    changes.append((node.attribute("geoTrack"), text))
+        except (ValueError, RuntimeError) as e:
+            self._setError(f"Delete keys: {e}", node.name)
+            return
+        if not changes:
+            return
+        uiGraph = self.parent()
+        label = {"forward": "Delete Keys Forward", "backward": "Delete Keys Backward"}.get(mode, "Delete Tracked Keys")
+        if uiGraph is not None and hasattr(uiGraph, "groupedGraphModification"):
+            with uiGraph.groupedGraphModification(label):
+                for attribute, value in changes:
+                    uiGraph.setAttribute(attribute, value)
+        else:
+            for attribute, value in changes:
+                attribute.value = value
+
     @Slot()
     def stopTracking(self):
         """ Stop the tracking: the frames already tracked are kept. """

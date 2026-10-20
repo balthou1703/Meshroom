@@ -474,3 +474,22 @@ def dumpPoses(poses: Dict[int, np.ndarray], keyframes) -> str:
     return json.dumps({"poses": {str(frame): [round(float(v), 9) for v in np.asarray(matrix).ravel()]
                                  for frame, matrix in sorted(poses.items())},
                        "keyframes": sorted({int(frame) for frame in keyframes})})
+
+
+def deletePoses(text: str, frame: int, mode: str) -> Tuple[str, int]:
+    """
+    tracking.deleteKeys for the poses tracked with "Track Geometry" (JSON of parsePoses): forward / backward of `frame`
+    (the pose at `frame` kept), or the tracked ones (the keyframes kept). Returns (the new JSON, the number removed).
+    """
+    poses, keyframes = parsePoses(text)
+    if mode == "forward":
+        removed = [f for f in poses if f > frame]
+        keyframes = [f for f in keyframes if f <= frame]
+    elif mode == "backward":
+        removed = [f for f in poses if f < frame]
+        keyframes = [f for f in keyframes if f >= frame]
+    else:
+        removed = [f for f in poses if f not in keyframes]
+    for f in removed:
+        del poses[f]
+    return dumpPoses(poses, keyframes), len(removed)

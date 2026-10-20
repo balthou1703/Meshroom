@@ -372,3 +372,30 @@ def test_topologySharedAcrossFrames(tmp_path):
     # The faces (and their edges, computed once) are shared by the geometry of every frame
     assert first is not second and first.topology is second.topology
     assert first.edges() is second.edges()
+
+
+def test_deleteKeysForwardBackwardOrTracked():
+    tracks = [{"name": "a", "keys": {str(f): [f, 0] for f in range(1, 11)}, "scores": {str(f): 0.9 for f in range(2, 11)},
+               "keyframes": [1, 5, 9]},
+              {"name": "b", "keys": {"3": [0, 0], "7": [1, 1]}}]
+    forward, removed = tracking.deleteKeys(tracks, [], 5, "forward")
+    assert sorted(map(int, forward[0]["keys"])) == [1, 2, 3, 4, 5] and forward[0]["keyframes"] == [1, 5]
+    assert "6" not in forward[0]["scores"] and list(forward[1]["keys"]) == ["3"] and removed == 6
+    backward, _ = tracking.deleteKeys(tracks, ["a"], 5, "backward")
+    assert sorted(map(int, backward[0]["keys"])) == [5, 6, 7, 8, 9, 10] and backward[0]["keyframes"] == [5, 9]
+    assert backward[1] == tracks[1]
+    # The tracked keys go, the keyframes stay; a track without keyframes is left as it is
+    tracked, removed = tracking.deleteKeys(tracks, [], 5, "tracked")
+    assert sorted(map(int, tracked[0]["keys"])) == [1, 5, 9] and tracked[1] == tracks[1] and removed == 7
+    assert len(tracks[0]["keys"]) == 10
+
+
+def test_deletePosesOfTheGeometryTrack():
+    poses = {f: cameraAt(f).matrix for f in range(10)}
+    text = geotrack.dumpPoses(poses, [2, 6])
+    forward, removed = geotrack.deletePoses(text, 4, "forward")
+    assert sorted(geotrack.parsePoses(forward)[0]) == [0, 1, 2, 3, 4] and geotrack.parsePoses(forward)[1] == [2]
+    tracked, _ = geotrack.deletePoses(text, 4, "tracked")
+    assert sorted(geotrack.parsePoses(tracked)[0]) == [2, 6]
+    backward, removed = geotrack.deletePoses(text, 4, "backward")
+    assert min(geotrack.parsePoses(backward)[0]) == 4 and removed == 4

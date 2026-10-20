@@ -265,7 +265,11 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   sous-pixel). Pendant le suivi, le viewer avance avec lui et les clés apparaissent au fur et à
   mesure (une seule étape d'annulation). Les frames posées à la main sont des keyframes (vignettes en
   haut du viewer), la fenêtre de zoom (en haut à gauche) agrandit la piste sélectionnée, « Error »
-  colore le trajet du rouge (mauvaise corrélation) au vert. Toutes les pistes suivies avancent ensemble, frame après
+  colore le trajet du rouge (mauvaise corrélation) au vert. Trois boutons suppriment des clés des pistes
+  sélectionnées (toutes sans sélection), en gardant celle de la frame courante : avant elle, après elle, ou les clés
+  trouvées par le suivi en gardant les keyframes posées à la main (une piste sans keyframe, d'un autotrack, n'est pas
+  touchée) ; sur une Resection, les poses du suivi de géométrie suivent la même règle (une étape d'annulation,
+  `tracking.deleteKeys`, `geotrack.deletePoses`). Toutes les pistes suivies avancent ensemble, frame après
   frame (chaque frame rendue une fois, `tracking.trackMany`) ; chacune est cherchée là où la mène son dernier
   mouvement (vitesse constante), puis là où elle était, et s'arrête seule (corrélation trop faible, sa prochaine
   keyframe). Avec 4 pistes sélectionnées (dans l'ordre

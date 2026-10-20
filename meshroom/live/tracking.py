@@ -129,6 +129,45 @@ def scaleTracks(tracks: List[dict], width: int, height: int) -> List[dict]:
     return result
 
 
+KEY_DELETIONS = ("forward", "backward", "tracked")
+
+
+def deleteKeys(tracks: List[dict], names, frame: int, mode: str) -> Tuple[List[dict], int]:
+    """
+    Remove keys of the tracks `names` (all of them if empty), keeping the key at `frame`:
+        forward: the keys after `frame`; backward: the keys before it;
+        tracked: the keys found by the tracking, the keyframes (placed by hand) kept (a track without keyframes, e.g.
+                 of an autotrack, is left as it is).
+
+    Returns:
+        (the new tracks, the number of keys removed).
+    """
+    import copy
+    if mode not in KEY_DELETIONS:
+        raise ValueError(f"Unknown key deletion: {mode}")
+    result, removed = copy.deepcopy(tracks), 0
+    for track in result:
+        if names and track.get("name") not in names:
+            continue
+        keyframes = [int(f) for f in track.get("keyframes") or []]
+        if mode == "tracked" and not keyframes:
+            continue
+        keys, scores = track.get("keys") or {}, track.get("scores") or {}
+        for key in list(keys):
+            try:
+                keyFrame = int(key)
+            except ValueError:
+                continue
+            if (mode == "forward" and keyFrame > frame) or (mode == "backward" and keyFrame < frame) or \
+                    (mode == "tracked" and keyFrame not in keyframes):
+                del keys[key]
+                scores.pop(key, None)
+                removed += 1
+        if mode != "tracked" and "keyframes" in track:
+            track["keyframes"] = [f for f in keyframes if (f <= frame if mode == "forward" else f >= frame)]
+    return result, removed
+
+
 def trackNames(text: str) -> List[str]:
     """ Track names from a comma separated list ("" -> []: all the tracks). """
     return [name.strip() for name in (text or "").split(",") if name.strip()]
