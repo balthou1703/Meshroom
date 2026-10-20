@@ -512,6 +512,20 @@ Item {
                 onClicked: root.showError = !root.showError
                 ToolTip.text: "Error: color the paths by match quality (green: good, red: poor)"
             }
+            // Resection: start from the camera stepped back to see the whole geometry, centered
+            MaterialToolButton {
+                readonly property var attribute: root.pinMode && root.node.hasAttribute("centerGeometry")
+                                                 ? root.node.attribute("centerGeometry") : null
+                visible: !!attribute
+                font.pointSize: 16
+                text: MaterialIcons.center_focus_strong
+                checkable: true
+                checked: !!attribute && attribute.value
+                enabled: !root.tracking
+                onClicked: _currentScene.setAttribute(attribute, !attribute.value)
+                ToolTip.text: "Center Geometry: step the starting camera back along its view axis until the whole geometry " +
+                              "is centered in the view (large geometry around the camera)"
+            }
             // Pins of the Resection at this frame and their reprojection error
             Label {
                 visible: root.pinMode
