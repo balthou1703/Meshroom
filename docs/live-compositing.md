@@ -321,6 +321,9 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   « Import Tracks » copie ses pistes dans le Tracker (ajoutées, ou remplaçant les siennes avec
   « Replace Tracks ») et coupe le lien : elles deviennent éditables.
 - **CornerPin** : homographie entre 4 coins « From » et « To », ou pilotée par 4 pistes.
+- **Choix des pistes** (Stabilize, MotionBlur, CornerPin, paramètre « Tracks ») : un bouton ouvre la liste
+  des pistes du Tracker connecté, à cocher (« All tracks » : toutes, aussi celles ajoutées ensuite ; CornerPin :
+  4 pistes, dans l'ordre des coins, numérotées dans la liste). La valeur reste les noms séparés par des virgules.
 - **Stabilize** : entrée Tracker ; transform ajustée par moindres carrés : translate (1 piste),
   rotate, scale, translate rotate, translate rotate scale (2 pistes), perspective (homographie :
   8 valeurs, donc 4 pistes au moins) ; option Match-Move.

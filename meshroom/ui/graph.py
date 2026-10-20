@@ -2195,7 +2195,8 @@ class UIGraph(QObject):
                             rotoLinks = []
                         if isinstance(rotoLinks, list) and renamed(rotoLinks):
                             self.setAttribute(node.attribute("links"), json.dumps(rotoLinks))
-                elif node.hasAttribute("tracks") and not node.attribute("tracks").desc.semantic:
+                elif node.hasAttribute("tracks") and \
+                        (node.attribute("tracks").desc.semantic or "trackNames").startswith("trackNames"):
                     # CornerPin, Stabilize, MotionBlur: track names, comma separated
                     names = [name.strip() for name in node.attribute("tracks").value.split(",")]
                     if oldName in names:

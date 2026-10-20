@@ -262,8 +262,9 @@ plane). "Invert" applies the opposite transform (e.g. to flatten a plane).
         _corner("from2", "From 2", "Bottom-right corner of the input.", 1920.0, 0.0),
         _corner("from3", "From 3", "Top-right corner of the input.", 1920.0, 1080.0),
         _corner("from4", "From 4", "Top-left corner of the input.", 0.0, 1080.0),
-        desc.StringParam(name="tracks", label="Tracks",
-                         description="Names of the 4 tracks driving the corners, comma separated (empty: the corners above).",
+        desc.StringParam(name="tracks", label="Tracks", semantic="trackNames:4",
+                         description="The 4 tracks driving the corners, chosen in the list of the connected Tracker in "
+                                     "the order of the corners (names comma separated; empty: the corners above).",
                          value=""),
         desc.IntParam(name="referenceFrame", label="Reference Frame",
                       description="Frame where the tracks give the 'From' corners.", value=1, range=(-1000, 10000, 1)),

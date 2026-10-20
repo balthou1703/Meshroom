@@ -591,6 +591,8 @@ RowLayout {
                         return rotoShapesComponent
                     if (attribute.desc.semantic === "tracks" && !attribute.isLink)
                         return tracksComponent
+                    if (attribute.desc.semantic.startsWith("trackNames") && !attribute.isLink && !!_currentScene && !!_currentScene.live)
+                        return trackPickerComponent
                     if (attribute.desc.semantic === "autoTracks" || attribute.desc.semantic === "cameraSolve")
                         return jsonSummaryComponent
                     if ((attribute.desc.semantic === "colorCurves" || attribute.desc.semantic === "timeCurve") && !attribute.isLink)
@@ -896,6 +898,17 @@ RowLayout {
                 onEditingFinished: (value) => {
                     _currentScene.setAttribute(root.attribute, value)
                 }
+            }
+        }
+
+        // Tracks of the connected Tracker (Stabilize, MotionBlur, CornerPin), checked in a list
+        Component {
+            id: trackPickerComponent
+            AttributeControls.TrackPicker {
+                attribute: root.attribute
+                editable: root.editable
+                // "trackNames:4": exactly 4 tracks, in order
+                count: root.attribute.desc.semantic.indexOf(":") >= 0 ? Number(root.attribute.desc.semantic.split(":")[1]) : 0
             }
         }
 

@@ -128,8 +128,9 @@ def _trackerInputs(description):
         imageInput(description=description),
         desc.Image(name="tracker", label="Tracker", description="Tracker (or CameraTracker) whose tracks are used.",
                    optional=True, infoOnly=True),
-        desc.StringParam(name="tracks", label="Tracks",
-                         description="Names of the tracks used, comma separated (empty: all the enabled tracks).",
+        desc.StringParam(name="tracks", label="Tracks", semantic="trackNames",
+                         description="The tracks used, chosen in the list of the connected Tracker (names comma "
+                                     "separated; empty: all the enabled tracks).",
                          value=""),
     ]
 
