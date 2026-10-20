@@ -486,6 +486,14 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   la caméra, décalage de frames, fps), ou entrée « Input Camera » (prise telle quelle, ex. la caméra d'une Resection).
 - **ReadGeo** : OBJ, PLY (ascii / binaire), USD, Alembic, FBX (mêmes conditions), échantillons de temps lus à chaque
   frame ; translate / rotate / scale / uniform scale ou « Input Matrix ». **MergeGeo** : jusqu'à 4 géométries.
+- **Affichage de la géométrie** (Resection, « Display », `meshroom/live/geoRender.py`) : shaded (surface éclairée
+  depuis la caméra, avec ses arêtes caractéristiques ; par défaut), edges (silhouettes, arêtes vives au-delà de
+  « Crease Angle », bords ouverts : la forme d'un maillage dense sans le remplir), wireframe (toutes les arêtes des
+  faces), points, none. « Hide Hidden Lines » retire ce qui est derrière la surface (tampon de profondeur : chaque
+  pixel prend le triangle le plus proche qui contient son centre, un triangle plus petit qu'un pixel prend le pixel
+  de son centre ; sur le GPU avec « Use GPU »). Lignes antialiasées. Les faces d'une géométrie (triangles, arêtes,
+  voisinage des arêtes) sont une `Topology` partagée par toutes ses frames (`scene3d.Topology`) : calculées une fois,
+  pas à chaque frame (c'était la latence du défilement de la timeline sur un maillage dense).
 - **Resection** (à la GeoTracker) : entrées plaque, géométrie, caméra (optique et pose de départ ; sans caméra :
   35 mm sur 36 mm, cadrant la géométrie ; « Center Geometry » recule la caméra de départ le long de son axe jusqu'à
   centrer toute la géométrie, utile quand une grande géométrie entoure la caméra). Sorties : **Camera** (en premier : la caméra résolue, la géométrie fixe),

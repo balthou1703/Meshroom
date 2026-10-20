@@ -308,3 +308,67 @@ def test_trackedPosesAreNotReplacedByThePinsSolve(tmp_path):
     # Frame 5 solved first (its pins chain goes through frame 3), then frame 3: still the tracked pose
     evaluator.data(plan, plan.target, "cameraOutput", 5)
     np.testing.assert_allclose(evaluator.data(plan, plan.target, "cameraOutput", 3).matrix, tracked)
+
+
+# Drawing of the geometry (meshroom/live/geoRender.py)
+
+def test_depthBufferCoversTheCubeAsRayCasting():
+    from meshroom.live import geoRender
+    from meshroom.live.imageBuffer import BBox
+    camera = cameraAt(3)
+    u, v, z, _ = geoRender.screenPositions(CUBE, camera, W, H, BBox(0, 0, W, H))
+    zbuffer, ids = geoRender.rasterize(u, v, z, CUBE.triangles(), (H, W))
+    # The background of the synthetic render is 0.05: the cube is where the rays hit it
+    hit = renderCube(camera).rgba()[:, :, 0] != np.float32(0.05)
+    covered = np.isfinite(zbuffer)
+    assert (covered == hit).mean() > 0.995 and ((ids >= 0) == covered).all()
+    # The depth of the cube center row is between the near and far faces
+    assert 4.0 < np.nanmin(np.where(covered, zbuffer, np.nan)) < 6.5
+
+
+def test_featureEdgesOfACube():
+    from meshroom.live import geoRender
+    # The diagonals of the quads (flat) are not drawn; the 12 edges of the cube are creases
+    edges = geoRender.featureEdges(CUBE, cameraAt(0).position)
+    assert len(edges) == 12 and {tuple(e) for e in edges} == {tuple(e) for e in CUBE.edges()}
+
+
+def test_hiddenEdgesAreNotDrawn():
+    from meshroom.live import geoRender
+    from meshroom.live.imageBuffer import BBox
+    camera = scene3d.CameraData(scene3d.lookAt((0, 0, 6), (0, 0, 0)), 35, 36, 24)
+    drawn = {}
+    for hidden in (False, True):
+        rgba = np.zeros((H, W, 4), np.float32)
+        geoRender.drawGeometry(rgba, BBox(0, 0, W, H), CUBE, camera, W, H, "wireframe", (1, 1, 1), 1.0,
+                               hiddenLines=hidden)
+        drawn[hidden] = rgba[:, :, 3] > 0.5
+    # Facing the cube: the back square (smaller) is drawn only without the hidden lines
+    back, _ = geotrack.projectPoints(camera.matrix, _CUBE[:4], W, H, camera.focalPixels(W))
+    row, column = int(H - back[0, 1]), int(round(back[0, 0] + (back[1, 0] - back[0, 0]) / 2))
+    assert drawn[False][row - 1:row + 2, column].any() and not drawn[True][row - 1:row + 2, column].any()
+    assert drawn[True].sum() < drawn[False].sum()
+
+
+def test_shadedDisplay():
+    from meshroom.live import geoRender
+    from meshroom.live.imageBuffer import BBox
+    rgba = np.zeros((H, W, 4), np.float32)
+    geoRender.drawGeometry(rgba, BBox(0, 0, W, H), CUBE, cameraAt(3), W, H, "shaded", (0.0, 1.0, 0.0), 1.0)
+    hit = renderCube(cameraAt(3)).rgba()[:, :, 0] != np.float32(0.05)
+    # The silhouette lines spill over the edge by a pixel (antialiased)
+    assert rgba[hit, 1].mean() > 0.3 and rgba[~hit, 1].mean() < 0.02 and rgba[:, :, 0].max() == 0.0
+
+
+def test_topologySharedAcrossFrames(tmp_path):
+    from meshroom.live import Evaluator
+    graph, plate, resection = resectionGraph(tmp_path)
+    readGeo = resection.geo.inputRootLink.node
+    readGeo.translate.value = {"x": 1.0, "y": 0.0, "z": 0.0}
+    graph.update()
+    plan = buildPlan(readGeo)
+    evaluator = Evaluator()
+    first, second = (evaluator.data(plan, plan.target, "output", frame) for frame in (1, 2))
+    # The faces (and their edges, computed once) are shared by the geometry of every frame
+    assert first is not second and first.topology is second.topology
+    assert first.edges() is second.edges()

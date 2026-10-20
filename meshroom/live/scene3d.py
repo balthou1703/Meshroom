@@ -261,52 +261,37 @@ def lookAt(eye, target, up=(0.0, 1.0, 0.0)) -> np.ndarray:
 
 # Geometries
 
-class GeoData:
+class Topology:
     """
-    Geometry at one frame, in world space: vertices (n, 3) and polygons (`faceCounts`: number of vertices of
-    each face, `faceIndices`: their vertex indices, concatenated). Without faces: a point cloud.
+    The faces of a geometry, shared by its GeoData at every frame (only the vertices move): the triangles, the edges
+    and the triangles on each side of an edge are computed once, not at each frame.
     """
 
-    def __init__(self, vertices=None, faceCounts=None, faceIndices=None, name: str = ""):
-        self.vertices = np.asarray(vertices if vertices is not None else np.zeros((0, 3)), dtype=np.float64).reshape(-1, 3)
+    def __init__(self, faceCounts=None, faceIndices=None, vertexCount: Optional[int] = None):
         self.faceCounts = np.asarray(faceCounts if faceCounts is not None else [], dtype=np.int64).ravel()
         self.faceIndices = np.asarray(faceIndices if faceIndices is not None else [], dtype=np.int64).ravel()
         if self.faceCounts.sum() != len(self.faceIndices):
             raise ValueError("The face vertex counts do not match the face vertex indices.")
-        if len(self.faceIndices) and (self.faceIndices.min() < 0 or self.faceIndices.max() >= len(self.vertices)):
+        if len(self.faceIndices) and (self.faceIndices.min() < 0 or
+                                      (vertexCount is not None and self.faceIndices.max() >= vertexCount)):
             raise ValueError("Face vertex index out of range.")
-        self.name = name
-        self._triangles = None
-        self._edges = None
+        self.maxIndex = int(self.faceIndices.max()) if len(self.faceIndices) else -1
+        # Reentrant: a cached value is computed from another one (the triangle edges from the triangles)
+        self._lock = threading.RLock()
+        self._cache = {}
 
-    @property
-    def isEmpty(self) -> bool:
-        return len(self.vertices) == 0
-
-    def transformed(self, matrix: np.ndarray) -> "GeoData":
-        if matrix is None or np.allclose(matrix, np.eye(4)):
-            return self
-        return GeoData(transformPoints(matrix, self.vertices), self.faceCounts, self.faceIndices, self.name)
-
-    @staticmethod
-    def merged(geos: Sequence["GeoData"]) -> "GeoData":
-        geos = [geo for geo in geos if geo is not None]
-        if not geos:
-            return GeoData()
-        if len(geos) == 1:
-            return geos[0]
-        offsets = np.cumsum([0] + [len(geo.vertices) for geo in geos[:-1]])
-        return GeoData(np.concatenate([geo.vertices for geo in geos]),
-                       np.concatenate([geo.faceCounts for geo in geos]),
-                       np.concatenate([geo.faceIndices + offset for geo, offset in zip(geos, offsets)]),
-                       "+".join(geo.name for geo in geos if geo.name))
+    def _cached(self, key, compute):
+        with self._lock:
+            if key not in self._cache:
+                self._cache[key] = compute()
+            return self._cache[key]
 
     def _faceStarts(self) -> np.ndarray:
         return np.r_[0, np.cumsum(self.faceCounts)[:-1]].astype(np.int64)
 
     def triangles(self) -> np.ndarray:
         """ Vertex indices (m, 3) of the triangles of the faces (fan triangulation). """
-        if self._triangles is None:
+        def compute():
             starts, result = self._faceStarts(), []
             for count in np.unique(self.faceCounts):
                 if count < 3:
@@ -315,12 +300,12 @@ class GeoData:
                 for k in range(1, count - 1):
                     result.append(np.c_[self.faceIndices[faceStarts], self.faceIndices[faceStarts + k],
                                         self.faceIndices[faceStarts + k + 1]])
-            self._triangles = np.concatenate(result) if result else np.zeros((0, 3), dtype=np.int64)
-        return self._triangles
+            return np.concatenate(result) if result else np.zeros((0, 3), dtype=np.int64)
+        return self._cached("triangles", compute)
 
     def edges(self) -> np.ndarray:
         """ Unique vertex index pairs (m, 2) of the edges of the faces. """
-        if self._edges is None:
+        def compute():
             starts, result = self._faceStarts(), []
             for count in np.unique(self.faceCounts):
                 if count < 2:
@@ -328,12 +313,111 @@ class GeoData:
                 faceStarts = starts[self.faceCounts == count]
                 for k in range(count):
                     result.append(np.c_[self.faceIndices[faceStarts + k], self.faceIndices[faceStarts + (k + 1) % count]])
-            if result:
-                pairs = np.sort(np.concatenate(result), axis=1)
-                self._edges = np.unique(pairs, axis=0)
-            else:
-                self._edges = np.zeros((0, 2), dtype=np.int64)
-        return self._edges
+            if not result:
+                return np.zeros((0, 2), dtype=np.int64)
+            return np.unique(np.sort(np.concatenate(result), axis=1), axis=0)
+        return self._cached("edges", compute)
+
+    def triangleEdges(self):
+        """
+        The edges of the triangles (m, 2) and the triangles on their two sides (m, 2) (-1: an open edge; a third
+        triangle on an edge is ignored): to find the silhouettes and the creases.
+        """
+        def compute():
+            triangles = self.triangles()
+            if not len(triangles):
+                return np.zeros((0, 2), dtype=np.int64), np.zeros((0, 2), dtype=np.int64)
+            pairs = np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1)
+            faces = np.tile(np.arange(len(triangles)), 3)
+            edges, inverse = np.unique(pairs, axis=0, return_inverse=True)
+            inverse = inverse.ravel()
+            order = np.argsort(inverse, kind="stable")
+            sortedEdges = inverse[order]
+            first = np.r_[True, sortedEdges[1:] != sortedEdges[:-1]]
+            sides = np.full((len(edges), 2), -1, dtype=np.int64)
+            sides[sortedEdges[first], 0] = faces[order][first]
+            # The second triangle of an edge: the entry right after its first one
+            secondIndex = np.flatnonzero(~first)
+            secondIndex = secondIndex[first[secondIndex - 1]]
+            sides[sortedEdges[secondIndex], 1] = faces[order][secondIndex]
+            return edges, sides
+        return self._cached("triangleEdges", compute)
+
+
+_MERGED_TOPOLOGIES: "OrderedDict[tuple, tuple]" = OrderedDict()
+_MERGED_LOCK = threading.Lock()
+
+
+def _mergedTopology(geos) -> "Topology":
+    """ The topology of geometries merged together, the same object while they keep their topologies. """
+    topologies = tuple(geo.topology for geo in geos)
+    key = tuple(id(topology) for topology in topologies) + tuple(len(geo.vertices) for geo in geos)
+    with _MERGED_LOCK:
+        cached = _MERGED_TOPOLOGIES.get(key)
+        if cached is not None and all(a is b for a, b in zip(cached[0], topologies)):
+            _MERGED_TOPOLOGIES.move_to_end(key)
+            return cached[1]
+    offsets = np.cumsum([0] + [len(geo.vertices) for geo in geos[:-1]])
+    topology = Topology(np.concatenate([geo.faceCounts for geo in geos]),
+                        np.concatenate([geo.faceIndices + offset for geo, offset in zip(geos, offsets)]))
+    with _MERGED_LOCK:
+        _MERGED_TOPOLOGIES[key] = (topologies, topology)
+        while len(_MERGED_TOPOLOGIES) > 32:
+            _MERGED_TOPOLOGIES.popitem(last=False)
+    return topology
+
+
+class GeoData:
+    """
+    Geometry at one frame, in world space: vertices (n, 3) and polygons (`faceCounts`: number of vertices of
+    each face, `faceIndices`: their vertex indices, concatenated). Without faces: a point cloud. The faces are a
+    Topology, shared with the same geometry at the other frames.
+    """
+
+    def __init__(self, vertices=None, faceCounts=None, faceIndices=None, name: str = "",
+                 topology: Optional[Topology] = None):
+        self.vertices = np.asarray(vertices if vertices is not None else np.zeros((0, 3)), dtype=np.float64).reshape(-1, 3)
+        if topology is None:
+            topology = Topology(faceCounts, faceIndices, len(self.vertices))
+        elif topology.maxIndex >= len(self.vertices):
+            raise ValueError("Face vertex index out of range.")
+        self.topology = topology
+        self.name = name
+
+    @property
+    def faceCounts(self) -> np.ndarray:
+        return self.topology.faceCounts
+
+    @property
+    def faceIndices(self) -> np.ndarray:
+        return self.topology.faceIndices
+
+    @property
+    def isEmpty(self) -> bool:
+        return len(self.vertices) == 0
+
+    def transformed(self, matrix: np.ndarray) -> "GeoData":
+        if matrix is None or np.allclose(matrix, np.eye(4)):
+            return self
+        return GeoData(transformPoints(matrix, self.vertices), name=self.name, topology=self.topology)
+
+    @staticmethod
+    def merged(geos: Sequence["GeoData"]) -> "GeoData":
+        geos = [geo for geo in geos if geo is not None]
+        if not geos:
+            return GeoData()
+        if len(geos) == 1:
+            return geos[0]
+        return GeoData(np.concatenate([geo.vertices for geo in geos]), name="+".join(geo.name for geo in geos if geo.name),
+                       topology=_mergedTopology(geos))
+
+    def triangles(self) -> np.ndarray:
+        """ Vertex indices (m, 3) of the triangles of the faces (fan triangulation). """
+        return self.topology.triangles()
+
+    def edges(self) -> np.ndarray:
+        """ Unique vertex index pairs (m, 2) of the edges of the faces. """
+        return self.topology.edges()
 
     def bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         if self.isEmpty:
@@ -591,7 +675,11 @@ class SceneFile:
         for meshName in names:
             mesh = self.meshes[meshName]
             vertices = sampleAt(mesh["vertices"], frame)
-            geo = GeoData(vertices, mesh.get("faceCounts"), mesh.get("faceIndices"), meshName)
+            topology = mesh.get("_topology")
+            if topology is None:
+                # The faces do not move: one Topology for every frame
+                topology = mesh.setdefault("_topology", Topology(mesh.get("faceCounts"), mesh.get("faceIndices")))
+            geo = GeoData(vertices, name=meshName, topology=topology)
             geos.append(geo.transformed(sampleAt(mesh.get("matrix"), frame)))
         return GeoData.merged(geos)
 

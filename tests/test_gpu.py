@@ -310,3 +310,15 @@ def test_scene3dUnchanged():
     camera = scene3d.lookAt((1.0, 2.0, 5.0), (0, 0, 0))
     rotation, translation = scene3d.cvPose(camera)
     np.testing.assert_allclose(scene3d.cameraMatrixFromCvPose(rotation, translation), camera, atol=1e-12)
+
+
+def test_gpuDepthBuffer(torchCpu):
+    from meshroom.live import geoRender
+    from meshroom.live.imageBuffer import BBox
+    from tests.test_geoTracking import CUBE, H, W, cameraAt
+    u, v, z, _ = geoRender.screenPositions(CUBE, cameraAt(3), W, H, BBox(0, 0, W, H))
+    zCpu, idsCpu = geoRender.rasterize(u, v, z, CUBE.triangles(), (H, W))
+    zGpu, idsGpu = geoRender.rasterize(u, v, z, CUBE.triangles(), (H, W), device=torchCpu)
+    assert (np.isfinite(zCpu) == np.isfinite(zGpu)).mean() > 0.999
+    both = np.isfinite(zCpu) & np.isfinite(zGpu)
+    np.testing.assert_allclose(zGpu[both], zCpu[both], rtol=1e-5)

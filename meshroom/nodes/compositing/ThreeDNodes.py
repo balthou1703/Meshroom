@@ -240,7 +240,8 @@ class Resection(desc.ImageOpNode):
 Finds the camera (or the motion of the geometry) matching a geometry to the plate, like GeoTracker: pins put on
 the geometry are moved onto the plate, and tracked.
 
-- Evaluate the Resection: the plate is shown with the geometry over it (wireframe), seen from the solved camera.
+- Evaluate the Resection: the plate is shown with the geometry over it, seen from the solved camera ("Display":
+  shaded surface, feature edges, wireframe or points, the hidden parts removed).
 - Select it, "Add pin" in the toolbar of the viewer and click on the geometry: a pin is stuck to the surface (or
   to the nearest point of a point cloud); drag it onto its place in the plate. The pose follows: 1 pin moves the
   geometry in the image, 2 pins also turn and scale it, 3 pins and more solve the pose (4 or more: exactly).
@@ -310,11 +311,19 @@ into keys of a Camera or a ReadGeo.
                              description="Remove the poses tracked with 'Track Geometry' (the pins solve again)."),
         desc.StringParam(name="geoTrack", label="Geometry Track", value="", semantic="geoTrack", advanced=True,
                          description="Poses tracked with 'Track Geometry' and the keyframes (JSON)."),
-        desc.ChoiceParam(name="display", label="Display", value="wireframe", values=["wireframe", "points", "none"],
-                         description="What is drawn over the plate: the edges of the geometry, its vertices, or nothing."),
+        desc.ChoiceParam(name="display", label="Display", value="shaded",
+                         values=["shaded", "edges", "wireframe", "points", "none"],
+                         description="What is drawn over the plate: shaded (the surface lit from the camera, with its "
+                                     "edges), edges (silhouettes, creases and open edges only: the shape of a dense "
+                                     "mesh), wireframe (all the edges of the faces), points (the vertices), or nothing."),
+        desc.BoolParam(name="hiddenLines", label="Hide Hidden Lines", value=True,
+                       description="The edges and points behind the surface of the geometry are not drawn."),
+        desc.FloatParam(name="creaseAngle", label="Crease Angle", value=40.0, range=(1.0, 90.0, 1.0), advanced=True,
+                        description="'shaded' and 'edges': an edge between two faces at more than this angle (degrees) "
+                                    "is drawn."),
         desc.FloatParam(name="opacity", label="Opacity", value=0.6, range=(0.0, 1.0, 0.01),
                         description="Opacity of the geometry drawn over the plate."),
-        desc.IntParam(name="maxEdges", label="Max Edges", value=100000, range=(1000, 2000000, 1000), advanced=True,
+        desc.IntParam(name="maxEdges", label="Max Edges", value=500000, range=(1000, 2000000, 1000), advanced=True,
                       description="Number of edges drawn at most (a dense mesh is thinned out)."),
     ]
     outputs = [
@@ -497,15 +506,13 @@ into keys of a Camera or a ReadGeo.
         image = inputs["input"]
         geo = ctx.inputData("geo")
         camera = ctx.ownData("cameraOutput", ctx.frame)
+        from meshroom.live import geoRender
         rgba = np.array(image.rgba(), dtype=np.float32)
         width, height = image.width, image.height
-        alpha = ctx.value("opacity")
-        if ctx.value("display") == "wireframe":
-            scene3d.drawGeo(rgba, image.bbox, geo, camera, width, height, (0.35, 1.0, 0.45), alpha,
-                            maxEdges=ctx.value("maxEdges"))
-        elif geo is not None and not geo.isEmpty:
-            xy, _, inFront = camera.project(geo.vertices, width, height)
-            scene3d.drawPoints(rgba, image.bbox, xy[inFront], (0.35, 1.0, 0.45), alpha, 2)
+        from meshroom.live import gpu
+        geoRender.drawGeometry(rgba, image.bbox, geo, camera, width, height, ctx.value("display"), (0.35, 1.0, 0.45),
+                               ctx.value("opacity"), ctx.value("creaseAngle"), ctx.value("hiddenLines"),
+                               ctx.value("maxEdges"), useGpu=gpu.enabled(ctx))
         # The points of the pins seen from the solved camera, linked to the pins (the error)
         points, positions = self._pinsAt(self.pins(ctx, image.info), ctx.frame)
         if len(points):

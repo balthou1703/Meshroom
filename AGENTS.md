@@ -44,7 +44,8 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   neural/: optional networks (RAFT, BootsTAPIR, CoTracker, LightGlue, MegaPose;
 │   │                           #   weights in MESHROOM_MODELS_PATH, python -m meshroom.live.neural.download), 3DE lens distortion, animation, timeline frame range, node actions,
 │   │                           #   Nuke script import, color management: OCIO or builtin colorspaces, Python expressions of the Switch,
-│   │                           #   scene3d.py: cameras / geometries / matrices and 3D files, bake.py: Disconnect and Bake)
+│   │                           #   scene3d.py: cameras / geometries (Topology shared across frames) / matrices and 3D files,
+│   │                           #   geoRender.py: shaded / edges / wireframe display with hidden lines, bake.py: Disconnect and Bake)
 │   ├── nodes/                  # Concrete node types, grouped by category (e.g. general/, compositing/, subgraph/, houdini/)
 │   ├── submitters/             # Built-in render-farm submitters (drive meshroom_submit; e.g. localFarm)
 │   ├── ui/                     # User Interface layer (PySide6 / QML-based components)
