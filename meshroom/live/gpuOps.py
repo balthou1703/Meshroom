@@ -234,7 +234,9 @@ def matchPatterns(patterns: np.ndarray, lum: np.ndarray, bbox, centers: np.ndarr
     indices = np.flatnonzero(valid)
     if not len(indices):
         return result
-    areas = np.stack([lum[tops[i]:tops[i] + searchSize, lefts[i]:lefts[i] + searchSize] for i in indices])
+    areas = np.stack([lum[tops[i]:tops[i] + searchSize, lefts[i]:lefts[i] + searchSize] for i in indices]).astype(np.float64)
+    # Centered (the normalized correlation does not change): the variances of bright, flat areas stay precise in float32
+    areas -= areas.mean(axis=(1, 2), keepdims=True)
     windows = _tensor(areas, device).unsqueeze(0)                       # (1, n, S, S)
     p = _tensor(patterns[indices], device)
     p = p - p.mean(dim=(1, 2), keepdim=True)
@@ -256,4 +258,3 @@ def matchPatterns(patterns: np.ndarray, lum: np.ndarray, bbox, centers: np.ndarr
         result[i] = (math.floor(centers[i, 0]) + 0.5 + column + dx - center,
                      math.floor(centers[i, 1]) + 0.5 - (row + dy - center), float(scoreValues[k, row, column]))
     return result
-

@@ -126,7 +126,7 @@ class FakePointTracker:
     def __init__(self):
         self.calls = []
 
-    def track(self, video, queries):
+    def track(self, video, queries, size):
         self.calls.append((len(video), queries.copy()))
         steps = np.arange(len(video))[:, None, None]
         positions = queries[None] + steps * np.array([2.0, -1.0])

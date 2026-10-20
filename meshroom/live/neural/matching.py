@@ -71,4 +71,10 @@ def _toNuke(points: np.ndarray, height: int) -> np.ndarray:
 
 def matcher(device, maxKeypoints: int = 2048) -> Matcher:
     """ The LightGlue matcher on `device` (None: the CPU), or NeuralUnavailable. """
-    return Matcher(device, maxKeypoints)
+    from . import NeuralUnavailable
+    try:
+        return Matcher(device, maxKeypoints)
+    except NeuralUnavailable:
+        raise
+    except Exception as e:
+        raise loadError("lightglue", e) from e

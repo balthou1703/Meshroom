@@ -90,26 +90,37 @@ def estimatePose(image, geo, roughMatrix: np.ndarray, focalPixels: float, device
         raise NeuralUnavailable("the geometry is out of the image: place it roughly first")
     rgb = (displayRGB(image, BBox.fromFormat(width, height)) * 255.0 + 0.5).astype(np.uint8)
     K = np.array([[focalPixels, 0.0, width / 2.0], [0.0, focalPixels, height / 2.0], [0.0, 0.0, 1.0]])
-    RigidObject, RigidObjectDataset = _symbol("RigidObject"), _symbol("RigidObjectDataset")
-    ObjectData, ObservationTensor = _symbol("ObjectData"), _symbol("ObservationTensor")
-    makeDetections = _symbol("make_detections_from_object_data")
-    namedModels, loadNamedModel = _symbol("NAMED_MODELS"), _symbol("load_named_model")
-    with tempfile.TemporaryDirectory(prefix="meshroomMegaPose") as folder:
-        objects = RigidObjectDataset([RigidObject(label="geometry", mesh_path=_writeMesh(geo, folder), mesh_units="m")])
-        try:
-            # The renderer of the estimator is bound to the mesh: loaded for each call (the weights are cached on disk)
-            estimator = loadNamedModel(MODEL_NAME, objects).cuda()
-        except Exception as e:
-            raise loadError("megapose", e) from e
-        detections = makeDetections([ObjectData(label="geometry", bbox_modal=np.array([x0, y0, x1, y1]))]).cuda()
-        observation = ObservationTensor.from_numpy(rgb, None, K).cuda()
-        with torch.no_grad():
-            output, _ = estimator.run_inference_pipeline(observation, detections=detections,
-                                                         **namedModels[MODEL_NAME]["inference_parameters"])
-        poses = output.poses.to("cpu").numpy()
+    try:
+        # On the GPU chosen for Meshroom (MESHROOM_GPU_DEVICE), not the current CUDA device
+        with torch.cuda.device(device), tempfile.TemporaryDirectory(prefix="meshroomMegaPose") as folder:
+            poses = _run(geo, folder, rgb, K, (x0, y0, x1, y1))
+    except NeuralUnavailable:
+        raise
+    except Exception as e:
+        raise NeuralUnavailable(f"MegaPose failed: {e}") from e
     if not len(poses):
         raise NeuralUnavailable("MegaPose found no pose")
     # Object (= world) to camera, OpenCV axes
     transform = poses[0]
     return cameraMatrixFromCvPose(transform[:3, :3], transform[:3, 3])
 
+
+def _run(geo, folder, rgb, K, box):
+    """ The poses (n, 4, 4) MegaPose finds for the geometry in the image `rgb` (uint8), in the box (x0, y0, x1, y1). """
+    torch = requireTorch()
+    RigidObject, RigidObjectDataset = _symbol("RigidObject"), _symbol("RigidObjectDataset")
+    ObjectData, ObservationTensor = _symbol("ObjectData"), _symbol("ObservationTensor")
+    makeDetections = _symbol("make_detections_from_object_data")
+    namedModels, loadNamedModel = _symbol("NAMED_MODELS"), _symbol("load_named_model")
+    objects = RigidObjectDataset([RigidObject(label="geometry", mesh_path=_writeMesh(geo, folder), mesh_units="m")])
+    try:
+        # The renderer of the estimator is bound to the mesh: loaded for each call (the weights are cached on disk)
+        estimator = loadNamedModel(MODEL_NAME, objects).cuda()
+    except Exception as e:
+        raise loadError("megapose", e) from e
+    detections = makeDetections([ObjectData(label="geometry", bbox_modal=np.array(box))]).cuda()
+    observation = ObservationTensor.from_numpy(rgb, None, K).cuda()
+    with torch.no_grad():
+        output, _ = estimator.run_inference_pipeline(observation, detections=detections,
+                                                     **namedModels[MODEL_NAME]["inference_parameters"])
+    return output.poses.to("cpu").numpy()

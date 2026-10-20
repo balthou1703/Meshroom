@@ -770,10 +770,18 @@ class LiveController(QObject):
                 def imageAt(f):
                     return self._evaluator.render(plan, f, token)
                 # Stopped or failing frames: the keys found so far are returned
+                allKeys = None
                 if pointTracker is not None:
-                    allKeys = tracking.trackManyNeural(scaled, frames, imageAt, pointTracker, cancel=cancel,
-                                                       progress=progress, onKey=onKey, stopAt=stopAt)
-                else:
+                    try:
+                        allKeys = tracking.trackManyNeural(scaled, frames, imageAt, pointTracker, cancel=cancel,
+                                                           progress=progress, onKey=onKey, stopAt=stopAt)
+                    except EvaluationCancelled:
+                        raise
+                    except Exception as e:
+                        # E.g. out of memory on the GPU: tracked again with the patterns
+                        logging.warning(f"[Live] {method} failed, tracked with patches", exc_info=True)
+                        self._trackWarning.emit(f"{method} failed, tracked with patches: {e}", nodeName)
+                if allKeys is None:
                     allKeys = tracking.trackMany(scaled, frames, imageAt, cancel=cancel, progress=progress, onKey=onKey,
                                                  stopAt=stopAt, model=model, device=device)
                 for (trackIndex, track), keys in zip(selected, allKeys):

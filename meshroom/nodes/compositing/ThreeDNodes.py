@@ -640,7 +640,6 @@ class _GeoTrackAction:
         return tracked, reason
 
     def run(self, name):
-        from meshroom.live import geotrack
         frame = self.context.currentFrame
         frames = self.context.frames
         if name in ("trackGeoForward", "trackGeoBackward"):

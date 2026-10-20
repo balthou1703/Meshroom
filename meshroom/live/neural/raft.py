@@ -23,10 +23,9 @@ def _model(device):
         from torchvision.models.optical_flow import Raft_Large_Weights, raft_large
         useTorchHub()
         try:
-            model = raft_large(weights=Raft_Large_Weights.C_T_SKHT_V2, progress=False)
+            return raft_large(weights=Raft_Large_Weights.C_T_SKHT_V2, progress=False).eval().to(device)
         except Exception as e:
             raise loadError("raft", e) from e
-        return model.eval().to(device)
     with torch.no_grad():
         return cachedModel(("raft", str(device)), load)
 

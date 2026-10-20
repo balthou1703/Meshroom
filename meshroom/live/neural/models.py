@@ -99,6 +99,7 @@ def importPackage(name: str):
 
 _cache = {}
 _cacheLock = threading.Lock()
+_loadLock = threading.Lock()
 
 
 def cachedModel(key, factory: Callable):
@@ -106,9 +107,14 @@ def cachedModel(key, factory: Callable):
     with _cacheLock:
         if key in _cache:
             return _cache[key]
-    model = factory()
-    with _cacheLock:
-        return _cache.setdefault(key, model)
+    # One load at a time: two threads asking for the same network load it once
+    with _loadLock:
+        with _cacheLock:
+            if key in _cache:
+                return _cache[key]
+        model = factory()
+        with _cacheLock:
+            return _cache.setdefault(key, model)
 
 
 def clearCache():

@@ -499,27 +499,30 @@ def trackManyNeural(tracks: List[dict], frames: List[int], imageAt, pointTracker
                              "stopAt": stopAt[index] if stopAt and index < len(stopAt) else None}
     position = 0
     chunk = max(2, int(getattr(pointTracker, "chunk", 24)))
-    images = {}
+    # Per frame: (the frame for the network, its luminance for the refinement); the full images are not kept
+    loaded = {}
+    prepare = getattr(pointTracker, "prepare", None) or (lambda rgb: rgb)
+    width = height = None
     while states and position < len(frames) - 1:
         window = frames[position:position + chunk + 1]
         try:
             for frame in window:
                 if cancel:
                     cancel()
-                if frame not in images:
-                    images[frame] = imageAt(frame)
+                if frame not in loaded:
+                    image = imageAt(frame)
+                    width, height = image.format
+                    loaded[frame] = (prepare(displayRGB(image, BBox.fromFormat(width, height))), luminance(image))
         except (EvaluationCancelled, EvaluationError):
             break
-        width, height = images[window[0]].format
-        formatBBox = BBox.fromFormat(width, height)
-        video = np.stack([displayRGB(images[frame], formatBBox) for frame in window])
+        video = np.stack([loaded[frame][0] for frame in window])
         order = sorted(states)
         # Network coordinates: from the top left corner, y down
         queries = np.array([[states[index]["position"][0], height - states[index]["position"][1]] for index in order])
-        positions, visible = pointTracker.track(video, queries)
-        previous = luminance(images[window[0]])
+        positions, visible = pointTracker.track(video, queries, (height, width))
+        previous = loaded[window[0]][1]
         for t, frame in enumerate(window[1:], start=1):
-            current = luminance(images[frame])
+            current = loaded[frame][1]
             for k, index in enumerate(order):
                 state = states.get(index)
                 if state is None:
@@ -547,8 +550,8 @@ def trackManyNeural(tracks: List[dict], frames: List[int], imageAt, pointTracker
                 progress(position + t, len(frames) - 1)
             if not states:
                 break
-        # Only the images of the next window are kept
+        # Only the last frame is kept: the next window starts there
         for frame in window[:-1]:
-            images.pop(frame, None)
+            loaded.pop(frame, None)
         position += len(window) - 1
     return keys
