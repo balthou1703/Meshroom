@@ -476,6 +476,15 @@ def blur(pixels: np.ndarray, sizeX: float, sizeY: float, cancel=None) -> np.ndar
     return _blurAxis(out, sizeY, 0, cancel)
 
 
+def blurOnDevice(pixels: np.ndarray, sizeX: float, sizeY: float, useGpu: bool = False, cancel=None) -> np.ndarray:
+    """ `blur` on the GPU when `useGpu` and one is available, else on the CPU (see meshroom/live/gpu.py). """
+    from . import gpu, gpuOps
+    if blurSigma(sizeX) < 1e-3 and blurSigma(sizeY) < 1e-3:
+        return pixels
+    return gpu.run(useGpu, lambda device: gpuOps.blur(pixels, sizeX, sizeY, device),
+                   lambda: blur(pixels, sizeX, sizeY, cancel), "Blur")
+
+
 def channelMask(channels: Sequence[str], selected: str) -> np.ndarray:
     """
     Return a boolean mask over `channels` of the channels affected by a "channels" knob value:

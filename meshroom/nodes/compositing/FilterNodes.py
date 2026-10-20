@@ -8,6 +8,7 @@ from collections import OrderedDict
 import numpy as np
 
 from meshroom.core import desc
+from meshroom.live.gpu import gpuParam
 from meshroom.live.params import colorOpInputs, imageOutput, mixParam
 
 try:
@@ -61,6 +62,7 @@ Unsharp mask: adds the difference between the image and its blur, multiplied by 
         _float("amount", "Amount", "Strength of the sharpening.", 0.0, (0.0, 4.0, 0.01)),
         _float("size", "Size", "Size of the blur the image is compared to, in pixels.", 3.0, (0.0, 50.0, 0.1)),
         mixParam(),
+        gpuParam(),
     ]
     outputs = imageOutput("Sharpened image.")
 
@@ -76,12 +78,12 @@ Unsharp mask: adds the difference between the image and its blur, multiplied by 
         return None
 
     def render(self, ctx, inputs):
-        from meshroom.live import ops
+        from meshroom.live import gpu, ops
         image = inputs["input"]
         amount, size = np.float32(ctx.value("amount")), ctx.value("size")
         rgba = image.rgba()
         radius = ops.blurRadius(size)
-        blurred = ops.blur(rgba, size, size, ctx.checkCancelled)
+        blurred = ops.blurOnDevice(rgba, size, size, gpu.enabled(ctx), ctx.checkCancelled)
         # Back to the input bbox
         blurred = blurred[radius:radius + rgba.shape[0], radius:radius + rgba.shape[1]]
         return _blendSelected(ctx, inputs, image, rgba, rgba + amount * (rgba - blurred))
@@ -100,6 +102,7 @@ Erodes (positive size) or dilates (negative size) the selected channels with a s
         _float("size", "Size", "Positive: erode (shrink), negative: dilate (grow), in pixels.", 0.0,
                (-50.0, 50.0, 1.0)),
         mixParam(),
+        gpuParam(),
     ]
     outputs = imageOutput("Eroded or dilated image.")
 
@@ -124,18 +127,22 @@ Erodes (positive size) or dilates (negative size) the selected channels with a s
         rgba = ops.alignToBBox(image.rgba(), image.bbox, bbox)
         selected = ops.channelMask(RGBA_CHANNELS, ctx.value("channels"))
 
+        from meshroom.live import gpu, gpuOps
         filtered = rgba.copy()
         channels = np.ascontiguousarray(rgba[:, :, selected])
 
-        def horizontal(start, end):
-            channels[start:end] = _extremumAxis(channels[start:end], radius, 1, dilate)
+        def onCpu():
+            def horizontal(start, end):
+                channels[start:end] = _extremumAxis(channels[start:end], radius, 1, dilate)
 
-        def vertical(start, end):
-            channels[:, start:end] = _extremumAxis(channels[:, start:end], radius, 0, dilate)
+            def vertical(start, end):
+                channels[:, start:end] = _extremumAxis(channels[:, start:end], radius, 0, dilate)
 
-        ops.parallelBands(horizontal, channels.shape[0], ctx.checkCancelled)
-        ops.parallelBands(vertical, channels.shape[1], ctx.checkCancelled)
-        filtered[:, :, selected] = channels
+            ops.parallelBands(horizontal, channels.shape[0], ctx.checkCancelled)
+            ops.parallelBands(vertical, channels.shape[1], ctx.checkCancelled)
+            return channels
+        filtered[:, :, selected] = gpu.run(gpu.enabled(ctx), lambda device: gpuOps.extremum(channels, radius, dilate, device),
+                                           onCpu, "Erode")
         amount = maskAmount(ctx, inputs, bbox, ctx.value("mix"))
         result = ops.mapRows(ops.mix, [rgba, filtered, amount], 4, ctx.checkCancelled)
         # The other layers follow the bbox
@@ -160,6 +167,7 @@ the edges. Requires scipy. Large sizes are slow on large images.
         desc.IntParam(name="size", label="Size", description="Radius of the filter in pixels.", value=0,
                       range=(0, 10, 1)),
         mixParam(),
+        gpuParam(),
     ]
     outputs = imageOutput("Filtered image.")
 
@@ -172,20 +180,24 @@ the edges. Requires scipy. Large sizes are slow on large images.
         return "input" if ctx.value("size") <= 0 or ctx.value("mix") <= 0.0 else None
 
     def render(self, ctx, inputs):
-        if _ndimage is None:
-            raise RuntimeError("The Median node requires scipy.")
-        from meshroom.live import ops
+        from meshroom.live import gpu, gpuOps, ops
         width = 2 * ctx.value("size") + 1
         image = inputs["input"]
         rgba = image.rgba()
-        result = np.empty_like(rgba)
         overlap = width // 2
 
-        def band(start, end):
-            # Each band is filtered with the rows around it, then cropped
-            low, high = max(0, start - overlap), min(rgba.shape[0], end + overlap)
-            filtered = _ndimage.median_filter(rgba[low:high], size=(width, width, 1), mode="constant", cval=0.0)
-            result[start:end] = filtered[start - low:start - low + (end - start)]
+        def onCpu():
+            if _ndimage is None:
+                raise RuntimeError("The Median node requires scipy (or a GPU).")
+            result = np.empty_like(rgba)
 
-        ops.parallelBands(band, rgba.shape[0], ctx.checkCancelled)
+            def band(start, end):
+                # Each band is filtered with the rows around it, then cropped
+                low, high = max(0, start - overlap), min(rgba.shape[0], end + overlap)
+                filtered = _ndimage.median_filter(rgba[low:high], size=(width, width, 1), mode="constant", cval=0.0)
+                result[start:end] = filtered[start - low:start - low + (end - start)]
+
+            ops.parallelBands(band, rgba.shape[0], ctx.checkCancelled)
+            return result
+        result = gpu.run(gpu.enabled(ctx), lambda device: gpuOps.median(rgba, width, device), onCpu, "Median")
         return _blendSelected(ctx, inputs, image, rgba, result)

@@ -22,7 +22,9 @@ import numpy as np
 
 from . import scene3d, tracking
 
-METHODS = ("flow", "patches")
+# flow: Lucas-Kanade optical flow (flow.py); raft: RAFT optical flow (neural/raft.py, Lucas-Kanade without it);
+# patches: the patch of each point searched in the next frame
+METHODS = ("flow", "raft", "patches")
 
 
 def projectPoints(matrix: np.ndarray, points: np.ndarray, width: int, height: int, focalPixels: float):
@@ -195,7 +197,7 @@ class TrackSettings:
     """ How the geometry is tracked. """
 
     def __init__(self, method: str = "flow", features: int = 150, pattern: int = 15, search: int = 41,
-                 minScore: float = 0.7, minInliers: int = 8, anchored: bool = True):
+                 minScore: float = 0.7, minInliers: int = 8, anchored: bool = True, device=None):
         self.method = method if method in METHODS else "flow"
         self.features = int(features)
         self.pattern = int(pattern) | 1
@@ -204,6 +206,8 @@ class TrackSettings:
         self.minInliers = int(minInliers)
         # Each pose corrected against an anchor frame (less drift, slower)
         self.anchored = bool(anchored)
+        # The GPU to compute on (meshroom/live/gpu.py), None: the CPU
+        self.device = device
 
 
 class TrackingLost(RuntimeError):
@@ -217,25 +221,29 @@ def _measureMotion(settings: TrackSettings, lumA: tuple, lumB: tuple, imageA, im
     flow, the dense flow of A to B at each point; with patches, the patch of A around each point searched in B around
     its expected position `centersB`.
     """
-    if settings.method == "flow":
+    if settings.method in ("flow", "raft"):
         from .flow import computeFlow, sampleRows
-        field = computeFlow(imageA, imageB, cancel=cancel)
+        field = computeFlow(imageA, imageB, cancel=cancel, useGpu=settings.device is not None,
+                            method="raft" if settings.method == "raft" else "lucasKanade")
         bbox = imageA.bbox
         motion = sampleRows(field, (bbox.y1 - positionsA[:, 1] - 0.5).astype(np.float32),
                             (positionsA[:, 0] - bbox.x0 - 0.5).astype(np.float32))
         return positionsA + motion.astype(np.float64), np.ones(len(positionsA), dtype=bool)
     positions = np.array(centersB, dtype=np.float64)
     found = np.zeros(len(positionsA), dtype=bool)
-    for index, ((x, y), (cx, cy)) in enumerate(zip(positionsA, centersB)):
-        if cancel and index % 32 == 0:
-            cancel()
-        pattern = tracking._patch(lumA[0], lumA[1], x, y, settings.pattern)
-        if pattern is None:
+    if cancel:
+        cancel()
+    patterns = [tracking._patch(lumA[0], lumA[1], x, y, settings.pattern) for x, y in positionsA]
+    indices = [index for index, pattern in enumerate(patterns) if pattern is not None]
+    if not indices:
+        return positions, found
+    # All the patterns at once (on the GPU when there is one)
+    matches = tracking.matchMany(np.stack([patterns[index] for index in indices]), lumB[0], lumB[1],
+                                 np.asarray(centersB, dtype=np.float64)[indices], settings.search, settings.device)
+    for index, match in zip(indices, matches):
+        if not np.isfinite(match[2]) or match[2] < settings.minScore:
             continue
-        match = tracking.matchPattern(pattern, lumB[0], lumB[1], cx, cy, settings.search)
-        if match is None or match[2] < settings.minScore:
-            continue
-        positions[index] = tracking.refine(pattern, lumB[0], lumB[1], match[0], match[1])
+        positions[index] = tracking.refine(patterns[index], lumB[0], lumB[1], match[0], match[1])
         found[index] = True
     return positions, found
 
@@ -360,7 +368,7 @@ def alignPose(samples: SurfaceSamples, settings: TrackSettings, referenceMatrix:
         raise TrackingLost(f"only {len(chosen)} textured points of the geometry are visible at the reference frame")
     points, referencePositions = samples.points[indices[chosen]], positions[chosen]
     patchSettings = TrackSettings("patches", settings.features, settings.pattern, settings.search, settings.minScore,
-                                  settings.minInliers)
+                                  settings.minInliers, device=settings.device)
     current, inliers, error = scene3d.toMatrix4(matrix), 0, 0.0
     for search in searches:
         patchSettings.search = int(search) | 1
@@ -375,6 +383,55 @@ def alignPose(samples: SurfaceSamples, settings: TrackSettings, referenceMatrix:
     if inliers < settings.minInliers:
         raise TrackingLost(f"only {inliers} points of the geometry fit")
     return current, inliers, error
+
+
+def alignWithMatches(samples: SurfaceSamples, referenceMatrix: np.ndarray, referenceImage, matrix: np.ndarray, image,
+                     width: int, height: int, focalPixels: float, matcher, minScore: float = 0.3, minInliers: int = 8):
+    """
+    The pose of a frame from feature matches with a reference frame whose pose is known (LightGlue,
+    meshroom/live/neural/matching.py): the matched points of the reference are put on the geometry (the visible sample
+    of the surface seen there, within 3 pixels), and the pose solved from them. Works far from the right position and
+    from another angle, where alignPose needs a rough pose.
+
+    Returns:
+        (camera-to-world matrix, number of points fitting it, their RMS error in pixels). Raises TrackingLost when too
+        few matches land on the geometry.
+    """
+    pointsReference, pointsImage, scores = matcher.match(referenceImage, image)
+    keep = scores >= minScore
+    pointsReference, pointsImage = pointsReference[keep], pointsImage[keep]
+    indices, positions = samples.visible(referenceMatrix, width, height, focalPixels, margin=0.0)
+    if not len(indices) or not len(pointsReference):
+        raise TrackingLost("no match on the geometry")
+    # The nearest visible sample of each matched point, through a grid of 3 pixel cells
+    cell = 3.0
+    grid = {}
+    for k, (x, y) in enumerate(positions):
+        grid.setdefault((int(x // cell), int(y // cell)), []).append(k)
+    points, found = [], []
+    for (x, y), target in zip(pointsReference, pointsImage):
+        cx, cy = int(x // cell), int(y // cell)
+        near = [k for dx in (-1, 0, 1) for dy in (-1, 0, 1) for k in grid.get((cx + dx, cy + dy), ())]
+        if not near:
+            continue
+        distances = np.hypot(positions[near, 0] - x, positions[near, 1] - y)
+        best = int(np.argmin(distances))
+        if distances[best] <= cell:
+            points.append(samples.points[indices[near[best]]])
+            found.append(target)
+    if len(points) < minInliers:
+        raise TrackingLost(f"only {len(points)} matches land on the geometry")
+    points, found = np.array(points), np.array(found)
+    # From the rough pose, or the reference one when it explains the matches better
+    starts = []
+    for start in (scene3d.toMatrix4(matrix), scene3d.toMatrix4(referenceMatrix)):
+        xy, depth = projectPoints(start, points, width, height, focalPixels)
+        starts.append((float(np.median(np.where(depth > 0, np.hypot(*(xy - found).T), np.inf))), start))
+    start = min(starts, key=lambda item: item[0])[1]
+    pose, inliers, error = robustPose(points, found, width, height, focalPixels, start)
+    if inliers.sum() < minInliers:
+        raise TrackingLost(f"only {int(inliers.sum())} matches fit one pose")
+    return pose, int(inliers.sum()), error
 
 
 def blendPoses(forward: Dict[int, np.ndarray], backward: Dict[int, np.ndarray], first: int, last: int) -> Dict[int, np.ndarray]:

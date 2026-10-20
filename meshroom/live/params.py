@@ -199,3 +199,14 @@ def colorspaceParam(name, label, description, value="auto"):
     (a name can also be typed, e.g. for a colorspace of another config).
     """
     return desc.StringParam(name=name, label=label, description=description, value=value, semantic="colorspace")
+
+
+def pointTrackerParam():
+    """ How the tracks are tracked in the viewer (Tracker, pins of the Resection). """
+    return desc.ChoiceParam(
+        name="pointTracker", label="Point Tracker", value="patches", values=["patches", "tapir", "cotracker"],
+        invalidate=False,
+        description="patches: the pattern of each track searched from frame to frame. tapir: the BootsTAPIR network "
+                    "(sees many frames at once: fast motions, blur; a hidden track stops). cotracker: CoTracker3 "
+                    "(the same, non-commercial license only). The networks need PyTorch and their weights "
+                    "(MESHROOM_MODELS_PATH); without them, patches.")

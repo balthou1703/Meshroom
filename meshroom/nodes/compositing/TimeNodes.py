@@ -13,6 +13,7 @@ import numpy as np
 
 from meshroom.core import Version, desc
 from meshroom.live import ImageInfo
+from meshroom.live.gpu import gpuParam
 from meshroom.live.params import imageInput, imageOutput
 
 
@@ -48,10 +49,12 @@ def _flowBetween(ctx, image0, image1, frame0, frame1):
             forward = None
         if backward is not None and backward.shape[:2] != (image1.bbox.height, image1.bbox.width):
             backward = None
+    from meshroom.live import gpu
+    useGpu = gpu.enabled(ctx)
     if forward is None:
-        forward = flow.computeFlow(image0, image1, cancel=ctx.checkCancelled)
+        forward = flow.computeFlow(image0, image1, cancel=ctx.checkCancelled, useGpu=useGpu)
     if backward is None:
-        backward = flow.computeFlow(image1, image0, cancel=ctx.checkCancelled)
+        backward = flow.computeFlow(image1, image0, cancel=ctx.checkCancelled, useGpu=useGpu)
     return forward, backward
 
 
@@ -191,6 +194,7 @@ frames around a fractional frame.
         desc.BoolParam(name="reverse", label="Reverse", description="Play backwards.", value=False),
         desc.ChoiceParam(name="filter", label="Filter", value="nearest", values=_FILTERS, description=_FILTER_DESCRIPTION),
         _vectorsSourceParam(),
+        gpuParam(),
         _vectorsInput(),
     ]
     outputs = imageOutput("Retimed image.")
@@ -276,6 +280,7 @@ unchanged; the output frame range is the x range of the curve when it has two po
                          description="Curve (JSON): output frame -> input frame."),
         desc.ChoiceParam(name="filter", label="Filter", value="nearest", values=_FILTERS, description=_FILTER_DESCRIPTION),
         _vectorsSourceParam(),
+        gpuParam(),
         _vectorsInput(),
     ]
     outputs = imageOutput("Image with its time remapped.")
@@ -330,7 +335,9 @@ in pixels. Connect it to the "Vectors" input of a Retime / TimeWarp ("motion" fi
 interpolate frames, or of a Roto to move shapes along the flow ("Track Shapes With Flow").
 
 The flow is computed on a copy of the images reduced to "Resolution" pixels at most (faster, less
-detailed); "Smoothness" is the size of the window the motion is measured on.
+detailed); "Smoothness" is the size of the window the motion is measured on. "Method": Lucas-Kanade (pyramidal), or
+RAFT (a neural network: sharper motion edges, large motions; PyTorch and its weights needed, see
+docs/live-compositing.md, else Lucas-Kanade). "Use GPU" computes on the GPU when the machine has one.
 """
     inputs = [
         imageInput(),
@@ -343,6 +350,11 @@ detailed); "Smoothness" is the size of the window the motion is measured on.
                       description="Size (pixels, at the computation resolution) of the window the motion is measured on."),
         desc.IntParam(name="iterations", label="Iterations", value=3, range=(1, 10, 1),
                       description="Refinements per level of the pyramid."),
+        desc.ChoiceParam(name="method", label="Method", value="lucasKanade", values=["lucasKanade", "raft"],
+                         description="lucasKanade: pyramidal Lucas-Kanade (Smoothness, Iterations). raft: the RAFT neural "
+                                     "network (sharper motion edges, large motions; Lucas-Kanade when it is not "
+                                     "available)."),
+        gpuParam(),
     ]
     outputs = imageOutput("The input with its 'forward' and 'backward' motion vector layers.")
 
@@ -353,8 +365,10 @@ detailed); "Smoothness" is the size of the window the motion is measured on.
         info = ctx.inputInfo("input")
         hasRange = info is not None and info.hasFrameRange
         zero = np.zeros((image.bbox.height, image.bbox.width, 2), np.float32)
+        from meshroom.live import gpu
         options = dict(maxSize=ctx.value("resolution"), window=ctx.value("smoothness"),
-                       iterations=ctx.value("iterations"), cancel=ctx.checkCancelled)
+                       iterations=ctx.value("iterations"), cancel=ctx.checkCancelled, useGpu=gpu.enabled(ctx),
+                       method=ctx.value("method"))
         result = image
         vectors = ctx.value("vectors")
         if vectors != "backward":

@@ -5,6 +5,7 @@ from collections import OrderedDict
 import numpy as np
 
 from meshroom.core import Version, desc
+from meshroom.live.gpu import gpuParam
 from meshroom.live.params import linkedVec2, maskParams
 
 
@@ -48,6 +49,7 @@ The bbox grows by the blur radius, as in Nuke. A size of 0 passes the input thro
             value=1.0,
             range=(0.0, 1.0, 0.01),
         ),
+        gpuParam(),
     ]
 
     outputs = [
@@ -84,16 +86,17 @@ The bbox grows by the blur radius, as in Nuke. A size of 0 passes the input thro
         return None
 
     def render(self, ctx, inputs):
-        from meshroom.live import RGBA, ops
+        from meshroom.live import RGBA, gpu, ops
         from meshroom.live.params import maskAmount
         image = inputs["input"]
         sizeX, sizeY = self._sizes(ctx)
+        useGpu = gpu.enabled(ctx)
         allLayers = ctx.value("channels") == "all"
         bbox = image.bbox.expanded(ops.blurRadius(sizeX), ops.blurRadius(sizeY))
         amount = maskAmount(ctx, inputs, bbox, ctx.value("mix"))
 
         def apply(pixels):
-            blurred = ops.blur(pixels, sizeX, sizeY, ctx.checkCancelled)
+            blurred = ops.blurOnDevice(pixels, sizeX, sizeY, useGpu, ctx.checkCancelled)
             if not (np.isscalar(amount) and amount >= 1.0):
                 original = ops.alignToBBox(pixels, image.bbox, bbox)
                 blurred = ops.mapRows(ops.mix, [original, blurred, amount], pixels.shape[2], ctx.checkCancelled)

@@ -143,23 +143,45 @@ def _luminance(image, bbox: BBox) -> np.ndarray:
     return (0.2126 * rgba[:, :, 0] + 0.7152 * rgba[:, :, 1] + 0.0722 * rgba[:, :, 2]).astype(np.float32)
 
 
+METHODS = ("lucasKanade", "raft")
+
+
 def computeFlow(image, target, maxSize: int = 960, window: int = 11, iterations: int = 3,
-                cancel: Optional[Callable[[], None]] = None) -> np.ndarray:
+                cancel: Optional[Callable[[], None]] = None, useGpu: bool = False,
+                method: str = "lucasKanade") -> np.ndarray:
     """
     The flow (h, w, 2) over the bbox of `image` moving it onto `target` (Nuke units: u right, v up):
     image(x) ~ target(x + flow(x)). Computed on a copy reduced to `maxSize` pixels at most.
+
+    Args:
+        useGpu: compute on the GPU when there is one (meshroom/live/gpu.py), else on the CPU.
+        method: "lucasKanade" (pyramidal Lucas-Kanade, `window` and `iterations`), or "raft" (the RAFT network,
+                meshroom/live/neural: sharper motion edges and large motions; PyTorch and its weights needed, the
+                Lucas-Kanade flow when they are missing).
     """
+    from . import gpu
     bbox = image.bbox
-    a = _luminance(image, bbox)
-    b = _luminance(target, bbox)
-    h, w = a.shape
+    h, w = bbox.height, bbox.width
     if h == 0 or w == 0:
         return np.zeros((h, w, 2), np.float32)
     factor = max(1, int(math.ceil(max(h, w) / float(max(64, maxSize)))))
+    if method == "raft":
+        from .neural import NeuralUnavailable, warnUnavailable
+        try:
+            from .neural import raft
+            return raft.computeFlow(image, target, factor, gpu.device(useGpu), cancel)
+        except NeuralUnavailable as e:
+            warnUnavailable("RAFT", e)
+    a = _luminance(image, bbox)
+    b = _luminance(target, bbox)
     a, b = _downsample(a, factor), _downsample(b, factor)
     if min(a.shape) < 2:
         return np.zeros((h, w, 2), np.float32)  # Too small to measure a motion
-    small = _lucasKanade(a, b, window, iterations, cancel)
+
+    def onGpu(device):
+        from .gpuOps import lucasKanade
+        return lucasKanade(a, b, window, iterations, device, cancel)
+    small = gpu.run(useGpu, onGpu, lambda: _lucasKanade(a, b, window, iterations, cancel), "Optical flow")
     flow = _resize(small, h, w) * float(factor) if factor > 1 else small
     # Rows go down, v goes up
     return np.stack([flow[:, :, 0], -flow[:, :, 1]], axis=2).astype(np.float32)

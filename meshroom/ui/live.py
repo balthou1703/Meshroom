@@ -150,6 +150,8 @@ class LiveController(QObject):
     _displayFailed = Signal(int)
     _trackProgressed = Signal(float)
     _trackFinished = Signal(object)
+    # (message, node name): a network asked for is not available (shown as an error, the tracking goes on)
+    _trackWarning = Signal(str, str)
     _trackStepped = Signal(object)
     _actionProgressed = Signal(object)
     _actionFinished = Signal(object)
@@ -235,6 +237,7 @@ class LiveController(QObject):
         self._displayFailed.connect(self._onDisplayFailed)
         self._trackProgressed.connect(self._setTrackingProgress)
         self._trackFinished.connect(self._onTrackFinished)
+        self._trackWarning.connect(self._setError)
         self._trackStepped.connect(self._onTrackStepped)
         self._actionProgressed.connect(self._onActionProgressed)
         self._actionFinished.connect(self._onActionFinished)
@@ -714,6 +717,10 @@ class LiveController(QObject):
         # Tracks of a node linking them (the pins of a Resection, on one rigid geometry): tracked with its model
         modelContext = self._trackingModelContext(node, token)
         trackingModel = getattr(node.nodeDesc, "trackingModel", None)
+        # A point tracking network (Tracker, Resection: "Point Tracker"), and the GPU ("Use GPU")
+        method = node.attribute("pointTracker").value if node.hasAttribute("pointTracker") else "patches"
+        nodeName = node.name
+        useGpu = node.attribute("useGpu").value if node.hasAttribute("useGpu") else True
 
         def run():
             results = {}
@@ -748,9 +755,27 @@ class LiveController(QObject):
                     trackFormat, backX, backY = formats[position]
                     self._trackStepped.emit((generation, trackIndex, track.get("name"), frame, round(x * backX, 3),
                                              round(y * backY, 3), score, list(trackFormat)))
+                from meshroom.live import gpu
+                device = gpu.device(useGpu)
+                pointTracker = None
+                if method in ("tapir", "cotracker"):
+                    from meshroom.live.neural import NeuralUnavailable, warnUnavailable
+                    try:
+                        from meshroom.live.neural.pointTracking import pointTracker as network
+                        pointTracker = network(method, device)
+                    except NeuralUnavailable as e:
+                        warnUnavailable(method, e)
+                        self._trackWarning.emit(f"{method} is not available, tracked with patches: {e}", nodeName)
+
+                def imageAt(f):
+                    return self._evaluator.render(plan, f, token)
                 # Stopped or failing frames: the keys found so far are returned
-                allKeys = tracking.trackMany(scaled, frames, lambda f: self._evaluator.render(plan, f, token),
-                                             cancel=cancel, progress=progress, onKey=onKey, stopAt=stopAt, model=model)
+                if pointTracker is not None:
+                    allKeys = tracking.trackManyNeural(scaled, frames, imageAt, pointTracker, cancel=cancel,
+                                                       progress=progress, onKey=onKey, stopAt=stopAt)
+                else:
+                    allKeys = tracking.trackMany(scaled, frames, imageAt, cancel=cancel, progress=progress, onKey=onKey,
+                                                 stopAt=stopAt, model=model, device=device)
                 for (trackIndex, track), keys in zip(selected, allKeys):
                     # By index: two tracks may have the same name
                     results[trackIndex] = (track.get("name"), keys)

@@ -102,13 +102,14 @@ def _inMask(mask: Optional[np.ndarray], bbox, x: float, y: float) -> bool:
 
 def autoTrack(imageAt: Callable, frames: List[int], count: int = 150, pattern: int = 15, search: int = 41,
               minScore: float = 0.7, checkCancelled=None, progress=None, maskAt: Optional[Callable] = None,
-              onFrame: Optional[Callable] = None) -> List[dict]:
+              onFrame: Optional[Callable] = None, device=None) -> List[dict]:
     """
     Detect and track features through `frames` (consecutive): features lost along the way are
     replaced by new ones, so that about `count` are tracked at each frame. With `maskAt(frame, bbox)`
     (the mask values (h, w) over the bbox of the image), features are only detected and kept where
     the mask is above 0.5 (e.g. to leave out a moving object). `onFrame(frame, tracks)` is called after
-    each frame with the tracks so far (those with 2 keys at least).
+    each frame with the tracks so far (those with 2 keys at least). With a GPU `device` (meshroom/live/gpu.py), the
+    patterns of all the features are matched at once on it.
 
     Returns:
         Tracks ({"name", "keys", "scores", "pattern", "search", "auto": True}).
@@ -136,12 +137,13 @@ def autoTrack(imageAt: Callable, frames: List[int], count: int = 150, pattern: i
         current = tracking.luminance(imageAt(frame))
         mask = maskAt(frame, current[1]) if maskAt else None
         stillActive = []
-        for trackIndex, x, y in active:
-            patch = tracking._patch(previous[0], previous[1], x, y, pattern)
-            if patch is None:
-                continue
-            match = tracking.matchPattern(patch, current[0], current[1], x, y, search)
-            if match is None or match[2] < minScore:
+        patches = [(trackIndex, x, y, tracking._patch(previous[0], previous[1], x, y, pattern)) for trackIndex, x, y in active]
+        patches = [item for item in patches if item[3] is not None]
+        matches = tracking.matchMany(np.array([item[3] for item in patches]).reshape(-1, pattern, pattern),
+                                     current[0], current[1], np.array([item[1:3] for item in patches]).reshape(-1, 2),
+                                     search, device)
+        for (trackIndex, x, y, patch), match in zip(patches, matches):
+            if not np.isfinite(match[2]) or match[2] < minScore:
                 continue
             nx, ny = tracking.refine(patch, current[0], current[1], match[0], match[1])
             if not _inMask(mask, current[1], nx, ny):
@@ -160,6 +162,65 @@ def autoTrack(imageAt: Callable, frames: List[int], count: int = 150, pattern: i
             onFrame(frame, [track for track in tracks if len(track["keys"]) >= 2])
     # A feature seen on one frame only is useless
     return [track for track in tracks if len(track["keys"]) >= 2]
+
+
+def autoTrackMatched(imageAt: Callable, frames: List[int], matcher, count: int = 150, minScore: float = 0.3,
+                     checkCancelled=None, progress=None, maskAt: Optional[Callable] = None,
+                     onFrame: Optional[Callable] = None, pattern: int = 15, search: int = 41) -> List[dict]:
+    """
+    autoTrack with a feature matcher (LightGlue, meshroom/live/neural/matching.py) instead of patterns: the features of
+    each frame are matched with those of the next one; a feature matched again from there extends its track (the
+    features of a frame are detected once, so a feature keeps exactly its position). New tracks start from the best
+    new matches while fewer than `count` are tracked. Same arguments and result as autoTrack (`minScore`: the
+    least match score of LightGlue, in [0, 1]).
+    """
+    tracks: List[dict] = []
+    # Tracks reaching the previous frame, by the rounded position of their feature there
+    active: Dict[Tuple[int, int], int] = {}
+    first = imageAt(frames[0])
+    size = first.format
+    previous, previousFeatures = first, matcher.features(first)
+
+    def key(x, y):
+        return int(round(x * 100)), int(round(y * 100))
+    for index, frame in enumerate(frames[1:], start=1):
+        if checkCancelled:
+            checkCancelled()
+        current = imageAt(frame)
+        currentFeatures = matcher.features(current)
+        pointsA, pointsB, scores = matcher.match(previous, current, previousFeatures, currentFeatures)
+        mask = maskAt(frame, current.bbox) if maskAt else None
+        order = np.argsort(-scores)
+        stillActive: Dict[Tuple[int, int], int] = {}
+        starts = []
+        for i in order:
+            (xa, ya), (xb, yb), score = pointsA[i], pointsB[i], scores[i]
+            if score < minScore or not _inMask(mask, current.bbox, xb, yb):
+                continue
+            trackIndex = active.get(key(xa, ya))
+            if trackIndex is None:
+                starts.append(i)
+                continue
+            tracks[trackIndex]["keys"][str(frame)] = [round(float(xb), 3), round(float(yb), 3)]
+            tracks[trackIndex]["scores"][str(frame)] = round(float(score), 4)
+            stillActive[key(xb, yb)] = trackIndex
+        for i in starts:
+            if len(stillActive) >= count:
+                break
+            (xa, ya), (xb, yb) = pointsA[i], pointsB[i]
+            tracks.append({"name": f"auto{len(tracks) + 1}", "enabled": True, "pattern": pattern, "search": search,
+                           "auto": True, "format": list(size),
+                           "keys": {str(frames[index - 1]): [round(float(xa), 3), round(float(ya), 3)],
+                                    str(frame): [round(float(xb), 3), round(float(yb), 3)]},
+                           "scores": {str(frame): round(float(scores[i]), 4)}})
+            stillActive[key(xb, yb)] = len(tracks) - 1
+        active = stillActive
+        previous, previousFeatures = current, currentFeatures
+        if progress:
+            progress(index / float(max(1, len(frames) - 1)))
+        if onFrame:
+            onFrame(frame, list(tracks))
+    return tracks
 
 
 def previewFeatures(image, nextImage, count: int, pattern: int, search: int, minScore: float,

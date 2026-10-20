@@ -289,7 +289,7 @@ class TrackingModel:
 
 def trackMany(tracks: List[dict], frames: List[int], imageAt, cancel=None, minScore: float = 0.5, progress=None,
               onKey=None, stopAt: Optional[List[Optional[int]]] = None,
-              model: Optional[TrackingModel] = None) -> List[Dict[str, List[float]]]:
+              model: Optional[TrackingModel] = None, device=None) -> List[Dict[str, List[float]]]:
     """
     Track several points together through `frames` (consecutive, forward or backward), each from its position at the
     first of them: each frame is rendered once and all the tracks move to it before the next one. The pattern of a
@@ -305,6 +305,7 @@ def trackMany(tracks: List[dict], frames: List[int], imageAt, cancel=None, minSc
         onKey: function(track index, frame, x, y, score) called for each tracked position (live display).
         stopAt: for each track, a frame it does not reach (e.g. its next keyframe), or None.
         model: links the tracks (see TrackingModel).
+        device: the GPU to match the patterns of all the tracks at once (meshroom/live/gpu.py), None: the CPU.
 
     Returns:
         For each track, its new keys {"frame": [x, y]} (the start frame excluded). When stopped (`cancel` or `imageAt`
@@ -342,11 +343,14 @@ def trackMany(tracks: List[dict], frames: List[int], imageAt, cancel=None, minSc
         except (EvaluationCancelled, EvaluationError):
             break
         predicted = model.predict(frame, {index: state["position"] for index, state in active.items()}) if model else {}
-        found = {}
-        for index, state in active.items():
-            match = _trackStep(state, previous, current, predicted.get(index), minScore)
-            if match is not None:
-                found[index] = match
+        if device is not None:
+            found = _trackSteps(active, previous, current, predicted, minScore, device)
+        else:
+            found = {}
+            for index, state in active.items():
+                match = _trackStep(state, previous, current, predicted.get(index), minScore)
+                if match is not None:
+                    found[index] = match
         rejected = model.reject(frame, {index: match[:2] for index, match in found.items()}) if model and found else set()
         for index in list(states):
             if index not in active:
@@ -369,24 +373,32 @@ def trackMany(tracks: List[dict], frames: List[int], imageAt, cancel=None, minSc
     return keys
 
 
+def _searchCenters(state: dict, predicted) -> List[Tuple[float, float]]:
+    """ Where a tracked point is searched, in order: where it is expected (the prediction of the model, its last
+    motion), then where it was. """
+    x, y = state["position"]
+    candidates = [predicted] if predicted is not None else []
+    motion = state["motion"]
+    candidates.append((x + motion[0], y + motion[1]))
+    candidates.append((x, y))
+    centers = []
+    for center in candidates:
+        if not (np.isfinite(center[0]) and np.isfinite(center[1])):
+            continue
+        if any(abs(center[0] - other[0]) < 1.0 and abs(center[1] - other[1]) < 1.0 for other in centers):
+            continue
+        centers.append((float(center[0]), float(center[1])))
+    return centers
+
+
 def _trackStep(state: dict, previous: tuple, current: tuple, predicted, minScore: float):
     """ The position (x, y, score) of a tracked point in the `current` image, or None if it is lost. """
     x, y = state["position"]
     pattern = _patch(previous[0], previous[1], x, y, state["size"])
     if pattern is None:
         return None
-    # Searched where it is expected (its last motion, or the prediction of the model), then where it was
-    centers = [predicted] if predicted is not None else []
-    motion = state["motion"]
-    centers.append((x + motion[0], y + motion[1]))
-    centers.append((x, y))
-    best, tried = None, []
-    for center in centers:
-        if not (np.isfinite(center[0]) and np.isfinite(center[1])):
-            continue
-        if any(abs(center[0] - other[0]) < 1.0 and abs(center[1] - other[1]) < 1.0 for other in tried):
-            continue
-        tried.append(center)
+    best = None
+    for center in _searchCenters(state, predicted):
         match = matchPattern(pattern, current[0], current[1], center[0], center[1], state["search"])
         if match is not None and (best is None or match[2] > best[2]):
             best = match
@@ -396,3 +408,147 @@ def _trackStep(state: dict, previous: tuple, current: tuple, predicted, minScore
         return None
     refinedX, refinedY = refine(pattern, current[0], current[1], best[0], best[1])
     return refinedX, refinedY, best[2]
+
+
+def _trackSteps(active: dict, previous: tuple, current: tuple, predicted: dict, minScore: float, device) -> dict:
+    """
+    _trackStep of all the active tracks, their patterns matched at once on the GPU (all their search centers): the
+    first center matching well (0.9) wins, else the best one, as _trackStep. Returns {track index: (x, y, score)}.
+    """
+    jobs = {}
+    patterns = {}
+    for index, state in active.items():
+        x, y = state["position"]
+        pattern = _patch(previous[0], previous[1], x, y, state["size"])
+        if pattern is None:
+            continue
+        patterns[index] = pattern
+        for order, center in enumerate(_searchCenters(state, predicted.get(index))):
+            jobs.setdefault((state["size"], state["search"]), []).append((index, order, center))
+    candidates = {}
+    for (size, search), group in jobs.items():
+        matches = matchMany(np.stack([patterns[index] for index, _, _ in group]), current[0], current[1],
+                            np.array([center for _, _, center in group], dtype=np.float64), search, device)
+        for (index, order, _), match in zip(group, matches):
+            if np.isfinite(match[2]):
+                candidates.setdefault(index, []).append((order, tuple(match)))
+    found = {}
+    for index, options in candidates.items():
+        options.sort()
+        good = [match for _, match in options if match[2] >= max(minScore, 0.9)]
+        best = good[0] if good else max((match for _, match in options), key=lambda match: match[2])
+        if best[2] < minScore:
+            continue
+        refinedX, refinedY = refine(patterns[index], current[0], current[1], best[0], best[1])
+        found[index] = (refinedX, refinedY, best[2])
+    return found
+
+
+def matchMany(patterns: np.ndarray, lum: np.ndarray, bbox, centers: np.ndarray, searchSize: int, device=None) -> np.ndarray:
+    """
+    matchPattern for n patterns (n, size, size) searched around their centers (n, 2): on the GPU at once when `device`
+    is given (falling back on the CPU if it fails), else one after the other.
+
+    Returns:
+        (n, 3): the position (x, y) and the score of each match, NaN where the search area leaves the image.
+    """
+    from . import gpu
+    if device is not None and len(patterns):
+        from .evaluator import EvaluationCancelled
+        try:
+            from .gpuOps import matchPatterns
+            return matchPatterns(patterns, lum, bbox, centers, searchSize, device)
+        except EvaluationCancelled:
+            raise
+        except Exception as e:
+            gpu._warnOnce("Pattern matching", e)
+            gpu.emptyCache()
+    result = np.full((len(patterns), 3), np.nan)
+    for index, (pattern, (x, y)) in enumerate(zip(patterns, centers)):
+        match = matchPattern(pattern, lum, bbox, x, y, searchSize)
+        if match is not None:
+            result[index] = match
+    return result
+
+
+# Tracking with a point tracking network (meshroom/live/neural/pointTracking.py)
+
+def trackManyNeural(tracks: List[dict], frames: List[int], imageAt, pointTracker, cancel=None, minScore: float = 0.5,
+                    progress=None, onKey=None, stopAt: Optional[List[Optional[int]]] = None) -> List[Dict[str, List[float]]]:
+    """
+    trackMany with a point tracking network (BootsTAPIR, CoTracker): it sees `pointTracker.chunk` frames at once, follows
+    the points through fast motions and blur, and tells when a point is hidden (its track stops there). Each position
+    it gives is refined on the image (the pattern of the previous frame searched close to it, sub-pixel); where the
+    pattern does not match (its look changed), the position of the network is kept. The next frames start from the
+    positions found at the last frame of the chunk.
+
+    Same arguments and result as trackMany (`pointTracker`: see meshroom/live/neural/pointTracking.py).
+    """
+    from .evaluator import EvaluationCancelled, EvaluationError
+    from .imageBuffer import BBox
+    from .neural import displayRGB
+    keys = [{} for _ in tracks]
+    if len(frames) < 2:
+        return keys
+    step = 1 if frames[-1] >= frames[0] else -1
+    states = {}
+    for index, track in enumerate(tracks):
+        start = trackPosition(track, frames[0])
+        if start is not None:
+            states[index] = {"position": start, "size": int(track.get("pattern", 21)) | 1,
+                             "stopAt": stopAt[index] if stopAt and index < len(stopAt) else None}
+    position = 0
+    chunk = max(2, int(getattr(pointTracker, "chunk", 24)))
+    images = {}
+    while states and position < len(frames) - 1:
+        window = frames[position:position + chunk + 1]
+        try:
+            for frame in window:
+                if cancel:
+                    cancel()
+                if frame not in images:
+                    images[frame] = imageAt(frame)
+        except (EvaluationCancelled, EvaluationError):
+            break
+        width, height = images[window[0]].format
+        formatBBox = BBox.fromFormat(width, height)
+        video = np.stack([displayRGB(images[frame], formatBBox) for frame in window])
+        order = sorted(states)
+        # Network coordinates: from the top left corner, y down
+        queries = np.array([[states[index]["position"][0], height - states[index]["position"][1]] for index in order])
+        positions, visible = pointTracker.track(video, queries)
+        previous = luminance(images[window[0]])
+        for t, frame in enumerate(window[1:], start=1):
+            current = luminance(images[frame])
+            for k, index in enumerate(order):
+                state = states.get(index)
+                if state is None:
+                    continue
+                if (state["stopAt"] is not None and (state["stopAt"] - frame) * step <= 0) or not visible[t, k]:
+                    del states[index]
+                    continue
+                x, y = float(positions[t, k, 0]), height - float(positions[t, k, 1])
+                if not (np.isfinite(x) and np.isfinite(y)):
+                    del states[index]
+                    continue
+                score = 1.0
+                pattern = _patch(previous[0], previous[1], state["position"][0], state["position"][1], state["size"])
+                if pattern is not None:
+                    match = matchPattern(pattern, current[0], current[1], x, y, state["size"] + 8)
+                    if match is not None and match[2] >= minScore:
+                        x, y = refine(pattern, current[0], current[1], match[0], match[1])
+                        score = match[2]
+                state["position"] = (x, y)
+                keys[index][str(frame)] = [round(float(x), 3), round(float(y), 3)]
+                if onKey:
+                    onKey(index, frame, keys[index][str(frame)][0], keys[index][str(frame)][1], float(score))
+            previous = current
+            if progress:
+                progress(position + t, len(frames) - 1)
+            if not states:
+                break
+        # Only the images of the next window are kept
+        for frame in window[:-1]:
+            images.pop(frame, None)
+        position += len(window) - 1
+    return keys

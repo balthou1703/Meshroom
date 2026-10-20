@@ -527,11 +527,61 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
 
 Limites : pas de distorsion d'objectif dans la Resection, focale non estimée, géométrie supposée fixe pendant que
 l'on pose les pins (les points des pins sont en coordonnées monde) et rigide pendant son suivi (la géométrie de la
-frame courante) ; suivi en numpy (environ 0,1 à 0,3 s par frame à 1K, davantage en 4K avec le flot optique) ;
-méthodes récentes à base de réseaux (CoTracker pour des milliers de points suivis ensemble avec les occultations,
-RAFT / SEA-RAFT pour le flot, LightGlue pour les correspondances, FoundationPose / MegaPose pour la pose d'un modèle)
-non intégrées : elles demandent PyTorch et un GPU ; lecture Alembic / FBX non testée ici (modules
-absents).
+frame courante) ; suivi en numpy sur CPU (environ 0,1 à 0,3 s par frame à 1K, davantage en 4K avec le flot optique ;
+voir 4.14 pour le GPU) ; lecture Alembic / FBX non testée ici (modules absents).
+
+### 4.14 GPU et réseaux de neurones
+
+**GPU** (`meshroom/live/gpu.py`, `gpuOps.py`) : les nœuds Blur, Sharpen, Erode, Median, ZDefocus, OpticalFlow,
+Retime, TimeWarp, Tracker, CameraTracker et Resection ont « Use GPU » (coché par défaut). Avec PyTorch et un GPU
+CUDA (ou MPS sur macOS), le calcul y est fait ; sinon, ou en cas d'échec (mémoire, opération non supportée), sur le
+CPU, avec le même résultat (avertissement une fois par opération dans le log). Ce qui passe sur le GPU : flous
+(gaussien et trois boîtes), érosion / dilatation, médiane (par bandes), convolutions FFT du ZDefocus, flot optique
+Lucas-Kanade pyramidal, et la corrélation des motifs de toutes les pistes à la fois (Tracker, pins, autotrack,
+suivi de géométrie par patches). Le Roto (« Track Shapes With Flow ») utilise le GPU s'il y en a un.
+`MESHROOM_GPU=0` l'interdit partout, `MESHROOM_GPU_DEVICE=1` choisit la carte.
+
+**Réseaux** (`meshroom/live/neural/`, optionnels, PyTorch) :
+
+| Réseau | Licence | Où | Option |
+|--------|---------|----|--------|
+| RAFT (torchvision `raft_large`) | BSD-3 | OpticalFlow, suivi de géométrie | « Method » : raft ; « Track Geometry With » : raft |
+| BootsTAPIR (tapnet) | Apache-2.0 / CC-BY-4.0 | Tracker, pins de la Resection | « Point Tracker » : tapir |
+| CoTracker3 | **CC-BY-NC-4.0, non commercial** | Tracker, pins | « Point Tracker » : cotracker |
+| LightGlue + ALIKED | Apache-2.0 / BSD-3 | CameraTracker, Align de la Resection | « Features » : lightglue ; « Align With » : lightglue |
+| MegaPose (megapose6d ou happypose) | Apache-2.0 | Align de la Resection | « Align With » : megapose (GPU CUDA) |
+
+FoundationPose n'est pas intégré : il lui faut une image de profondeur (RGB-D) en plus de l'image, ce que n'ont pas
+les plaques, et sa licence est non commerciale. MegaPose a un modèle RGB seul.
+
+- **Point Tracker** (tapir / cotracker) : le réseau voit 32 (48) frames à la fois, suit les points dans les
+  mouvements rapides et le flou, et dit quand un point est caché (sa piste s'arrête là) ; chaque position est
+  affinée sur l'image (motif de la frame précédente cherché tout près, sous-pixel) ; la fenêtre suivante repart des
+  positions trouvées (`tracking.trackManyNeural`).
+- **Features : lightglue** : les features ALIKED de chaque frame appariées à celles de la suivante par LightGlue ;
+  une feature réappariée prolonge sa piste (`camera.autoTrackMatched`).
+- **Align With** : patches (comme avant : la géométrie doit être placée à peu près), lightglue (les features de la
+  keyframe appariées dans la frame courante puis posées sur la géométrie : marche loin de la bonne position et sous
+  un autre angle, `geotrack.alignWithMatches`), megapose (la pose du maillage trouvée dans l'image depuis la boîte où
+  la pose actuelle le montre, sans keyframe). Dans les deux cas, la pose est ensuite affinée sur les patches de la
+  keyframe la plus proche.
+- Un réseau absent (PyTorch, paquet, poids) : le nœud prend la méthode classique (avertissement dans le log ; pour
+  Align, un message d'erreur dit ce qui manque).
+
+**Installation** : PyTorch (`rez env pytorch-2.5.1 ...`, avec torchvision pour RAFT) ; les paquets
+`tapnet` (git+https://github.com/google-deepmind/tapnet), `lightglue` (git+https://github.com/cvg/LightGlue),
+`cotracker` (git+https://github.com/facebookresearch/co-tracker), `megapose6d` ou `happypose`. Les poids sont lus
+dans le dossier `MESHROOM_MODELS_PATH` (jamais téléchargés pendant que Meshroom tourne) ; le remplir une fois, depuis
+une machine qui a internet :
+
+```
+python -m meshroom.live.neural.download --path /chemin/partage/meshroom-models            # tous sauf CoTracker
+python -m meshroom.live.neural.download --path /chemin/partage/meshroom-models cotracker  # non commercial
+export MESHROOM_MODELS_PATH=/chemin/partage/meshroom-models
+```
+
+Les noyaux GPU sont testés contre leurs versions CPU sur le device « cpu » de PyTorch (`tests/test_gpu.py`, sautés
+sans PyTorch).
 
 ## 5. Import `.nk` (P4, fait)
 

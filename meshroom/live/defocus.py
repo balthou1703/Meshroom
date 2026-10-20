@@ -115,26 +115,29 @@ def fftConvolve(values: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return result[oy:oy + h, ox:ox + w].astype(np.float32)
 
 
-def _blurSlice(data: np.ndarray, radius: float, kernelFor: Callable[[float], np.ndarray]) -> np.ndarray:
+def _blurSlice(data: np.ndarray, radius: float, kernelFor: Callable[[float], np.ndarray],
+               convolve: Callable = fftConvolve) -> np.ndarray:
     """ Convolve a slice (h, w, c) by the kernel of `radius`, on a reduced copy for the large ones. """
     if radius < 0.5:
         return data
     factor = max(1, int(radius / _REDUCED_RADIUS))
     if factor == 1:
-        return fftConvolve(data, kernelFor(radius))
+        return convolve(data, kernelFor(radius))
     h, w = data.shape[:2]
-    small = fftConvolve(_downsample(data, factor), kernelFor(radius / factor))
+    small = convolve(_downsample(data, factor), kernelFor(radius / factor))
     return _resizeCentered(small, -(-h // factor) * factor, -(-w // factor) * factor)[:h, :w]
 
 
 # Depth of field
 
 def defocus(rgba: np.ndarray, signedRadius: np.ndarray, maxRadius: float, slices: int,
-            kernelFor: Callable[[float], np.ndarray], cancel: Optional[Callable[[], None]] = None) -> np.ndarray:
+            kernelFor: Callable[[float], np.ndarray], cancel: Optional[Callable[[], None]] = None,
+            convolve: Callable = fftConvolve) -> np.ndarray:
     """
     Depth of field of a premultiplied (h, w, 4) image: `signedRadius` (h, w) is the blur radius of each
     pixel in pixels, negative in front of the focal plane, positive behind; `slices` depth slices on each
-    side; `kernelFor(radius)` gives the bokeh kernel. Returns the (h, w, 4) result.
+    side; `kernelFor(radius)` gives the bokeh kernel; `convolve(values, kernel)` convolves a slice (fftConvolve, or
+    its GPU version). Returns the (h, w, 4) result.
     """
     h, w = signedRadius.shape
     # The slices span the blur sizes actually present (not just the allowed maximum)
@@ -165,7 +168,7 @@ def defocus(rgba: np.ndarray, signedRadius: np.ndarray, maxRadius: float, slices
         x0, x1 = max(0, columns[0] - marginX), min(w, columns[-1] + 1 + marginX)
         cover = membership[y0:y1, x0:x1, np.newaxis]
         data = np.concatenate([rgba[y0:y1, x0:x1] * cover, cover], axis=2)
-        blurred = _blurSlice(data, radius, lambda r, k=kernel, r0=radius: k if r == r0 else kernelFor(r))
+        blurred = _blurSlice(data, radius, lambda r, k=kernel, r0=radius: k if r == r0 else kernelFor(r), convolve)
         alpha = np.clip(blurred[:, :, 4:5], 0.0, 1.0)
         # "over": the slice on top of the farther ones; the weight follows the same compositing,
         # so that the partial coverages (between two slices, image edges) are normalized at the end

@@ -431,7 +431,9 @@ the matte).
                 bbox = vectors.bbox
             else:
                 image = context.render(frame)
-                field = flow.computeFlow(image, context.render(nextFrame), cancel=context.checkCancelled)
+                from meshroom.live import gpu
+                field = flow.computeFlow(image, context.render(nextFrame), cancel=context.checkCancelled,
+                                         useGpu=gpu.enabled(context))
                 bbox = image.bbox
             for index in indices:
                 shapes[index] = roto.advectShape(shapes[index], frame, nextFrame,

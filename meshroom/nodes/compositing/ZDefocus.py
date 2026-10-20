@@ -3,6 +3,7 @@ __version__ = "0.1"
 import numpy as np
 
 from meshroom.core import desc
+from meshroom.live.gpu import gpuParam
 from meshroom.live.params import maskParams
 
 
@@ -67,6 +68,7 @@ composited back to front, so that the blurred foreground spreads over the backgr
                         description="Width / height of the bokeh (> 1: anamorphic, wider)."),
         desc.IntParam(name="slices", label="Depth Slices", value=8, range=(1, 32, 1),
                       description="Depth slices on each side of the focal plane: more is smoother and slower."),
+        gpuParam(),
         desc.FloatParam(name="mix", label="Mix", value=1.0, range=(0.0, 1.0, 0.01),
                         description="Blend between the input (0) and the defocused image (1)."),
     ]
@@ -142,8 +144,14 @@ composited back to front, so that the blurred foreground spreads over the backgr
             out[:, :, :3] = 0.25 + 0.75 * luma * tint
             out[:, :, 3] = 1.0
             return image.withRGBA(out)
+        from meshroom.live import gpu, gpuOps
+        useGpu = gpu.enabled(ctx)
+
+        def convolve(values, kernel):
+            return gpu.run(useGpu, lambda device: gpuOps.fftConvolve(values, kernel, device),
+                           lambda: defocus.fftConvolve(values, kernel), "ZDefocus")
         blurred = defocus.defocus(rgba, radius, ctx.value("maxSize"), ctx.value("slices"),
-                                  self._kernelFor(ctx, inputs), ctx.checkCancelled)
+                                  self._kernelFor(ctx, inputs), ctx.checkCancelled, convolve)
         amount = maskAmount(ctx, inputs, image.bbox, ctx.value("mix"))
         if not (np.isscalar(amount) and amount >= 1.0):
             blurred = ops.mix(rgba, blurred, amount)

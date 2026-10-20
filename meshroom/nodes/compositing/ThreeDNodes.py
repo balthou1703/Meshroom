@@ -13,7 +13,8 @@ import numpy as np
 
 from meshroom.core import desc
 from meshroom.live import scene3d
-from meshroom.live.params import imageInput
+from meshroom.live.gpu import gpuParam
+from meshroom.live.params import imageInput, pointTrackerParam
 
 _COLOR = "#6E9E8A"
 _FILE_FILTER = "3D files (*.usd *.usda *.usdc *.usdz *.abc *.fbx *.obj *.ply)"
@@ -273,10 +274,22 @@ into keys of a Camera or a ReadGeo.
         desc.StringParam(name="tracks", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position (as the tracks of a Tracker) and its point "
                                      "on the geometry (\"point\": [x, y, z]). Edited in the viewer."),
-        desc.ChoiceParam(name="trackMethod", label="Track Geometry With", value="flow", values=["flow", "patches"],
+        desc.ChoiceParam(name="trackMethod", label="Track Geometry With", value="flow", values=["flow", "raft", "patches"],
                          invalidate=False,
-                         description="How the points of the geometry follow the plate: flow (the dense optical flow of "
-                                     "the plate) or patches (the image around each point searched in the next frame)."),
+                         description="How the points of the geometry follow the plate: flow (the Lucas-Kanade optical "
+                                     "flow of the plate), raft (the RAFT optical flow network: large motions, sharp "
+                                     "edges; PyTorch and its weights needed, else flow) or patches (the image around "
+                                     "each point searched in the next frame)."),
+        desc.ChoiceParam(name="alignMethod", label="Align With", value="patches", values=["patches", "lightglue", "megapose"],
+                         invalidate=False,
+                         description="How 'Align' finds the right position: patches (the points of the nearest keyframe "
+                                     "searched close to where the current pose puts them: the geometry must be roughly "
+                                     "placed), lightglue (features of the keyframe matched by LightGlue: far from its "
+                                     "place, other angle), megapose (MegaPose finds the pose of the mesh in the image, "
+                                     "without keyframe, from where the current pose shows it; a CUDA GPU needed). Then "
+                                     "refined on the patches."),
+        pointTrackerParam(),
+        gpuParam(),
         desc.IntParam(name="trackPoints", label="Track Points", value=150, range=(30, 1000, 10), invalidate=False,
                       description="Number of points of the geometry (on textured parts of the plate) followed at each "
                                   "frame by 'Track Geometry'."),
@@ -586,8 +599,11 @@ class _GeoTrackAction:
         if geo is None or geo.isEmpty:
             raise RuntimeError("Connect a geometry to 'Geo'.")
         self.samples = geotrack.SurfaceSamples(geo)
+        from meshroom.live import gpu
+        self.device = gpu.device(gpu.enabled(context))
         self.settings = geotrack.TrackSettings(context.value("trackMethod"), features=context.value("trackPoints"),
-                                               anchored=context.value("trackAnchored"))
+                                               anchored=context.value("trackAnchored"), device=self.device)
+        self.geo = geo
         self.focalPixels = nodeDesc.startCamera(self.ctx, info=self.info).focalPixels(self.info.width)
         self.poses, self.keyframes = nodeDesc.geoTrack(self.ctx)
         pins = nodeDesc.pins(self.ctx, self.info)
@@ -645,19 +661,7 @@ class _GeoTrackAction:
                     if other not in tracked and other not in self.keyframes:
                         self.poses.pop(other, None)
         elif name == "alignGeo":
-            others = [f for f in self.allKeyframes if f != frame]
-            if not others:
-                raise RuntimeError("No keyframe to align to: place the geometry with pins at another frame first.")
-            reference = min(others, key=lambda f: (abs(f - frame), f))
-            self.context.progress(0.1, f"Align on frame {reference}")
-            try:
-                matrix, _, _ = geotrack.alignPose(self.samples, self.settings, self.poseAt(reference),
-                                                  self.context.render(reference), self.poseAt(frame),
-                                                  self.context.render(frame), self.info.width, self.info.height,
-                                                  self.focalPixels, cancel=self.context.checkCancelled)
-            except geotrack.TrackingLost as e:
-                raise RuntimeError(f"Cannot align on frame {reference}: {e}. Move the geometry closer to its place.") from e
-            self.poses[frame] = matrix
+            self.poses[frame] = self.align(frame)
             self.keyframes = sorted(set(self.keyframes) | {frame})
             reason = ""
         else:
@@ -666,6 +670,47 @@ class _GeoTrackAction:
         if reason and reason != "cancelled":
             raise RuntimeError(f"Stopped: {reason}. The poses tracked so far are kept.")
         return self.result()
+
+    def align(self, frame):
+        """ The right pose at `frame` ("Align"), with the method of "Align With". """
+        from meshroom.live import geotrack
+        from meshroom.live.neural import NeuralUnavailable
+        method = self.context.value("alignMethod")
+        image, rough = self.context.render(frame), self.poseAt(frame)
+        others = [f for f in self.allKeyframes if f != frame]
+        reference = min(others, key=lambda f: (abs(f - frame), f)) if others else None
+        if reference is None and method != "megapose":
+            raise RuntimeError("No keyframe to align to: place the geometry with pins at another frame first "
+                               "(or align with megapose).")
+        try:
+            if method == "megapose":
+                from meshroom.live.neural import megapose
+                self.context.progress(0.1, "Align with MegaPose")
+                rough = megapose.estimatePose(image, self.geo, rough, self.focalPixels, self.device)
+                if reference is None:
+                    return rough
+            elif method == "lightglue":
+                from meshroom.live.neural.matching import matcher
+                self.context.progress(0.1, f"Align on frame {reference} with LightGlue")
+                rough, _, _ = geotrack.alignWithMatches(geotrack.SurfaceSamples(self.geo, count=200000),
+                                                        self.poseAt(reference), self.context.render(reference), rough,
+                                                        image, self.info.width, self.info.height, self.focalPixels,
+                                                        matcher(self.device))
+        except NeuralUnavailable as e:
+            raise RuntimeError(f"Align with {method}: {e}") from e
+        except geotrack.TrackingLost as e:
+            raise RuntimeError(f"Cannot align with {method}: {e}.") from e
+        self.context.progress(0.6, f"Align on frame {reference}")
+        try:
+            matrix, _, _ = geotrack.alignPose(self.samples, self.settings, self.poseAt(reference),
+                                              self.context.render(reference), rough, image, self.info.width,
+                                              self.info.height, self.focalPixels, cancel=self.context.checkCancelled)
+        except geotrack.TrackingLost as e:
+            if method != "patches":
+                # The pose of the network, not refined
+                return rough
+            raise RuntimeError(f"Cannot align on frame {reference}: {e}. Move the geometry closer to its place.") from e
+        return matrix
 
     def refine(self):
         """ Each span between two keyframes tracked from both ends, the two tracks blended. Returns why it stopped. """

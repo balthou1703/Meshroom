@@ -12,7 +12,8 @@ __version__ = "0.1"
 import numpy as np
 
 from meshroom.core import desc
-from meshroom.live.params import imageInput, imageOutput, maskParams
+from meshroom.live.gpu import gpuParam
+from meshroom.live.params import imageInput, imageOutput, maskParams, pointTrackerParam
 
 
 class Tracker(desc.ImageOpNode):
@@ -37,6 +38,8 @@ class Tracker(desc.ImageOpNode):
         desc.PushButtonParam(name="importTracks", label="Import Tracks", semantic="liveAction",
                              description="Copy the tracks of the node connected to 'Import From' into this Tracker (they "
                                          "can then be edited), and disconnect it."),
+        pointTrackerParam(),
+        gpuParam(),
     ]
     outputs = imageOutput("Input image, or moved with the tracks.")
     valuesOnlyInputs = ("importFrom",)
@@ -400,6 +403,12 @@ its white areas (e.g. a roto of a moving object, inverted): masked out areas are
         desc.FloatParam(name="minScore", label="Min Correlation",
                         description="A feature is lost when its match is worse than this (1: perfect).",
                         value=0.75, range=(0.3, 0.99, 0.01)),
+        desc.ChoiceParam(name="detector", label="Features", value="patches", values=["patches", "lightglue"],
+                         invalidate=False,
+                         description="patches: corners tracked by their patterns from frame to frame. lightglue: ALIKED "
+                                     "features matched by LightGlue (robust to fast motions and changes of look; PyTorch "
+                                     "and its weights needed, else patches)."),
+        gpuParam(),
         desc.PushButtonParam(name="autotrack", label="Autotrack", semantic="liveAction",
                              description="Detect and track features through the frame range of the input."),
         desc.FloatParam(name="focalLength", label="Focal Length", description="Focal length of the lens in mm.",
@@ -480,11 +489,28 @@ its white areas (e.g. a roto of a moving object, inverted): masked out areas are
                     lastPublish[0] = now
                     context.publish({"tracks": json.dumps(tracksSoFar), "cameraSolve": ""}, frame)
 
-            tracks = camera.autoTrack(context.render, context.frames, count=context.value("features"),
-                                      pattern=context.value("pattern"), search=context.value("search"),
-                                      minScore=context.value("minScore"), checkCancelled=context.checkCancelled,
-                                      progress=lambda f: context.progress(f, "Autotrack"), maskAt=maskAt,
-                                      onFrame=onFrame)
+            from meshroom.live import gpu
+            device = gpu.device(gpu.enabled(context))
+            matcher = None
+            if context.value("detector") == "lightglue":
+                from meshroom.live.neural import NeuralUnavailable, warnUnavailable
+                try:
+                    from meshroom.live.neural.matching import matcher as lightGlue
+                    matcher = lightGlue(device)
+                except NeuralUnavailable as e:
+                    warnUnavailable("LightGlue", e)
+            if matcher is not None:
+                tracks = camera.autoTrackMatched(context.render, context.frames, matcher, count=context.value("features"),
+                                                 checkCancelled=context.checkCancelled,
+                                                 progress=lambda f: context.progress(f, "Autotrack (LightGlue)"),
+                                                 maskAt=maskAt, onFrame=onFrame, pattern=context.value("pattern"),
+                                                 search=context.value("search"))
+            else:
+                tracks = camera.autoTrack(context.render, context.frames, count=context.value("features"),
+                                          pattern=context.value("pattern"), search=context.value("search"),
+                                          minScore=context.value("minScore"), checkCancelled=context.checkCancelled,
+                                          progress=lambda f: context.progress(f, "Autotrack"), maskAt=maskAt,
+                                          onFrame=onFrame, device=device)
             return {"tracks": json.dumps(tracks), "cameraSolve": ""}
         if name == "solve":
             tracks = tracking.parseTracks(context.value("tracks"))
