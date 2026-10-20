@@ -265,7 +265,10 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   sous-pixel). Pendant le suivi, le viewer avance avec lui et les clés apparaissent au fur et à
   mesure (une seule étape d'annulation). Les frames posées à la main sont des keyframes (vignettes en
   haut du viewer), la fenêtre de zoom (en haut à gauche) agrandit la piste sélectionnée, « Error »
-  colore le trajet du rouge (mauvaise corrélation) au vert. Avec 4 pistes sélectionnées (dans l'ordre
+  colore le trajet du rouge (mauvaise corrélation) au vert. Toutes les pistes suivies avancent ensemble, frame après
+  frame (chaque frame rendue une fois, `tracking.trackMany`) ; chacune est cherchée là où la mène son dernier
+  mouvement (vitesse constante), puis là où elle était, et s'arrête seule (corrélation trop faible, sa prochaine
+  keyframe). Avec 4 pistes sélectionnées (dans l'ordre
   bas-gauche, bas-droite, haut-droite, haut-gauche), le bouton CornerPin crée un CornerPin piloté.
 - **Roto** : jusqu'à 3 Trackers (entrées Tracker 1 à 3) ; chaque forme a une liste de liens
   (tracker, piste, forme entière ou point N) ; un point avec son propre lien suit sa piste au lieu
@@ -492,10 +495,29 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   de rayon depuis la caméra résolue ; nuage de points : le point projeté le plus proche) ; glisser le pin à sa place
   dans la plaque, la pose suit en direct : 1 pin déplace la géométrie dans l'image, 2 pins la tournent et la mettent
   à l'échelle, 3 pins et plus résolvent la pose (Gauss-Newton amorti vers la pose de départ ; DLT à partir de 6). Les
-  pins se suivent comme les pistes d'un Tracker (avant / arrière) ; la pose est résolue frame après frame depuis la
-  keyframe la plus proche (chaque pose part de la précédente). La barre d'outils indique le nombre de pins de la
-  frame et l'erreur de reprojection. Un pin compte entre sa première et sa dernière clé (un pin à une seule clé
-  la tient).
+  pins se suivent comme les pistes d'un Tracker (avant / arrière), tous ensemble : à chaque frame, la pose est
+  résolue avec les pins trouvés, un pin loin de l'endroit où elle met son point (glissement, occultation) s'arrête
+  là (à partir de 4 pins), et chaque pin est cherché à la frame suivante là où la pose, à vitesse constante, le met
+  (à partir de 3 pins). La pose est résolue frame après frame depuis la keyframe la plus proche (chaque pose part de
+  la précédente). La barre d'outils indique le nombre de pins de la frame et l'erreur de reprojection. Un pin compte
+  entre sa première et sa dernière clé (un pin à une seule clé la tient).
+  **Suivi de la géométrie** (`meshroom/live/geotrack.py`, boutons de la barre d'outils et du nœud) : les pins ne
+  servent qu'à placer la géométrie sur une keyframe ; « Track Geometry » (arrière / avant, de la frame courante à la
+  keyframe suivante) fait suivre la plaque à de nombreux points de sa surface (« Track Points », 150) : points
+  répartis sur les faces, ceux vus par la caméra (devant, face à elle, non cachés : tampon de profondeur grossier) sur
+  une zone texturée de l'image (score de coin de Shi-Tomasi) ; leur mouvement vers la frame suivante est mesuré par le
+  flot optique dense de la plaque (« Track Geometry With » : flow) ou en cherchant le patch de chacun (patches) là où la
+  pose à vitesse constante le met, puis la pose est résolue en écartant les points qui ne suivent pas (`robustPose`).
+  « Anchor To Keyframe » recale chaque pose sur la keyframe de départ (ses patches cherchés près de l'endroit où la
+  pose les met), ce qui limite la dérive ; quand l'aspect a trop changé, la frame courante devient l'ancre.
+  « Align » trouve la bonne position à la frame courante depuis une position approximative (géométrie placée à peu
+  près, à la main ou par les pins) contre la keyframe la plus proche : patches cherchés de plus en plus près (81, 41,
+  21 pixels) ; la frame devient une keyframe. « Refine » refait le suivi entre chaque paire de keyframes dans les deux
+  sens et mélange les deux poses selon la distance à chaque keyframe (la dérive répartie). Les poses suivies sont dans
+  « Geometry Track » (JSON : poses et keyframes) et priment sur les pins, sauf aux keyframes des pins (qui les
+  ajustent : la pose y part de la pose suivie) ; hors des frames suivies, la pose suivie la plus proche est tenue
+  quand il n'y a pas de pin ; « Clear Geometry Track » les retire. Si le suivi s'arrête (trop peu de points visibles
+  ou trouvés), les poses déjà trouvées sont gardées et la raison s'affiche.
 - **Disconnect and Bake** (clic droit sur un edge) : l'edge est retiré et l'entrée garde ce qu'elle recevait. Un
   paramètre garde la valeur de sa source, et ses clés si elle est animée (pour un enfant, x d'une valeur 2D : les
   clés du groupe). Une entrée caméra ou matrice devient des clés des paramètres du nœud sur la plage de la timeline
@@ -504,7 +526,11 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   (`meshroom/live/bake.py`).
 
 Limites : pas de distorsion d'objectif dans la Resection, focale non estimée, géométrie supposée fixe pendant que
-l'on pose les pins (les points des pins sont en coordonnées monde) ; lecture Alembic / FBX non testée ici (modules
+l'on pose les pins (les points des pins sont en coordonnées monde) et rigide pendant son suivi (la géométrie de la
+frame courante) ; suivi en numpy (environ 0,1 à 0,3 s par frame à 1K, davantage en 4K avec le flot optique) ;
+méthodes récentes à base de réseaux (CoTracker pour des milliers de points suivis ensemble avec les occultations,
+RAFT / SEA-RAFT pour le flot, LightGlue pour les correspondances, FoundationPose / MegaPose pour la pose d'un modèle)
+non intégrées : elles demandent PyTorch et un GPU ; lecture Alembic / FBX non testée ici (modules
 absents).
 
 ## 5. Import `.nk` (P4, fait)

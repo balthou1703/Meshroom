@@ -31,8 +31,11 @@ class ActionContext:
     def __init__(self, values: dict, evaluator: Optional[Evaluator] = None, plan: Optional[RenderPlan] = None,
                  currentFrame: int = 1, token: Optional[CancelToken] = None,
                  progress: Optional[Callable[[float, str], None]] = None, inputPlans: Optional[dict] = None,
-                 inputValues: Optional[dict] = None, publish: Optional[Callable[[dict, int], None]] = None):
+                 inputValues: Optional[dict] = None, publish: Optional[Callable[[dict, int], None]] = None,
+                 nodePlan: Optional[RenderPlan] = None):
         self.values = values
+        # Plan of the node itself (its own outputs, e.g. the camera solved by a Resection, see nodeContext)
+        self._nodePlan = nodePlan
         self._publish = publish
         self._evaluator = evaluator
         self._plan = plan
@@ -88,6 +91,19 @@ class ActionContext:
         if self._evaluator is None or name not in self._inputPlans:
             raise RuntimeError(f"The input '{name}' of the node is not connected.")
         return self._evaluator.render(self._inputPlans[name], frame, self._token)
+
+    def nodeContext(self, frame: Optional[int] = None):
+        """
+        The render context of the node itself at a frame (the current one by default): its camera, geo and matrix
+        inputs (`inputData`) and its own outputs at any frame (`ownData`), with the values it had when the action started.
+        """
+        from .evaluator import RenderContext
+        if self._evaluator is None or self._nodePlan is None:
+            raise RuntimeError("The node cannot be evaluated.")
+        plan = self._nodePlan
+        context = RenderContext(plan.nodes[plan.target], self.currentFrame if frame is None else frame, self._evaluator, plan)
+        context._token = self._token
+        return context
 
     def checkCancelled(self):
         if self._token.cancelled:

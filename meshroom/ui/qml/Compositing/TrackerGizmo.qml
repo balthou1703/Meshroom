@@ -526,6 +526,52 @@ Item {
                 ToolTip.text: "Center Geometry: step the starting camera back along its view axis until the whole geometry " +
                               "is centered in the view (large geometry around the camera)"
             }
+            // Resection: the geometry itself tracked by many points of its surface (optical flow / patches)
+            Rectangle { visible: root.pinMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
+            MaterialToolButton {
+                visible: root.pinMode
+                font.pointSize: 16
+                text: MaterialIcons.skip_previous
+                enabled: !root.tracking && root.live.actionProgress < 0
+                onClicked: root.live.runAction(root.node, "trackGeoBackward")
+                ToolTip.text: "Track Geometry backward: many points of the geometry follow the plate, from the current " +
+                              "frame back to the previous keyframe"
+            }
+            MaterialToolButton {
+                visible: root.pinMode
+                font.pointSize: 16
+                text: MaterialIcons.skip_next
+                enabled: !root.tracking && root.live.actionProgress < 0
+                onClicked: root.live.runAction(root.node, "trackGeoForward")
+                ToolTip.text: "Track Geometry forward: many points of the geometry follow the plate, from the current " +
+                              "frame to the next keyframe"
+            }
+            MaterialToolButton {
+                visible: root.pinMode
+                font.pointSize: 16
+                text: MaterialIcons.my_location
+                enabled: !root.tracking && root.live.actionProgress < 0
+                onClicked: root.live.runAction(root.node, "alignGeo")
+                ToolTip.text: "Align: find the right position of the geometry at this frame (from a rough one), against " +
+                              "the nearest keyframe; the frame becomes a keyframe"
+            }
+            MaterialToolButton {
+                visible: root.pinMode
+                font.pointSize: 16
+                text: MaterialIcons.auto_fix_high
+                enabled: !root.tracking && root.live.actionProgress < 0
+                onClicked: root.live.runAction(root.node, "refineGeo")
+                ToolTip.text: "Refine: track the geometry again between each pair of keyframes, from both ends, and blend"
+            }
+            MaterialToolButton {
+                visible: root.pinMode
+                font.pointSize: 16
+                text: MaterialIcons.layers_clear
+                enabled: !root.tracking && root.live.actionProgress < 0 && root.node.hasAttribute("geoTrack")
+                         && root.node.attribute("geoTrack").value !== ""
+                onClicked: root.live.runAction(root.node, "clearGeoTrack")
+                ToolTip.text: "Clear the geometry track (the pins solve again)"
+            }
             // Pins of the Resection at this frame and their reprojection error
             Label {
                 visible: root.pinMode

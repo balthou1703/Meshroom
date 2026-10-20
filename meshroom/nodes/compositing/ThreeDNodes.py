@@ -243,8 +243,16 @@ the geometry are moved onto the plate, and tracked.
 - Select it, "Add pin" in the toolbar of the viewer and click on the geometry: a pin is stuck to the surface (or
   to the nearest point of a point cloud); drag it onto its place in the plate. The pose follows: 1 pin moves the
   geometry in the image, 2 pins also turn and scale it, 3 pins and more solve the pose (4 or more: exactly).
-- Track the pins forward / backward (as the tracks of a Tracker): the pose is solved at every frame with them;
-  the frames where pins were placed by hand are their keyframes.
+- Track the pins forward / backward (as the tracks of a Tracker): all the pins move together frame after frame, each
+  searched where the pose solved with the others puts it; a pin that stops fitting the pose stops there. The pose is
+  solved at every frame with them; the frames where pins were placed by hand are their keyframes.
+- Or track the geometry itself ("Track Geometry" backward / forward, from the current frame to the next keyframe): the
+  pins only place it at a keyframe, then many points of its surface follow the plate, by optical flow (or patches);
+  each pose is checked against the keyframe to limit the drift. "Align" finds the right position at the current frame
+  from a rough one (the geometry put near its place by hand), against the nearest keyframe, and makes it a keyframe.
+  "Refine" tracks again between each pair of keyframes from both ends and blends them (the drift spread between them).
+  The tracked poses are stored in "Geometry Track" and prevail over the pins, except at the keyframes of the pins
+  (where the pins adjust them); "Clear Geometry Track" removes them.
 
 The lens (focal length, film back) and the starting pose come from "Camera" (without it: 35 mm on a 36 mm film
 back, looking at the geometry). "Center Geometry" steps the starting camera back along its view axis until the whole
@@ -265,6 +273,30 @@ into keys of a Camera or a ReadGeo.
         desc.StringParam(name="tracks", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position (as the tracks of a Tracker) and its point "
                                      "on the geometry (\"point\": [x, y, z]). Edited in the viewer."),
+        desc.ChoiceParam(name="trackMethod", label="Track Geometry With", value="flow", values=["flow", "patches"],
+                         invalidate=False,
+                         description="How the points of the geometry follow the plate: flow (the dense optical flow of "
+                                     "the plate) or patches (the image around each point searched in the next frame)."),
+        desc.IntParam(name="trackPoints", label="Track Points", value=150, range=(30, 1000, 10), invalidate=False,
+                      description="Number of points of the geometry (on textured parts of the plate) followed at each "
+                                  "frame by 'Track Geometry'."),
+        desc.BoolParam(name="trackAnchored", label="Anchor To Keyframe", value=True, invalidate=False, advanced=True,
+                       description="Check each tracked pose against the keyframe the track started from (less drift, "
+                                   "slower)."),
+        desc.PushButtonParam(name="trackGeoBackward", label="Track Geometry Backward", semantic="liveAction",
+                             description="Track the geometry from the current frame back to the previous keyframe."),
+        desc.PushButtonParam(name="trackGeoForward", label="Track Geometry Forward", semantic="liveAction",
+                             description="Track the geometry from the current frame to the next keyframe."),
+        desc.PushButtonParam(name="alignGeo", label="Align", semantic="liveAction",
+                             description="Find the right position of the geometry at the current frame (from a rough "
+                                         "one), against the nearest keyframe; the frame becomes a keyframe."),
+        desc.PushButtonParam(name="refineGeo", label="Refine", semantic="liveAction",
+                             description="Track the geometry again between each pair of keyframes, from both ends, and "
+                                         "blend the two tracks."),
+        desc.PushButtonParam(name="clearGeoTrack", label="Clear Geometry Track", semantic="liveAction",
+                             description="Remove the poses tracked with 'Track Geometry' (the pins solve again)."),
+        desc.StringParam(name="geoTrack", label="Geometry Track", value="", semantic="geoTrack", advanced=True,
+                         description="Poses tracked with 'Track Geometry' and the keyframes (JSON)."),
         desc.ChoiceParam(name="display", label="Display", value="wireframe", values=["wireframe", "points", "none"],
                          description="What is drawn over the plate: the edges of the geometry, its vertices, or nothing."),
         desc.FloatParam(name="opacity", label="Opacity", value=0.6, range=(0.0, 1.0, 0.01),
@@ -312,6 +344,21 @@ into keys of a Camera or a ReadGeo.
             positions.append(tracking.trackPosition(pin, frame))
         return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
 
+    @staticmethod
+    def pinKeyframes(pins):
+        """ The frames where pins were placed by hand (all the frames of their keys for pins without keyframes). """
+        return sorted({int(f) for pin in pins for f in (pin.get("keyframes") or [])} or
+                      {int(f) for pin in pins for f in (pin.get("keys") or {})})
+
+    @staticmethod
+    def geoTrack(ctx):
+        """ The poses tracked with "Track Geometry" ({frame: camera-to-world matrix}) and their keyframes. """
+        from meshroom.live import geotrack
+        try:
+            return geotrack.parsePoses(ctx.value("geoTrack"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+
     def inputCamera(self, ctx, frame=None):
         """ The camera of the "camera" input at a frame, or a camera looking at the geometry. """
         camera = ctx.inputData("camera", frame)
@@ -352,13 +399,22 @@ into keys of a Camera or a ReadGeo.
         if info is None:
             raise RuntimeError("Connect the plate to the input.")
         pins = self.pins(ctx, info)
+        keyframes = self.pinKeyframes(pins)
+        frame = ctx.frame
+        # A pose tracked with "Track Geometry" prevails; at a keyframe of the pins, they adjust it
+        poses, _ = self.geoTrack(ctx)
+        if frame in poses:
+            if frame in keyframes:
+                return self._solve(ctx, frame, poses[frame], pins, info)[0]
+            return self.startCamera(ctx, frame, info).copy(matrix=poses[frame])
         if not pins:
+            if poses:
+                # Outside of the tracked frames: the nearest tracked pose is held
+                nearest = min(poses, key=lambda f: (abs(f - frame), f))
+                return self.startCamera(ctx, frame, info).copy(matrix=poses[nearest])
             return self.startCamera(ctx, info=info)
         # Solved frame after frame from the nearest frame with pins placed by hand (each pose starts from the one
         # of the previous frame): the poses on the way are cached
-        keyframes = sorted({int(f) for pin in pins for f in (pin.get("keyframes") or [])} or
-                           {int(f) for pin in pins for f in (pin.get("keys") or {})})
-        frame = ctx.frame
         anchor = min(keyframes, key=lambda f: (abs(f - frame), f)) if keyframes else frame
         step = 1 if frame >= anchor else -1
         evaluator, uid = ctx.evaluator, ctx.planNode.uid
@@ -374,6 +430,28 @@ into keys of a Camera or a ReadGeo.
             if current != frame:
                 evaluator.storeData(uid, "cameraOutput", current, solved)
         return solved
+
+    # Tracking
+
+    def trackingModel(self, ctx, tracks):
+        """ The pins tracked together (meshroom/live/tracking.py): all on the geometry, they move with one pose. """
+        info = ctx.inputInfo("input")
+        if info is None:
+            return None
+        camera = self.startCamera(ctx, info=info)
+        try:
+            start = ctx.ownData("cameraOutput", ctx.frame).matrix
+        except Exception:
+            start = camera.matrix
+        return _PinsModel(tracks, info.width, info.height, camera.focalPixels(info.width), start)
+
+    def runAction(self, name, context):
+        """ Geometry tracking actions (see the documentation): returns {"geoTrack": the new poses}. """
+        if name == "clearGeoTrack":
+            return {"geoTrack": ""}
+        if name not in ("trackGeoForward", "trackGeoBackward", "alignGeo", "refineGeo"):
+            raise RuntimeError(f"Unknown action: {name}")
+        return _GeoTrackAction(self, context).run(name)
 
     def reprojectionError(self, ctx) -> float:
         """ RMS distance in pixels between the pins and their points seen from the solved camera, at the frame. """
@@ -418,3 +496,168 @@ into keys of a Camera or a ReadGeo.
             for dx in range(-3, 4):
                 scene3d.drawSegments(rgba, image.bbox, xy + [dx, -3], xy + [dx, 3], (1.0, 0.85, 0.2), 1.0)
         return image.withRGBA(rgba)
+
+
+class _PinsModel:
+    """
+    The pins of a Resection tracked together (a tracking.TrackingModel): at each frame the pose is solved with the pins
+    found; the pins far from where it puts their point are rejected, and each pin is searched in the next frame where
+    the pose, moving at constant speed, puts it.
+    """
+
+    def __init__(self, tracks, width, height, focalPixels, start):
+        self.points = {index: np.array(track["point"], dtype=np.float64) for index, track in enumerate(tracks)
+                       if len(track.get("point") or []) == 3}
+        self.width, self.height, self.focalPixels = width, height, focalPixels
+        self.poses = [np.asarray(start, dtype=np.float64)]
+
+    def predict(self, frame, positions):
+        from meshroom.live import geotrack
+        indices = [index for index in positions if index in self.points]
+        # With fewer than 3 pins the pose is not determined: each pin follows its own motion
+        if len(self.points) < 3 or not indices:
+            return {}
+        current = self.poses[-1]
+        predicted = current @ np.linalg.inv(self.poses[-2]) @ current if len(self.poses) > 1 else current
+        xy, depth = geotrack.projectPoints(predicted, np.array([self.points[i] for i in indices]), self.width,
+                                           self.height, self.focalPixels)
+        return {index: (float(x), float(y)) for index, (x, y), d in zip(indices, xy, depth) if d > 0}
+
+    def reject(self, frame, positions):
+        from meshroom.live import geotrack
+        indices = [index for index in positions if index in self.points]
+        if len(indices) < 3:
+            return set()
+        points = np.array([self.points[i] for i in indices])
+        matrix, inliers, _ = geotrack.robustPose(points, np.array([positions[i] for i in indices]), self.width,
+                                                 self.height, self.focalPixels, self.poses[-1])
+        self.poses = [self.poses[-1], matrix]
+        # With 4 pins and more, a pin far from the others' pose slipped (occlusion, a similar feature nearby)
+        return {index for index, inlier in zip(indices, inliers) if not inlier} if len(indices) >= 4 else set()
+
+
+class _GeoTrackAction:
+    """ The geometry tracking actions of a Resection (Track Geometry, Align, Refine), run in a worker thread. """
+
+    def __init__(self, nodeDesc, context):
+        from meshroom.live import geotrack
+        self.nodeDesc, self.context = nodeDesc, context
+        self.ctx = context.nodeContext()
+        self.info = self.ctx.inputInfo("input")
+        if self.info is None:
+            raise RuntimeError("Connect the plate to the input.")
+        geo = self.ctx.inputData("geo")
+        if geo is None or geo.isEmpty:
+            raise RuntimeError("Connect a geometry to 'Geo'.")
+        self.samples = geotrack.SurfaceSamples(geo)
+        self.settings = geotrack.TrackSettings(context.value("trackMethod"), features=context.value("trackPoints"),
+                                               anchored=context.value("trackAnchored"))
+        self.focalPixels = nodeDesc.startCamera(self.ctx, info=self.info).focalPixels(self.info.width)
+        self.poses, self.keyframes = nodeDesc.geoTrack(self.ctx)
+        pins = nodeDesc.pins(self.ctx, self.info)
+        self.allKeyframes = sorted(set(self.keyframes) | set(nodeDesc.pinKeyframes(pins)))
+        self._lastPublish = 0.0
+
+    def poseAt(self, frame):
+        """ The camera-to-world matrix of the Resection at a frame (when the action started). """
+        return self.ctx.ownData("cameraOutput", frame).matrix
+
+    def publish(self, frame=None, force=False):
+        """ Show the poses tracked so far (at most 4 times a second): the viewer follows the tracking. """
+        import time
+        from meshroom.live import geotrack
+        now = time.monotonic()
+        if force or now - self._lastPublish >= 0.25:
+            self._lastPublish = now
+            self.context.publish({"geoTrack": geotrack.dumpPoses(self.poses, self.keyframes)}, frame)
+
+    def result(self):
+        from meshroom.live import geotrack
+        return {"geoTrack": geotrack.dumpPoses(self.poses, self.keyframes)}
+
+    def track(self, frames, progress=None):
+        """ Track from the pose at frames[0] through `frames`; the poses found are stored. Returns why it stopped. """
+        from meshroom.live import geotrack
+
+        def onPose(frame, matrix, inliers, error):
+            self.poses[frame] = matrix
+            self.publish(frame)
+        tracked, reason = geotrack.trackPose(self.samples, self.settings, frames, self.context.render,
+                                             self.poseAt(frames[0]), self.info.width, self.info.height, self.focalPixels,
+                                             cancel=self.context.checkCancelled, progress=progress, onPose=onPose)
+        return tracked, reason
+
+    def run(self, name):
+        from meshroom.live import geotrack
+        frame = self.context.currentFrame
+        frames = self.context.frames
+        if name in ("trackGeoForward", "trackGeoBackward"):
+            step = 1 if name == "trackGeoForward" else -1
+            # To the next keyframe (excluded), or the end of the frame range
+            ahead = [f for f in self.allKeyframes if (f - frame) * step > 0]
+            end = min(ahead, key=lambda f: abs(f - frame)) - step if ahead else (frames[-1] if step > 0 else frames[0])
+            sequence = list(range(frame, end + step, step))
+            if len(sequence) < 2:
+                raise RuntimeError("Nothing to track: the next keyframe or the end of the plate is next to this frame.")
+            # The start frame is a keyframe of the track (its pose, from the pins or aligned, is the reference)
+            self.poses[frame] = self.poseAt(frame)
+            self.keyframes = sorted(set(self.keyframes) | {frame})
+            _, reason = self.track(sequence, lambda i, n: self.context.progress(i / float(n), "Track Geometry"))
+        elif name == "alignGeo":
+            others = [f for f in self.allKeyframes if f != frame]
+            if not others:
+                raise RuntimeError("No keyframe to align to: place the geometry with pins at another frame first.")
+            reference = min(others, key=lambda f: (abs(f - frame), f))
+            self.context.progress(0.1, f"Align on frame {reference}")
+            try:
+                matrix, _, _ = geotrack.alignPose(self.samples, self.settings, self.poseAt(reference),
+                                                  self.context.render(reference), self.poseAt(frame),
+                                                  self.context.render(frame), self.info.width, self.info.height,
+                                                  self.focalPixels, cancel=self.context.checkCancelled)
+            except geotrack.TrackingLost as e:
+                raise RuntimeError(f"Cannot align on frame {reference}: {e}. Move the geometry closer to its place.") from e
+            self.poses[frame] = matrix
+            self.keyframes = sorted(set(self.keyframes) | {frame})
+            reason = ""
+        else:
+            reason = self.refine()
+        self.publish(force=True)
+        if reason and reason != "cancelled":
+            raise RuntimeError(f"Stopped: {reason}. The poses tracked so far are kept.")
+        return self.result()
+
+    def refine(self):
+        """ Each span between two keyframes tracked from both ends, the two tracks blended. Returns why it stopped. """
+        from meshroom.live import geotrack
+        spans = [(a, b) for a, b in zip(self.allKeyframes, self.allKeyframes[1:]) if b - a > 1]
+        if not spans:
+            raise RuntimeError("Refine needs two keyframes (pins placed by hand or aligned frames) with frames between them.")
+        total = sum(b - a for a, b in spans) * 2
+        done = [0]
+        reasons = []
+
+        def progress(i, n):
+            self.context.progress((done[0] + i) / float(total), "Refine")
+        for first, last in spans:
+            for frame in (first, last):
+                self.poses.setdefault(frame, self.poseAt(frame))
+            forward, reason = geotrack.trackPose(self.samples, self.settings, list(range(first, last + 1)),
+                                                 self.context.render, self.poses[first], self.info.width,
+                                                 self.info.height, self.focalPixels, self.context.checkCancelled,
+                                                 progress)
+            done[0] += last - first
+            if reason == "cancelled":
+                return reason
+            backward, reasonBack = geotrack.trackPose(self.samples, self.settings, list(range(last, first - 1, -1)),
+                                                      self.context.render, self.poses[last], self.info.width,
+                                                      self.info.height, self.focalPixels, self.context.checkCancelled,
+                                                      progress)
+            done[0] += last - first
+            self.poses.update(geotrack.blendPoses(forward, backward, first, last))
+            self.keyframes = sorted(set(self.keyframes) | {first, last})
+            self.publish(first)
+            if reasonBack == "cancelled":
+                return reasonBack
+            if reason and reasonBack:
+                reasons.append(f"frames {first}-{last}: {reason}")
+        return "; ".join(reasons)
