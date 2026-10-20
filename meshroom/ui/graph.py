@@ -2166,18 +2166,35 @@ class UIGraph(QObject):
                         shapes = json.loads(node.attribute("shapes").value or "[]")
                     except ValueError:
                         continue
+                    def renamed(links):
+                        """ Whether a link of `links` named the track (renamed in place). """
+                        found = False
+                        for link in links:
+                            if link.get("input", "tracker") not in inputs:
+                                continue
+                            if link.get("track") == oldName:
+                                link["track"] = newName
+                                found = True
+                            if oldName in (link.get("tracks") or []):
+                                link["tracks"] = [newName if name == oldName else name for name in link["tracks"]]
+                                found = True
+                        return found
                     changed = False
                     for shape in shapes:
                         links = roto.shapeLinks(shape)
-                        for link in links:
-                            if link.get("input", "tracker") in inputs and link.get("track") == oldName:
-                                link["track"] = newName
-                                changed = True
+                        changed = renamed(links) or changed
                         if links or "link" in shape:
                             shape.pop("link", None)
                             shape["links"] = links
                     if changed:
                         self.setAttribute(node.attribute("shapes"), json.dumps(shapes))
+                    if node.hasAttribute("links"):
+                        try:
+                            rotoLinks = json.loads(node.attribute("links").value or "[]")
+                        except ValueError:
+                            rotoLinks = []
+                        if isinstance(rotoLinks, list) and renamed(rotoLinks):
+                            self.setAttribute(node.attribute("links"), json.dumps(rotoLinks))
                 elif node.hasAttribute("tracks") and not node.attribute("tracks").desc.semantic:
                     # CornerPin, Stabilize, MotionBlur: track names, comma separated
                     names = [name.strip() for name in node.attribute("tracks").value.split(",")]
@@ -2189,44 +2206,41 @@ class UIGraph(QObject):
     @Slot(QObject, int, str, int)
     def setRotoShapeLinks(self, node, shapeIndex, linksJson, frame):
         """
-        Set the track links of a Roto shape, the shape staying where it is at `frame`: its points are
-        moved by the change of the link offsets at that frame. Undoable.
+        Set the track links of a Roto shape, the shape staying where it is at `frame`: its points take the inverse of
+        the change of their link transform at that frame. Undoable.
         """
-        from meshroom.live import roto, tracking
+        from meshroom.live import roto
         try:
             shapes = json.loads(node.attribute("shapes").value or "[]")
             links = json.loads(linksJson)
+            globalLinks = roto.parseShapes(node.attribute("links").value) if node.hasAttribute("links") else []
         except ValueError:
             return
         if not 0 <= shapeIndex < len(shapes):
             return
-        tracks = {}
-        for name in ("tracker", "tracker2", "tracker3"):
-            source = self._live.upstreamValuesNode(node.attribute(name)) if node.hasAttribute(name) else None
-            try:
-                tracks[name] = tracking.parseTracks(source.attribute("tracks").value) \
-                    if source is not None and source.hasAttribute("tracks") else []
-            except ValueError:
-                tracks[name] = []
-        # In the pixels of the Roto, as when it renders (tracks made on another resolution)
-        rotoFormat = self._live.nodeFormat(node)
-        if rotoFormat is not None:
-            tracks = {name: tracking.scaleTracks(values, *rotoFormat) for name, values in tracks.items()}
-        shape = shapes[shapeIndex]
-        before = roto.shapeAtFrame(shape, frame, tracks)["points"]
-        shape.pop("link", None)
-        shape["links"] = links
-        after = roto.shapeAtFrame(shape, frame, tracks)["points"]
-        deltas = [(b.get("x", 0.0) - a.get("x", 0.0), b.get("y", 0.0) - a.get("y", 0.0)) for b, a in zip(before, after)]
-
-        def rebase(points):
-            for point, (dx, dy) in zip(points, deltas):
-                point["x"] = point.get("x", 0.0) + dx
-                point["y"] = point.get("y", 0.0) + dy
-        rebase(shape.get("points") or [])
-        for key in shape.get("keys") or []:
-            rebase(key.get("points") or [])
+        shapes[shapeIndex] = roto.relinkShape(shapes[shapeIndex], frame, self._live.rotoTracks(node), globalLinks, links=links)
         self.setAttribute(node.attribute("shapes"), json.dumps(shapes))
+
+    @Slot(QObject, str, int)
+    def setRotoLinks(self, node, linksJson, frame):
+        """
+        Set the links of a Roto warping all its shapes ("links"), the shapes staying where they are at `frame`.
+        One undoable change.
+        """
+        from meshroom.live import roto
+        if node is None or not node.hasAttribute("links"):
+            return
+        try:
+            shapes = json.loads(node.attribute("shapes").value or "[]")
+            links = json.loads(linksJson)
+            globalLinks = roto.parseShapes(node.attribute("links").value)
+        except ValueError:
+            return
+        tracks = self._live.rotoTracks(node)
+        shapes = [roto.relinkShape(shape, frame, tracks, globalLinks, newGlobalLinks=links) for shape in shapes]
+        with self.groupedGraphModification("Roto Links"):
+            self.setAttribute(node.attribute("links"), json.dumps(links))
+            self.setAttribute(node.attribute("shapes"), json.dumps(shapes))
 
     @Slot(QObject, "QVariantList", int, result=QObject)
     def createCornerPinFromTracks(self, tracker, names, frame):

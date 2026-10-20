@@ -274,9 +274,17 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   mouvement (vitesse constante), puis là où elle était, et s'arrête seule (corrélation trop faible, sa prochaine
   keyframe). Avec 4 pistes sélectionnées (dans l'ordre
   bas-gauche, bas-droite, haut-droite, haut-gauche), le bouton CornerPin crée un CornerPin piloté.
-- **Roto** : jusqu'à 3 Trackers (entrées Tracker 1 à 3) ; chaque forme a une liste de liens
-  (tracker, piste, forme entière ou point N) ; un point avec son propre lien suit sa piste au lieu
-  des liens de la forme entière. Avec 2 points sélectionnés ou plus, une boîte de transformation
+- **Roto** : jusqu'à 3 Trackers (entrées Tracker 1 à 3). Un lien prend toutes les pistes d'un Tracker
+  ou certaines (liste à cocher ; « toutes » suit aussi les pistes ajoutées ensuite) et la transformation
+  qui les amène de la frame du lien à la frame courante, ajustée aux moindres carrés comme le Stabilize :
+  translate, rotate, scale, translate rotate, translate rotate scale, perspective (avec moins de pistes
+  connues qu'il n'en faut à une frame, leur mouvement moyen). Les « Roto links » (en haut de la liste des
+  formes, paramètre `links`) déforment toutes les formes ; les liens d'une forme la déplacent, elle ou un
+  de ses points (un point avec son propre lien le suit au lieu des liens de la forme entière) ; ceux de la
+  forme d'abord, puis ceux du Roto, plusieurs liens d'une même cible l'un après l'autre. Créer ou modifier
+  un lien garde les formes où elles sont à la frame courante (`roto.relinkShape`). Le viewer reçoit les
+  transformations du moteur (`rotoLinkTransforms`) pour afficher et éditer les formes liées. Les anciens
+  liens à une piste (« track ») restent lus comme une translation. Avec 2 points sélectionnés ou plus, une boîte de transformation
   (comme Nuke) : glisser dedans déplace la sélection, les poignées carrées la mettent à l'échelle
   (depuis le côté opposé ; Ctrl : depuis le centre ; Shift sur un coin : uniforme), la poignée
   ronde la tourne ; un clic dans une zone vide de la boîte désélectionne. Une forme est fermée

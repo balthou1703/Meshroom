@@ -1789,6 +1789,56 @@ class LiveController(QObject):
             return None
         return (info.width, info.height)
 
+    def rotoTracks(self, node) -> dict:
+        """
+        The tracks of the Trackers connected to the "tracker" inputs of a Roto ({input name: tracks}), in the pixels of
+        the Roto, as when it renders (through Dot, Clone and disabled nodes; tracks made on another resolution scaled).
+        """
+        from meshroom.live import tracking
+        tracks = {}
+        for name in ("tracker", "tracker2", "tracker3"):
+            source = self.upstreamValuesNode(node.attribute(name)) if node.hasAttribute(name) else None
+            try:
+                tracks[name] = tracking.parseTracks(source.attribute("tracks").value) \
+                    if source is not None and source.hasAttribute("tracks") else []
+            except ValueError:
+                tracks[name] = []
+        rotoFormat = self.nodeFormat(node)
+        if rotoFormat is not None:
+            tracks = {name: tracking.scaleTracks(values, *rotoFormat) for name, values in tracks.items()}
+        return tracks
+
+    @Slot(QObject, int, result="QVariantMap")
+    def rotoLinkTransforms(self, node, frame):
+        """
+        The link transforms of a Roto at `frame`, for the viewer to show the shapes where they are and to store the
+        edited points back: {"global": the transform of the Roto links, "shapes": [{"shape": the transform of the whole
+        shape, "points": {point index: its own transform}}]}, each a 3x3 matrix as 9 numbers (rows); identity without
+        links. A shape without entry (just drawn) takes the "global" one.
+        """
+        import numpy as np
+        from meshroom.live import roto
+        identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        empty = {"global": identity, "shapes": []}
+        if node is None or not node.hasAttribute("shapes"):
+            return empty
+        try:
+            shapes = roto.parseShapes(node.attribute("shapes").value)
+            globalLinks = roto.parseShapes(node.attribute("links").value) if node.hasAttribute("links") else []
+        except ValueError:
+            return empty
+        if not globalLinks and not any(roto.shapeLinks(shape) for shape in shapes):
+            return {"global": identity, "shapes": [{"shape": identity, "points": {}} for _ in shapes]}
+        tracks = self.rotoTracks(node)
+
+        def flat(matrix):
+            return [float(v) for v in np.asarray(matrix).ravel()]
+        result = []
+        for shape in shapes:
+            whole, own = roto.linkTransforms(shape, frame, tracks, globalLinks)
+            result.append({"shape": flat(whole), "points": {str(index): flat(matrix) for index, matrix in own.items()}})
+        return {"global": flat(roto.linkTransforms({}, frame, tracks, globalLinks)[0]), "shapes": result}
+
     @Slot(QObject, result=str)
     def _subGraphStatus(self, node) -> tuple:
         """

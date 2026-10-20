@@ -338,9 +338,12 @@ viewer when the node is selected (toolbar on the left of the viewer):
 Animation: with "Auto Key" (toolbar), a new shape gets a key at the current frame and every
 change at another frame adds a key there; the points are interpolated between the keys.
 
-Tracking: connect up to 3 Trackers to the "Tracker" inputs, then add links to a shape in the shape
-list: the whole shape, or one of its points, follows a track from the link frame. A point with its
-own link follows it instead of the links of the whole shape.
+Tracking: connect up to 3 Trackers to the "Tracker" inputs, then add links in the shape list: a link takes
+all the tracks of a Tracker or some of them, and the transform moving them from the link frame (translate,
+rotate, scale, translate rotate, translate rotate scale, or perspective: fitted by least squares, as the
+Stabilize node). The links at the top of the list ("Roto links") warp all the shapes; the links of a shape
+move it, or one of its points (a point with its own link follows it instead of the links of the whole
+shape). Linking or changing a link keeps the shapes where they are at the current frame.
 
 Optical flow: connect an OpticalFlow node (on the plate) to the "Vectors" input (or only the plate to
 the input: the flow is then computed on the fly), then "Track Shapes Forward / Backward" moves the
@@ -367,6 +370,8 @@ the matte).
         inputUsageParam(),
         desc.StringParam(name="shapes", label="Shapes", description="Shapes as JSON (edited in the viewer).",
                          value="[]", semantic="rotoShapes"),
+        desc.StringParam(name="links", label="Roto Links", value="[]", visible=False,
+                         description="Track links warping all the shapes (JSON, edited in the shape list)."),
         desc.PushButtonParam(name="flowForward", label="Track Shapes Forward", semantic="liveAction",
                              description="Move the shapes along the optical flow from the current frame to the end of "
                                          "the frame range, with a key at each frame."),
@@ -412,6 +417,8 @@ the matte).
         indices = [i for i, shape in enumerate(shapes) if shape.get("flow")] or list(range(len(shapes)))
         # Shapes following tracks move with them: not along the flow too
         indices = [i for i in indices if not roto.shapeLinks(shapes[i])]
+        if roto.parseShapes(context.value("links")):
+            raise RuntimeError("The Roto is linked to tracks (Roto links): remove them to track its shapes with the flow.")
         if not indices:
             raise RuntimeError("The shapes to track are linked to tracks: remove their links to track them with the flow.")
         forward = name == "flowForward"
@@ -467,8 +474,12 @@ the matte).
         background = inputs.get("input")
         width, height = ctx.info().width, ctx.info().height
         bbox = _drawBBox(width, height, background)
+        try:
+            globalLinks = roto.parseShapes(ctx.value("links"))
+        except ValueError as e:
+            raise RuntimeError(f"Invalid Roto links: {e}") from e
         matte = roto.shapesMatte(shapes, bbox, ctx.checkCancelled, frame=ctx.frame, tracks=tracks,
-                                 feather=ctx.value("feather"))
+                                 feather=ctx.value("feather"), globalLinks=globalLinks)
         matte = (matte * np.float32(ctx.value("opacity")))[:, :, np.newaxis]
         mode = ctx.value("outputMode")
         if mode == "over":

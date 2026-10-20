@@ -75,7 +75,17 @@ Item {
         return result
     }
     // The shapes as displayed at the current frame: [{shape, points}]
-    readonly property var displayed: shapes.map(function(shape) { return displayedPoints(shape) })
+    readonly property var displayed: shapes.map(function(shape, index) { return displayedPoints(shape, index) })
+    // Link transforms of the shapes at the current frame (meshroom/live/roto.py, computed by the live engine):
+    // {"global": 3x3 of the Roto links, "shapes": [{"shape": 3x3, "points": {index: 3x3}}]}
+    readonly property var linkTransforms: {
+        shapesAttribute ? shapesAttribute.value : ""  // Re-evaluated when the shapes, links or tracks change
+        node && node.hasAttribute("links") ? node.attribute("links").value : ""
+        tracks
+        if (!node || !scene || !scene.live)
+            return { "global": [1, 0, 0, 0, 1, 0, 0, 0, 1], "shapes": [] }
+        return scene.live.rotoLinkTransforms(node, frame)
+    }
 
     // Transform box of the selected points (Nuke coordinates), when 2 points or more are selected
     readonly property var selectionBox: {
@@ -223,47 +233,46 @@ Item {
         return links.filter(function(link) { return link && link.track })
     }
 
-    // Offset [dx, dy] of each point of a shape at the current frame, from its track links (as roto.py):
-    // a point with its own link follows it instead of the links of the whole shape
-    function pointOffsets(shape, count) {
-        var whole = [0, 0]
-        var own = {}
-        shapeLinks(shape).forEach(function(link) {
-            var track = (tracks[link.input || "tracker"] || []).find(function(t) { return t.name === link.track })
-            if (!track || track.enabled === false)
-                return
-            var start = trackPosition(track, link.frame !== undefined ? link.frame : frame)
-            var current = trackPosition(track, frame)
-            if (!start || !current)
-                return
-            var index = link.point === undefined || link.point === null ? -1 : link.point
-            var target = index < 0 ? whole : (own[index] = own[index] || [0, 0])
-            target[0] += current[0] - start[0]
-            target[1] += current[1] - start[1]
-        })
-        var offsets = []
-        for (var i = 0; i < count; i++)
-            offsets.push(own[i] || whole)
-        return offsets
+    // The link transform (3x3, rows) of a point of a shape at the current frame: its own link, or the shape's (as
+    // roto.py); a shape not known yet (just drawn) takes the transform of the Roto links
+    function linkMatrix(shapeIndex, pointIndex) {
+        var entry = (linkTransforms.shapes || [])[shapeIndex]
+        if (!entry)
+            return linkTransforms.global || [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        return (entry.points || {})[String(pointIndex)] || entry.shape
+    }
+    function applyMatrix(m, p) {
+        function apply(x, y) {
+            var w = m[6] * x + m[7] * y + m[8]
+            if (Math.abs(w) < 1e-12)
+                w = 1e-12
+            return [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w]
+        }
+        var q = apply(p.x, p.y)
+        var i = apply(p.x + (p.inX || 0), p.y + (p.inY || 0))
+        var o = apply(p.x + (p.outX || 0), p.y + (p.outY || 0))
+        return { "x": q[0], "y": q[1], "inX": i[0] - q[0], "inY": i[1] - q[1], "outX": o[0] - q[0], "outY": o[1] - q[1] }
+    }
+    function inverseMatrix(m) {
+        var a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], k = m[8]
+        var det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g)
+        if (Math.abs(det) < 1e-15)
+            return [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        return [(e * k - f * h) / det, (c * h - b * k) / det, (b * f - c * e) / det,
+                (f * g - d * k) / det, (a * k - c * g) / det, (c * d - a * f) / det,
+                (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det]
     }
 
-    function displayedPoints(shape) {
-        var points = copy(pointsAt(shape, frame))
-        var offsets = pointOffsets(shape, points.length)
-        points.forEach(function(p, index) {
-            p.x += offsets[index][0]
-            p.y += offsets[index][1]
+    function displayedPoints(shape, shapeIndex) {
+        return pointsAt(shape, frame).map(function(p, index) {
+            return applyMatrix(linkMatrix(shapeIndex, index), p)
         })
-        return points
     }
 
-    // Store points edited on screen into a shape (inverse of the link offsets; as a key with Auto Key or keys)
-    function storePoints(shape, points) {
-        var stored = copy(points)
-        var offsets = pointOffsets(shape, stored.length)
-        stored.forEach(function(p, index) {
-            p.x -= offsets[index][0]
-            p.y -= offsets[index][1]
+    // Store points edited on screen into a shape (inverse of the link transforms; as a key with Auto Key or keys)
+    function storePoints(shape, points, shapeIndex) {
+        var stored = points.map(function(p, index) {
+            return applyMatrix(inverseMatrix(linkMatrix(shapeIndex, index)), p)
         })
         var keys = shape.keys || []
         if (keys.length > 0 || autoKey) {
@@ -299,6 +308,9 @@ Item {
         var names = shapes.map(function(s) { return s.name })
         while (names.indexOf(prefix + count) >= 0)
             count++
+        // Drawn on screen: stored before the Roto links (they warp it back where it is drawn)
+        var inverse = inverseMatrix(linkTransforms.global || [1, 0, 0, 0, 1, 0, 0, 0, 1])
+        points = points.map(function(p) { return applyMatrix(inverse, p) })
         var shape = { "name": prefix + count, "closed": true, "visible": true, "invert": false, "opacity": 1.0,
                       "feather": 0.0, "points": points }
         if (autoKey)
@@ -393,7 +405,7 @@ Item {
             p.inX = -dx / length * before; p.inY = -dy / length * before
             p.outX = dx / length * after; p.outY = dy / length * after
         }
-        storePoints(newShapes[shapeIndex], points)
+        storePoints(newShapes[shapeIndex], points, shapeIndex)
         commit(newShapes)
     }
 
@@ -407,7 +419,7 @@ Item {
             if (keys.length === 0)
                 shape.keys = [{ "frame": frame, "points": copy(pointsAt(shape, frame)) }]
             else
-                storePoints(shape, points)
+                storePoints(shape, points, Number(key))
         })
         commit(newShapes)
     }
@@ -724,7 +736,7 @@ Item {
                     var shapeIndex = Number(key)
                     var points = root.copy(startDisplayed[shapeIndex])
                     root.transformPoints(points, edit.moved[key], m.ox, m.oy, m.a, m.b, m.c, m.d, m.tx, m.ty)
-                    root.storePoints(shapes[shapeIndex], points)
+                    root.storePoints(shapes[shapeIndex], points, shapeIndex)
                 })
             } else if (edit.kind === "points" || edit.kind === "shape") {
                 // Move the selected points (or every point of the shape)
@@ -737,7 +749,7 @@ Item {
                             points[i].y += dy
                         }
                     })
-                    root.storePoints(shapes[shapeIndex], points)
+                    root.storePoints(shapes[shapeIndex], points, shapeIndex)
                 })
             } else if (edit.kind === "in" || edit.kind === "out" || edit.kind === "newPoint") {
                 var points = root.copy(startDisplayed[edit.shape])
@@ -752,9 +764,9 @@ Item {
                     var norm = Math.max(1e-6, Math.hypot(tx, ty))
                     q[other + "X"] = -tx / norm * length; q[other + "Y"] = -ty / norm * length
                 }
-                root.storePoints(shapes[edit.shape], points)
+                root.storePoints(shapes[edit.shape], points, edit.shape)
             } else if (edit.kind === "box") {
-                root.storePoints(shapes[edit.shape], root.boxPoints(edit.box, edit.x0, edit.y0, x, y))
+                root.storePoints(shapes[edit.shape], root.boxPoints(edit.box, edit.x0, edit.y0, x, y), edit.shape)
             }
             root.apply(shapes)
         }
@@ -836,7 +848,7 @@ Item {
                     }
                     var points = root.copy(drawn)
                     points.push(root.point(x, y))
-                    root.storePoints(shapes[root.drawingShape], points)
+                    root.storePoints(shapes[root.drawingShape], points, root.drawingShape)
                     // Every key gets the new point (the shape is drawn at one frame)
                     ;(shapes[root.drawingShape].keys || []).forEach(function(key) {
                         if (key.points.length < points.length)
@@ -846,7 +858,7 @@ Item {
                     shapes.push(root.newShape("Bezier", [root.point(x, y)]))
                     root.drawingShape = shapes.length - 1
                 }
-                var pointIndex = root.displayedPoints(shapes[root.drawingShape]).length - 1
+                var pointIndex = root.displayedPoints(shapes[root.drawingShape], root.drawingShape).length - 1
                 root.select(root.drawingShape, [pointIndex], false)
                 edit = { "kind": "newPoint", "shape": root.drawingShape, "point": pointIndex }
             } else {
@@ -860,7 +872,7 @@ Item {
             root.apply(shapes)
             // The following moves start from this state
             startShapes = shapes
-            startDisplayed = shapes.map(function(shape) { return root.displayedPoints(shape) })
+            startDisplayed = shapes.map(function(shape, index) { return root.displayedPoints(shape, index) })
         }
 
         onReleased: function(mouse) {

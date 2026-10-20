@@ -13,7 +13,8 @@ A shape is a dict (stored as JSON in the "shapes" parameter of the Roto node):
         "feather": 0.0,          # width of the soft edge in pixels (a blur of the shape matte)
         "points": [{"x": .., "y": .., "inX": .., "inY": .., "outX": .., "outY": ..}, ...],
         "keys": [{"frame": 1001, "points": [...]}, ...],   # optional: animated points
-        "links": [{"input": "tracker", "track": "track1", "point": -1, "frame": 1001}, ...]  # optional
+        "links": [{"input": "tracker", "tracks": ["track1"], "transform": "translate", "point": -1,
+                   "frame": 1001}, ...]  # optional
     }
 Point coordinates are in pixels, in Nuke coordinates (y up). The tangents ("in" before the point,
 "out" after it) are relative to the point: (0, 0) tangents give a corner.
@@ -21,11 +22,16 @@ Point coordinates are in pixels, in Nuke coordinates (y up). The tangents ("in" 
 An animated shape has keys: its points are interpolated linearly between two keys (all keys have
 the same number of points), held before the first key and after the last one.
 
-A linked shape follows 2D tracks (see meshroom/live/tracking.py), read from the Tracker connected to
-the image input "input" of the Roto: a link moves the whole shape ("point": -1) or one point by the
-offset of its track between the link frame and the current frame. A point with its own link follows
-its track instead of the links of the whole shape (e.g. the shape follows track1 and one of its
-points follows track2). The former single "link" is read as a link to the "tracker" input.
+A linked shape follows 2D tracks (see meshroom/live/tracking.py), read from a Tracker connected to a
+"tracker" input of the Roto: a link takes some tracks of that Tracker ("tracks", all of them when
+empty) and the transform moving them from the link frame to the current frame ("transform", fitted by
+least squares as the Stabilize node: translate, rotate, scale, translate rotate, translate rotate scale,
+or perspective), and applies it to the whole shape ("point": -1) or to one point. A point with its own
+link follows it instead of the links of the whole shape (e.g. the shape follows track1 and one of its
+points follows track2). Several links of the same target are applied one after the other. The links of
+the Roto itself (`globalLinks`, its "links" parameter: the same without "point") then move all the
+shapes. The former {"track": name} is a link to that track; the former single "link" a link to the
+"tracker" input.
 """
 from __future__ import annotations
 
@@ -77,49 +83,135 @@ def pointsAtFrame(shape: dict, frame: Optional[float]) -> List[dict]:
     return keys[-1]["points"]
 
 
+TRANSFORMS = ("translate", "rotate", "scale", "translate rotate", "translate rotate scale", "perspective")
+
+
+def isLink(link) -> bool:
+    """ Whether a value is a track link: some tracks ("tracks", [] for all of them) or the former single "track". """
+    return isinstance(link, dict) and ("tracks" in link or bool(link.get("track")))
+
+
+def linkTracks(link: dict) -> List[str]:
+    """ The names of the tracks of a link ([]: all the tracks of its Tracker). """
+    if "tracks" in link:
+        return [str(name) for name in link.get("tracks") or []]
+    return [link["track"]] if link.get("track") else []
+
+
 def shapeLinks(shape: dict) -> List[dict]:
     """ The track links of a shape (the former single "link" is a link to the "tracker" input). """
     links = list(shape.get("links") or [])
     if shape.get("link"):
         links.append(dict(shape["link"], input=shape["link"].get("input", "tracker")))
-    return [link for link in links if isinstance(link, dict) and link.get("track")]
+    return [link for link in links if isLink(link)]
 
 
-def shapeAtFrame(shape: dict, frame: Optional[float], tracks=None) -> dict:
+def linkMatrix(link: dict, tracks: Optional[dict], frame: float) -> Optional[np.ndarray]:
     """
-    A copy of a shape with its points at `frame`: animation keys, then the tracks it is linked to.
+    The 3x3 transform (Nuke pixels) moving the tracks of a link from its frame to `frame`, or None when none of its
+    tracks is known at both frames. With fewer tracks than its transform needs (some lost), their mean motion.
+    """
+    from .geometry import fitTransform
+    from .tracking import trackPoints
+    reference = link.get("frame", frame)
+    trackList = (tracks or {}).get(link.get("input", "tracker")) or []
+    names = linkTracks(link)
+    source, target = trackPoints(trackList, names, reference, frame, covering=True)
+    if not len(source):
+        return None
+    model = link.get("transform") or "translate"
+    try:
+        return fitTransform(model if model in TRANSFORMS else "translate", source, target)
+    except ValueError:
+        return fitTransform("translate", source, target)
+
+
+def _composed(links, tracks, frame) -> np.ndarray:
+    """ The transforms of links applied one after the other. """
+    matrix = np.eye(3)
+    for link in links:
+        linkTransform = linkMatrix(link, tracks, frame)
+        if linkTransform is not None:
+            matrix = linkTransform @ matrix
+    return matrix
+
+
+def linkTransforms(shape: dict, frame: Optional[float], tracks=None, globalLinks=None):
+    """
+    (the transform of the whole shape, {point index: its own transform}) at `frame`, from the links of the shape then
+    those of the Roto (`globalLinks`). Identity without links (or frame).
+    """
+    if isinstance(tracks, list):
+        tracks = {"tracker": tracks}
+    if frame is None:
+        return np.eye(3), {}
+    links = shapeLinks(shape)
+    wholeLinks = [link for link in links if link.get("point", -1) is None or link.get("point", -1) < 0]
+    pointLinks = {}
+    for link in links:
+        index = link.get("point", -1)
+        if index is not None and index >= 0:
+            pointLinks.setdefault(int(index), []).append(link)
+    roto = _composed([link for link in globalLinks or [] if isLink(link)], tracks, frame)
+    whole = roto @ _composed(wholeLinks, tracks, frame)
+    return whole, {index: roto @ _composed(own, tracks, frame) for index, own in pointLinks.items()}
+
+
+def transformPoint(point: dict, matrix: np.ndarray) -> dict:
+    """ A Bézier point moved by a 3x3 transform: its position and the ends of its tangents. """
+    def apply(x, y):
+        v = matrix @ np.array([x, y, 1.0])
+        w = v[2] if abs(v[2]) > 1e-12 else 1e-12
+        return v[0] / w, v[1] / w
+    x, y = point.get("x", 0.0), point.get("y", 0.0)
+    nx, ny = apply(x, y)
+    ix, iy = apply(x + point.get("inX", 0.0), y + point.get("inY", 0.0))
+    ox, oy = apply(x + point.get("outX", 0.0), y + point.get("outY", 0.0))
+    return dict(point, x=float(nx), y=float(ny), inX=float(ix - nx), inY=float(iy - ny), outX=float(ox - nx),
+                outY=float(oy - ny))
+
+
+def shapeAtFrame(shape: dict, frame: Optional[float], tracks=None, globalLinks=None) -> dict:
+    """
+    A copy of a shape with its points at `frame`: animation keys, then the tracks it is linked to (its links, then the
+    links of the Roto `globalLinks`).
 
     Args:
         tracks: {input name: list of tracks} of the connected Trackers (a list: the "tracker" input).
     """
-    from .tracking import trackOffset
     result = dict(shape)
     points = [dict(point) for point in pointsAtFrame(shape, frame)]
-    if isinstance(tracks, list):
-        tracks = {"tracker": tracks}
-    links = shapeLinks(shape)
-    if links and tracks and frame is not None:
-        shapeOffset = [0.0, 0.0]
-        pointOffsets = {}
-        for link in links:
-            offset = trackOffset(tracks.get(link.get("input", "tracker")) or [], link["track"],
-                                 link.get("frame", frame), frame)
-            if offset is None:
-                continue
-            index = link.get("point", -1)
-            if index is None or index < 0:
-                shapeOffset[0] += offset[0]
-                shapeOffset[1] += offset[1]
-            else:
-                current = pointOffsets.setdefault(index, [0.0, 0.0])
-                current[0] += offset[0]
-                current[1] += offset[1]
-        for i, point in enumerate(points):
+    if tracks and frame is not None and (shapeLinks(shape) or globalLinks):
+        whole, own = linkTransforms(shape, frame, tracks, globalLinks)
+        if not (np.allclose(whole, np.eye(3)) and not own):
             # A point with its own link follows it instead of the links of the whole shape
-            dx, dy = pointOffsets.get(i, shapeOffset)
-            point["x"] = point.get("x", 0.0) + dx
-            point["y"] = point.get("y", 0.0) + dy
+            points = [transformPoint(point, own.get(i, whole)) for i, point in enumerate(points)]
     result["points"] = points
+    return result
+
+
+def relinkShape(shape: dict, frame: float, tracks, globalLinks=None, links=None, newGlobalLinks=None) -> dict:
+    """
+    A copy of a shape whose links (`links`, unchanged if None) or the links of the Roto (`newGlobalLinks`) change,
+    staying where it is at `frame`: its points (in every key) take the inverse of the change of their transform.
+    """
+    before = linkTransforms(shape, frame, tracks, globalLinks)
+    # A copy sharing nothing (the same point given to several keys is moved once in each)
+    result = json.loads(json.dumps(shape))
+    if links is not None:
+        result.pop("link", None)
+        result["links"] = links
+    after = linkTransforms(result, frame, tracks, globalLinks if newGlobalLinks is None else newGlobalLinks)
+
+    def correction(index):
+        return np.linalg.inv(after[1].get(index, after[0])) @ before[1].get(index, before[0])
+
+    def rebase(points):
+        for index, point in enumerate(points or []):
+            point.update(transformPoint(point, correction(index)))
+    rebase(result.get("points"))
+    for key in result.get("keys") or []:
+        rebase(key.get("points"))
     return result
 
 
@@ -329,7 +421,7 @@ def rasterize(vertices, bbox: BBox, cancel=None) -> np.ndarray:
 
 
 def shapesMatte(shapes: List[dict], bbox: BBox, cancel=None, frame: Optional[float] = None,
-                tracks: Optional[List[dict]] = None, feather: float = 0.0) -> np.ndarray:
+                tracks=None, feather: float = 0.0, globalLinks: Optional[List[dict]] = None) -> np.ndarray:
     """
     Matte (h, w) of the visible shapes over `bbox` at `frame`: each shape is rasterized (filled if
     closed, a stroke of its width if open), feathered (its own feather plus `feather`), inverted,
@@ -341,7 +433,7 @@ def shapesMatte(shapes: List[dict], bbox: BBox, cancel=None, frame: Optional[flo
         if not shape.get("visible", True):
             continue
         closed = shape.get("closed", True) is not False
-        shape = shapeAtFrame(shape, frame, tracks)
+        shape = shapeAtFrame(shape, frame, tracks, globalLinks)
         if closed:
             vertices = polygon(shape)
             shapeBBox = polygonBBox(vertices)

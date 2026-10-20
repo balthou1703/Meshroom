@@ -6,9 +6,10 @@ import MaterialIcons 2.2
 
 /**
  * List of the shapes of a Roto node (JSON "shapes" attribute, see meshroom/live/roto.py): name,
- * visibility, invert, feather, opacity, delete; animation keys; link to a track of the Tracker
- * connected to the "tracker" input (the whole shape or one of its points follows the track from
- * the frame where the link is made). The shapes are drawn in the viewer.
+ * visibility, invert, feather, opacity, delete; animation keys; track links (RotoLinkRow): all the
+ * tracks of a connected Tracker or some of them, and the transform fitted on them, moving the whole
+ * shape or one of its points from the frame where the link is made. The "Roto links" at the top warp
+ * all the shapes. The shapes are drawn in the viewer.
  */
 ColumnLayout {
     id: root
@@ -56,9 +57,32 @@ ColumnLayout {
             links.push(Object.assign({ "input": "tracker" }, shape.link))
         return links
     }
-    // The shape stays where it is at the current frame (its points absorb the change of the link offsets)
+    // The shape stays where it is at the current frame (its points absorb the change of the link transforms)
     function setLinks(index, links) {
         _currentScene.setRotoShapeLinks(root.attribute.node, index, JSON.stringify(links), root.currentFrame)
+    }
+    // Links of the whole Roto ("links" attribute): they warp all the shapes
+    readonly property var rotoLinks: {
+        var node = attribute.node
+        if (!node || !node.hasAttribute("links"))
+            return []
+        try {
+            var parsed = JSON.parse(node.attribute("links").value || "[]")
+            return Array.isArray(parsed) ? parsed : []
+        } catch (e) {
+            return []
+        }
+    }
+    function setRotoLinks(links) {
+        _currentScene.setRotoLinks(root.attribute.node, JSON.stringify(links), root.currentFrame)
+    }
+    function replaced(links, index, newLink) {
+        var result = JSON.parse(JSON.stringify(links))
+        // Re-linked from the current frame: the shapes do not jump
+        newLink.frame = root.currentFrame
+        delete newLink.track
+        result[index] = newLink
+        return result
     }
     readonly property int currentFrame: _currentScene && _currentScene.live ? _currentScene.live.currentFrame : 1
 
@@ -100,6 +124,55 @@ ColumnLayout {
         else
             shapes[index][key] = value
         _currentScene.setAttribute(root.attribute, JSON.stringify(shapes))
+    }
+
+    // Roto links: [label] [add]; then one row per link
+    RowLayout {
+        Layout.fillWidth: true
+        visible: root.attribute.node && root.attribute.node.hasAttribute("links")
+        spacing: 4
+        Label { text: "Roto links"; font.pointSize: 8; opacity: 0.8 }
+        Label {
+            text: root.rotoLinks.length ? "" : "(none: the shapes are not warped as a whole)"
+            font.pointSize: 7
+            opacity: 0.5
+        }
+        Item { Layout.fillWidth: true }
+        MaterialToolButton {
+            text: MaterialIcons.add_link
+            font.pointSize: 8
+            padding: 2
+            enabled: root.editable && root.connectedInputs.length > 0
+            ToolTip.text: root.connectedInputs.length > 0 ?
+                              "Warp all the shapes with the tracks of a Tracker (all of them, or some), from the current frame" :
+                              "Connect a Tracker to a 'Tracker' input of the Roto to warp its shapes with its tracks"
+            onClicked: {
+                var links = JSON.parse(JSON.stringify(root.rotoLinks))
+                links.push({ "input": root.connectedInputs[0], "tracks": [], "transform": "translate rotate scale",
+                             "frame": root.currentFrame })
+                root.setRotoLinks(links)
+            }
+        }
+    }
+    Repeater {
+        model: root.rotoLinks
+        RotoLinkRow {
+            required property var modelData
+            required property int index
+            Layout.fillWidth: true
+            Layout.leftMargin: 8
+            link: modelData
+            pointCount: -1
+            trackNames: root.trackNames
+            inputLabels: root.inputLabels
+            editable: root.editable
+            onEdited: function(newLink) { root.setRotoLinks(root.replaced(root.rotoLinks, index, newLink)) }
+            onRemoved: {
+                var links = JSON.parse(JSON.stringify(root.rotoLinks))
+                links.splice(index, 1)
+                root.setRotoLinks(links)
+            }
+        }
     }
 
     Label {
@@ -264,89 +337,37 @@ ColumnLayout {
                 padding: 2
                 enabled: root.editable && root.connectedInputs.length > 0
                 ToolTip.text: root.connectedInputs.length > 0 ?
-                                  "Link the shape (or one of its points) to a track, from the current frame" :
+                                  "Link the shape (or one of its points) to tracks, from the current frame" :
                                   "Connect a Tracker to a 'Tracker' input of the Roto to link the shape to its tracks"
                 onClicked: {
                     var input = root.connectedInputs[0]
                     var names = root.trackNames[input]
                     var links = JSON.parse(JSON.stringify(shapeRow.links))
-                    links.push({ "input": input, "track": names.length ? names[0] : "", "point": -1, "frame": root.currentFrame })
+                    links.push({ "input": input, "tracks": names.length ? [names[0]] : [], "transform": "translate",
+                                 "point": -1, "frame": root.currentFrame })
                     root.setLinks(shapeRow.index, links)
                 }
             }
         }
 
-        // Track links: [Tracker input] [track] [whole shape / point N] [remove]
+        // Track links: [Tracker input] [tracks] [transform] [whole shape / point N] [remove]
         Repeater {
             model: shapeRow.links
-            RowLayout {
-                id: linkRow
+            RotoLinkRow {
                 required property var modelData
                 required property int index
                 Layout.fillWidth: true
                 Layout.leftMargin: 22
-                spacing: 2
-
-                function update(key, value) {
+                link: modelData
+                pointCount: shapeRow.pointCount
+                trackNames: root.trackNames
+                inputLabels: root.inputLabels
+                editable: root.editable
+                onEdited: function(newLink) { root.setLinks(shapeRow.index, root.replaced(shapeRow.links, index, newLink)) }
+                onRemoved: {
                     var links = JSON.parse(JSON.stringify(shapeRow.links))
-                    links[linkRow.index][key] = value
-                    // Re-linked from the current frame: the shape does not jump
-                    links[linkRow.index].frame = root.currentFrame
+                    links.splice(index, 1)
                     root.setLinks(shapeRow.index, links)
-                }
-
-                Label { text: "\u21B3"; opacity: 0.6; font.pointSize: 8 }
-                ComboBox {
-                    Layout.preferredWidth: 84
-                    font.pointSize: 8
-                    enabled: root.editable
-                    model: ["tracker", "tracker2", "tracker3"].map(function(name) { return root.inputLabels[name] })
-                    currentIndex: Math.max(0, ["tracker", "tracker2", "tracker3"].indexOf(linkRow.modelData.input || "tracker"))
-                    onActivated: function(index) {
-                        var input = ["tracker", "tracker2", "tracker3"][index]
-                        var names = root.trackNames[input] || []
-                        var links = JSON.parse(JSON.stringify(shapeRow.links))
-                        links[linkRow.index].input = input
-                        links[linkRow.index].track = names.length ? names[0] : ""
-                        links[linkRow.index].frame = root.currentFrame
-                        root.setLinks(shapeRow.index, links)
-                    }
-                }
-                ComboBox {
-                    Layout.fillWidth: true
-                    font.pointSize: 8
-                    enabled: root.editable
-                    model: root.trackNames[linkRow.modelData.input || "tracker"] || []
-                    currentIndex: Math.max(0, model.indexOf(linkRow.modelData.track))
-                    displayText: linkRow.modelData.track || "(no track)"
-                    onActivated: function(index) { linkRow.update("track", model[index]) }
-                }
-                ComboBox {
-                    Layout.preferredWidth: 96
-                    font.pointSize: 8
-                    enabled: root.editable
-                    model: {
-                        var items = ["whole shape"]
-                        for (var i = 0; i < shapeRow.pointCount; i++)
-                            items.push("point " + (i + 1))
-                        return items
-                    }
-                    currentIndex: linkRow.modelData.point >= 0 ? linkRow.modelData.point + 1 : 0
-                    ToolTip.text: "What follows the track (a point with its own link follows it instead of the shape links)"
-                    ToolTip.visible: hovered
-                    onActivated: function(index) { linkRow.update("point", index - 1) }
-                }
-                MaterialToolButton {
-                    text: MaterialIcons.link_off
-                    font.pointSize: 8
-                    padding: 2
-                    enabled: root.editable
-                    ToolTip.text: "Remove the link"
-                    onClicked: {
-                        var links = JSON.parse(JSON.stringify(shapeRow.links))
-                        links.splice(linkRow.index, 1)
-                        root.setLinks(shapeRow.index, links)
-                    }
                 }
             }
         }
