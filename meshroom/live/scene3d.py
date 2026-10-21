@@ -1200,9 +1200,11 @@ def _readUsdAscii(path: str) -> SceneFile:
 def _readAlembic(path: str, fps: float) -> SceneFile:
     try:
         from alembic import Abc, AbcGeom
-    except ImportError:
-        raise RuntimeError("Reading Alembic files needs the Alembic Python module (PyAlembic), not available here: "
-                           "export the scene as USD, or use a Meshroom environment with Alembic.")
+    except ImportError as e:
+        # The reason shown: missing, or installed but not loading (a library or numpy of another version)
+        raise RuntimeError(f"Reading Alembic files needs the Alembic Python module (PyAlembic), which cannot be "
+                           f"imported here ({e}): export the scene as USD, or use a Meshroom environment with "
+                           f"Alembic.") from e
     archive = Abc.IArchive(path)
     scene = SceneFile()
 
