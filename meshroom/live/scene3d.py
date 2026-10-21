@@ -1197,14 +1197,26 @@ def _readUsdAscii(path: str) -> SceneFile:
 
 # Alembic (PyAlembic module) and FBX (Autodesk FBX SDK Python bindings), when installed
 
+def _usdReadsAlembic() -> bool:
+    """ Whether USD (pxr) is installed with its Alembic file format plugin (usdAbc). """
+    try:
+        from pxr import Sdf
+        return Sdf.FileFormat.FindByExtension("abc") is not None
+    except Exception:
+        return False
+
+
 def _readAlembic(path: str, fps: float) -> SceneFile:
     try:
         from alembic import Abc, AbcGeom
     except ImportError as e:
+        # Without PyAlembic: through USD when it has its Alembic plugin (usdAbc)
+        if _usdReadsAlembic():
+            return _readUsdPxr(path)
         # The reason shown: missing, or installed but not loading (a library or numpy of another version)
-        raise RuntimeError(f"Reading Alembic files needs the Alembic Python module (PyAlembic), which cannot be "
-                           f"imported here ({e}): export the scene as USD, or use a Meshroom environment with "
-                           f"Alembic.") from e
+        raise RuntimeError(f"Reading Alembic files needs the Alembic Python module (PyAlembic) or USD with its Alembic "
+                           f"plugin, which cannot be imported here ({e}): export the scene as USD, or use a Meshroom "
+                           f"environment with Alembic.") from e
     archive = Abc.IArchive(path)
     scene = SceneFile()
 
