@@ -197,22 +197,26 @@ def test_smallDarkFaceFoundInALargePlate():
     assert finder.sizes[-1][0] < 300 and finder.sizes[-1][0] == finder.sizes[-1][1]
 
 
-def test_mediapipeImportedWithoutMatplotlib(monkeypatch):
+def test_mediapipeImportedWithoutMatplotlib(monkeypatch, tmp_path):
+    """ A package importing matplotlib in its __init__ as mediapipe does (and deleting its submodule names). """
     import sys
-    import types
-    calls = []
-
-    def importModule(name):
-        calls.append(name)
-        if "matplotlib" not in sys.modules:
-            error = ModuleNotFoundError("No module named 'matplotlib'")
-            error.name = "matplotlib"
-            raise error
-        assert sys.modules["matplotlib"].pyplot is sys.modules["matplotlib.pyplot"]
-        return types.ModuleType("mediapipe")
-    import importlib
-    monkeypatch.setattr(importlib, "import_module", importModule)
-    monkeypatch.delitem(sys.modules, "matplotlib", raising=False)
-    assert face.importMediaPipe().__name__ == "mediapipe" and len(calls) == 2
-    # The stand-in is gone: matplotlib is still missing for everything else
-    assert "matplotlib" not in sys.modules and "matplotlib.pyplot" not in sys.modules
+    package = tmp_path / "mediapipe"
+    (package / "python").mkdir(parents=True)
+    (package / "tasks").mkdir()
+    (package / "python" / "__init__.py").write_text("import matplotlib.pyplot as plt\nimport cv2\n")
+    (package / "tasks" / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("from mediapipe.python import *\nimport mediapipe.tasks as tasks\ndel python\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in ("matplotlib", "matplotlib.pyplot", "cv2"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    import importlib.util
+    realFindSpec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *args: None if name in ("matplotlib", "cv2") else realFindSpec(name, *args))
+    try:
+        assert face.importMediaPipe().tasks is not None
+        # The stand-ins are gone: matplotlib is still missing for everything else
+        assert "matplotlib" not in sys.modules and "cv2" not in sys.modules
+    finally:
+        for name in [name for name in sys.modules if name.split(".")[0] == "mediapipe"]:
+            del sys.modules[name]

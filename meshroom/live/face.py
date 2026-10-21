@@ -39,30 +39,60 @@ class FaceUnavailable(RuntimeError):
     """ The face landmarker cannot be used: MediaPipe or its model is missing. """
 
 
+def _forgetMediaPipe(before):
+    """ Remove from sys.modules the mediapipe modules a failed import left (not in `before`): imported again, its
+    package would not get them as attributes ("name 'python' is not defined"). """
+    import sys
+    for name in [name for name in sys.modules if (name == "mediapipe" or name.startswith("mediapipe."))
+                 and name not in before]:
+        sys.modules.pop(name, None)
+
+
 def importMediaPipe():
     """
     The mediapipe module, or FaceUnavailable. `import mediapipe` also loads its drawing utilities, which need
-    matplotlib and OpenCV, not used here: when they are not installed, stand-ins are given to that import only.
+    matplotlib and OpenCV, not used here: when they are not installed, stand-ins are given to that import only (put
+    before importing: a mediapipe import failing halfway cannot be done again in the same session).
     """
     import importlib
+    import importlib.util
     import sys
     import types
+    if "mediapipe" in sys.modules and hasattr(sys.modules["mediapipe"], "tasks"):
+        return sys.modules["mediapipe"]
     stubs = []
+
+    def stub(name):
+        stubs.append(name)
+        sys.modules[name] = types.ModuleType(name)
+        if name == "matplotlib":
+            sys.modules["matplotlib.pyplot"] = sys.modules["matplotlib"].pyplot = types.ModuleType("matplotlib.pyplot")
+
+    def missing(name):
+        if name in sys.modules:
+            return False
+        try:
+            return importlib.util.find_spec(name) is None
+        except (ImportError, ValueError):
+            return True
+    before = set(sys.modules)
     try:
-        for _ in range(4):
+        for name in ("matplotlib", "cv2"):
+            if missing(name):
+                stub(name)
+        for _ in range(3):
             try:
                 return importlib.import_module("mediapipe")
             except ModuleNotFoundError as e:
-                missing = (e.name or "").split(".")[0]
-                if missing not in ("matplotlib", "cv2") or missing in stubs:
+                name = (e.name or "").split(".")[0]
+                if name not in ("matplotlib", "cv2") or name in stubs:
                     raise
-                # The stand-in module (and matplotlib.pyplot), removed once mediapipe is imported
-                stubs.append(missing)
-                sys.modules[missing] = types.ModuleType(missing)
-                if missing == "matplotlib":
-                    sys.modules["matplotlib.pyplot"] = sys.modules["matplotlib"].pyplot = types.ModuleType("matplotlib.pyplot")
+                # Installed but broken (e.g. built for another numpy): a stand-in, and the import done again cleanly
+                _forgetMediaPipe(before)
+                stub(name)
         raise ImportError("mediapipe cannot be imported")
     except Exception as e:
+        _forgetMediaPipe(before)
         raise FaceUnavailable(f"MediaPipe is not installed (pip install mediapipe): {e}") from e
     finally:
         for name in stubs:
