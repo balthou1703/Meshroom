@@ -247,7 +247,9 @@ the geometry are moved onto the plate, and tracked.
   geometry in the image, 2 pins also turn and scale it, 3 pins and more solve the pose (4 or more: exactly).
 - Track the pins forward / backward (as the tracks of a Tracker): all the pins move together frame after frame, each
   searched where the pose solved with the others puts it; a pin that stops fitting the pose stops there. The pose is
-  solved at every frame with them; the frames where pins were placed by hand are their keyframes.
+  solved at every frame with them; the frames where pins were placed by hand are their keyframes. As in GeoTracker, a
+  pin only constrains the frames where it has a key (placed or tracked): elsewhere it follows the geometry (shown
+  faint), and the poses between two solved frames are interpolated.
 - Or track the geometry itself ("Track Geometry" backward / forward, from the current frame to the next keyframe): the
   pins only place it at a keyframe, then many points of its surface follow the plate, by optical flow (or patches);
   each pose is checked against the keyframe to limit the drift. "Align" finds the right position at the current frame
@@ -388,16 +390,21 @@ into keys of a Camera or a ReadGeo.
 
     @staticmethod
     def _pinsAt(pins, frame):
-        from meshroom.live import tracking
+        """ (points (k, 3), image positions (k, 2)) of the pins with a key at this frame (placed by hand or tracked): as
+        in GeoTracker, a pin only constrains the frames where it has a key; elsewhere it follows the geometry. """
         points, positions = [], []
         for pin in pins:
-            keys = tracking.trackKeys(pin)
-            # A pin counts between its first and last keys; a pin with a single key holds it
-            if not keys or (len(keys) > 1 and not keys[0][0] <= frame <= keys[-1][0]):
+            key = (pin.get("keys") or {}).get(str(int(frame)))
+            if key is None or int(frame) != frame:
                 continue
             points.append(pin["point"])
-            positions.append(tracking.trackPosition(pin, frame))
+            positions.append((float(key[0]), float(key[1])))
         return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
+
+    @staticmethod
+    def pinFrames(pins):
+        """ The frames where at least one pin has a key (placed by hand or tracked): the frames the pins solve. """
+        return sorted({int(f) for pin in pins for f in (pin.get("keys") or {})})
 
     @staticmethod
     def pinKeyframes(pins):
@@ -464,22 +471,31 @@ into keys of a Camera or a ReadGeo.
             if frame in keyframes:
                 return self._solve(ctx, frame, poses[frame], pins, info)[0]
             return self.startCamera(ctx, frame, info).copy(matrix=poses[frame])
-        if not pins:
-            if poses:
-                # Outside of the tracked frames: the nearest tracked pose is held
-                nearest = min(poses, key=lambda f: (abs(f - frame), f))
-                return self.startCamera(ctx, frame, info).copy(matrix=poses[nearest])
+        # The frames with a pose: tracked, or solved by the pins with a key there
+        anchors = sorted(set(self.pinFrames(pins)) | set(poses))
+        if not anchors:
             return self.startCamera(ctx, info=info)
-        # Solved frame after frame from the nearest frame with pins placed by hand or a tracked pose (each pose starts
-        # from the one of the previous frame): the poses on the way are cached
-        anchors = set(keyframes) | set(poses)
-        anchor = min(anchors, key=lambda f: (abs(f - frame), f)) if anchors else frame
-        step = 1 if frame >= anchor else -1
+        if frame not in anchors:
+            # Between two of them, the pose is interpolated; before the first and after the last, held
+            before = [f for f in anchors if f < frame]
+            after = [f for f in anchors if f > frame]
+            if before and after:
+                a, b = before[-1], after[0]
+                matrix = scene3d.interpolateMatrices(ctx.ownData("cameraOutput", a).matrix,
+                                                     ctx.ownData("cameraOutput", b).matrix, (frame - a) / float(b - a))
+            else:
+                matrix = ctx.ownData("cameraOutput", before[-1] if before else after[0]).matrix
+            return self.startCamera(ctx, frame, info).copy(matrix=matrix)
+        # Solved from frame with pins to frame with pins, from the nearest tracked pose (or the first frame with pins),
+        # each solve starting from the previous pose: the poses on the way are cached
+        roots = [f for f in anchors if f in poses] or [anchors[0]]
+        root = min(roots, key=lambda f: (abs(f - frame), f))
+        path = [f for f in anchors if min(root, frame) <= f <= max(root, frame)]
+        path = path if root <= frame else path[::-1]
         evaluator, uid = ctx.evaluator, ctx.planNode.uid
-        initial = None
-        for current in range(anchor, frame + step, step):
-            if current in poses:
-                # A tracked pose (adjusted by the pins at their keyframes) is never replaced by a pins solve
+        initial, solved = None, None
+        for current in path:
+            if current in poses and current != frame:
                 initial = ctx.ownData("cameraOutput", current).matrix
                 continue
             cached = evaluator.cachedData(uid, "cameraOutput", current) if current != frame else None
@@ -545,6 +561,17 @@ into keys of a Camera or a ReadGeo.
         camera = ctx.ownData("cameraOutput", ctx.frame)
         xy, _, _ = camera.project(points, info.width, info.height)
         return float(np.sqrt(np.mean(np.sum((xy - positions) ** 2, axis=1))))
+
+    def pinProjections(self, ctx, cachedData) -> dict:
+        """ {pin name: [x, y]}: where each pin is seen at the frame, its point projected by the solved camera
+        (`cachedData(output)`: the cached output at the frame, or None), in the pixels of the plate of `ctx`. """
+        camera = cachedData("cameraOutput")
+        info = ctx.inputInfo("input")
+        pins = self.pins(ctx, info) if info is not None else []
+        if camera is None or not pins:
+            return {}
+        xy, _, inFront = camera.project(np.array([pin["point"] for pin in pins], dtype=np.float64), info.width, info.height)
+        return {pin["name"]: [float(x), float(y)] for pin, (x, y), front in zip(pins, xy, inFront) if front}
 
     def pickPoint(self, ctx, x, y):
         """ The point of the geometry under the image position (x, y) seen from the solved camera, or None. """

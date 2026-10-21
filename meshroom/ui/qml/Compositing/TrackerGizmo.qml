@@ -93,6 +93,7 @@ Item {
         selectedNames = []
     }
     onTracksChanged: overlay.requestPaint()
+    onPinProjectionsChanged: overlay.requestPaint()
     onFrameChanged: overlay.requestPaint()
     onCanvasXChanged: overlay.requestPaint()
     onCanvasYChanged: overlay.requestPaint()
@@ -124,7 +125,27 @@ Item {
         return Object.keys(track.keys || {}).map(function(f) { return [Number(f), track.keys[f]] })
                                            .sort(function(a, b) { return a[0] - b[0] })
     }
+    // Pins (as in GeoTracker): a pin constrains only the frames where it has a key; at the other frames it is shown
+    // where the solved geometry puts its point (dragging it there adds a key)
+    readonly property var pinProjections: {
+        if (!pinMode || !live)
+            return ({})
+        live.statusRevision  // Refreshed with the renders
+        frame
+        rawTracks
+        var projections = live.pinProjections(node)
+        // In the displayed format (computed at the full resolution of the plate)
+        var s = live.imageWidth && formatWidth ? formatWidth / live.imageWidth : 1
+        var result = {}
+        for (var name in projections)
+            result[name] = [projections[name][0] * s, projections[name][1] * s]
+        return result
+    }
+    function hasKey(track, frame) { return !!track.keys && track.keys[String(frame)] !== undefined }
+
     function position(track, frame) {
+        if (pinMode && frame === root.frame && !hasKey(track, frame) && pinProjections[track.name])
+            return pinProjections[track.name]
         var keys = sortedKeys(track)
         if (keys.length === 0)
             return null
@@ -223,6 +244,9 @@ Item {
                     return
                 var x = root.sx(p[0]), y = root.sy(p[1])
                 var onKey = (track.keys || {})[String(root.frame)] !== undefined
+                // A pin without a key at this frame (it does not constrain it): faint, where the geometry puts it
+                if (root.pinMode && !onKey)
+                    ctx.globalAlpha = 0.45
                 // Pattern
                 var pattern = (track.pattern || 21) * root.zoom
                 ctx.lineWidth = onKey ? 1.5 : 1

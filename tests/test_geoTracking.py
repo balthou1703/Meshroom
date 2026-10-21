@@ -553,3 +553,29 @@ def test_deleteDeformFrames():
     assert removed == 2 and sorted(geotrack.parseDeform(text)["frames"]) == [1, 2, 3]
     text, removed = geotrack.deleteDeform(text, 2, "backward")
     assert removed == 1 and sorted(geotrack.parseDeform(text)["frames"]) == [2, 3]
+
+
+def test_pinsConstrainOnlyTheirKeyedFrames(tmp_path):
+    graph, plate, resection = resectionGraph(tmp_path)
+    pins = json.loads(resection.tracks.value)
+    xy, _, _ = cameraAt(10).project(_CUBE, W, H)
+    for i, pin in enumerate(pins):
+        pin["keys"]["10"] = xy[i].tolist()
+        pin["keyframes"].append(10)
+    resection.tracks.value = json.dumps(pins)
+    graph.update()
+    # Solved at the frames with keys
+    assert pixelError(cameraOutput(resection, 0).matrix, 0) < 0.5 and pixelError(cameraOutput(resection, 10).matrix, 10) < 0.5
+    # Between them: the poses interpolated (the pins do not hold their keys there); after the last: held
+    expected = scene3d.interpolateMatrices(cameraOutput(resection, 0).matrix, cameraOutput(resection, 10).matrix, 0.5)
+    np.testing.assert_allclose(cameraOutput(resection, 5).matrix, expected, atol=1e-9)
+    np.testing.assert_allclose(cameraOutput(resection, 15).matrix, cameraOutput(resection, 10).matrix, atol=1e-9)
+    # Where each pin is seen at a frame without its key: its point on the solved geometry
+    plan = buildPlan(resection)
+    evaluator = Evaluator()
+    evaluator.data(plan, plan.target, "cameraOutput", 5)
+    from meshroom.live.evaluator import RenderContext
+    ctx = RenderContext(plan.nodes[plan.target], 5, evaluator, plan)
+    projections = resection.nodeDesc.pinProjections(ctx, lambda output: evaluator.cachedData(plan.target, output, 5))
+    seen, _, _ = cameraOutput(resection, 5).project(_CUBE, W, H)
+    np.testing.assert_allclose(projections["pin3"], seen[3], atol=1e-6)

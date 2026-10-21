@@ -139,17 +139,32 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
 
     @staticmethod
     def pinsAt(pins, frame):
-        """ (points on the neutral face (k, 3), image positions (k, 2)) of the pins counting at a frame: between their
-        first and last keys (a pin with one key holds it). """
-        from meshroom.live import tracking
+        """ (points on the neutral face (k, 3), image positions (k, 2)) of the pins with a key at this frame (placed by
+        hand or tracked): as in GeoTracker, a pin only constrains the frames where it has a key. """
         points, positions = [], []
         for pin in pins:
-            keys = tracking.trackKeys(pin)
-            if not keys or (len(keys) > 1 and not keys[0][0] <= frame <= keys[-1][0]):
+            key = (pin.get("keys") or {}).get(str(int(frame)))
+            if key is None or int(frame) != frame:
                 continue
             points.append(pin["point"])
-            positions.append(tracking.trackPosition(pin, frame))
+            positions.append((float(key[0]), float(key[1])))
         return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
+
+    def pinProjections(self, ctx, cachedData) -> dict:
+        """ {pin name: [x, y]}: where each pin is seen at the frame, on the fitted face (`cachedData(output)`: the cached
+        output at the frame, or None), in the pixels of the plate of `ctx`. """
+        from meshroom.live import face
+        geo = cachedData("geoOutput")
+        info = ctx.inputInfo("input")
+        pins = self.pins(ctx, info) if info is not None else []
+        if geo is None or geo.isEmpty or not pins:
+            return {}
+        mesh = self.mesh(ctx)
+        triangles = mesh.triangles()
+        locations = face.pinLocations(mesh, np.array([pin["point"] for pin in pins], dtype=np.float64))
+        onFace = np.array([geo.vertices[triangles[t]].T @ w for t, w in locations])
+        xy, _, inFront = self.camera(ctx).project(onFace, info.width, info.height)
+        return {pin["name"]: [float(x), float(y)] for pin, (x, y), front in zip(pins, xy, inFront) if front}
 
     def pickPoint(self, ctx, x, y):
         """ The point of the neutral face under the image position (x, y) (where the fitted face is seen), or None. """

@@ -722,6 +722,17 @@ class LiveController(QObject):
         self._trackNode = node
         self._trackPending = []
         self._beginInteractiveEdit(node.attribute(_editableTracks(node)))
+        # Pins without a key at the start frame start where the solved geometry shows them (and get that key)
+        projections = self.pinProjections(node) if hasattr(node.nodeDesc, "pinProjections") else {}
+        for trackIndex, track in selected:
+            keys = track.setdefault("keys", {})
+            if str(start) in keys or track.get("name") not in projections:
+                continue
+            trackFormat = track.get("format") or [info.width, info.height]
+            x, y = projections[track["name"]]
+            key = [round(x * trackFormat[0] / float(info.width), 3), round(y * trackFormat[1] / float(info.height), 3)]
+            keys[str(start)] = key
+            self._trackPending.append((trackIndex, track.get("name"), start, key[0], key[1], 1.0, list(trackFormat)))
 
         def cancel():
             if token.cancelled:
@@ -1651,6 +1662,26 @@ class LiveController(QObject):
             self._setError(f"Add pin: {getattr(e, 'message', e) or e.__class__.__name__}", node.name)
             return []
         return [round(float(v), 6) for v in point] if point is not None else []
+
+    @Slot(QObject, result="QVariant")
+    def pinProjections(self, node):
+        """
+        {pin name: [x, y]} (pixels of the full resolution plate): where the pins of a Resection or a FaceTracker are seen
+        at the current frame (their point on the solved geometry), from what the viewer rendered (nothing is solved
+        here, in the thread of the interface); {} when it is not rendered yet.
+        """
+        from meshroom.live.evaluator import RenderContext
+        plan, key = self._plan, self._key(node)
+        if node is None or plan is None or key not in plan.nodes or not hasattr(node.nodeDesc, "pinProjections"):
+            return {}
+        try:
+            ctx = RenderContext(plan.nodes[key], self._currentFrame, self._evaluator, plan)
+            projections = node.nodeDesc.pinProjections(
+                ctx, lambda output: self._evaluator.cachedData(key, output, self._currentFrame))
+        except Exception:
+            logging.debug("[Live] Pin projections", exc_info=True)
+            return {}
+        return {name: [x / plan.proxy, y / plan.proxy] for name, (x, y) in projections.items()}
 
     @Slot(QObject, result=str)
     def resectionSummary(self, node):

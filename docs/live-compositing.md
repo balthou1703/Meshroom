@@ -521,9 +521,12 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   pins se suivent comme les pistes d'un Tracker (avant / arrière), tous ensemble : à chaque frame, la pose est
   résolue avec les pins trouvés, un pin loin de l'endroit où elle met son point (glissement, occultation) s'arrête
   là (à partir de 4 pins ; avec 4, celui qui s’écarte le plus de sa position prévue), et chaque pin est cherché à la frame suivante là où la pose, à vitesse constante, le met
-  (à partir de 3 pins). La pose est résolue frame après frame depuis la keyframe la plus proche (chaque pose part de
-  la précédente). La barre d'outils indique le nombre de pins de la frame et l'erreur de reprojection. Un pin compte
-  entre sa première et sa dernière clé (un pin à une seule clé la tient).
+  (à partir de 3 pins). Comme dans GeoTracker, un pin ne contraint que les frames où il a une clé (posée à la main
+  ou trackée) : la pose y est résolue avec les pins clés, de frame clé en frame clé depuis la pose trackée la plus
+  proche (chaque résolution part de la précédente) ; entre deux frames avec une pose, elle est interpolée, et tenue
+  avant la première et après la dernière. Aux autres frames, un pin est affiché (atténué) là où la géométrie résolue
+  met son point (`pinProjections`) : le déplacer y ajoute une clé, et le tracker part de là. Même règle pour les pins
+  du FaceTracker. La barre d'outils indique le nombre de pins de la frame et l'erreur de reprojection.
   **Suivi de la géométrie** (`meshroom/live/geotrack.py`, boutons de la barre d'outils et du nœud) : les pins ne
   servent qu'à placer la géométrie sur une keyframe ; « Track Geometry » (arrière / avant, de la frame courante à la
   keyframe suivante) fait suivre la plaque à de nombreux points de sa surface (« Track Points », 150) : points
