@@ -14,7 +14,7 @@ import numpy as np
 from meshroom.core import desc
 from meshroom.live import scene3d
 from meshroom.live.gpu import gpuParam
-from meshroom.live.params import imageInput, pointTrackerParam
+from meshroom.live.params import imageInput, maskParams, pointTrackerParam
 
 _COLOR = "#6E9E8A"
 _FILE_FILTER = "3D files (*.usd *.usda *.usdc *.usdz *.abc *.fbx *.obj *.ply)"
@@ -254,7 +254,9 @@ the geometry are moved onto the plate, and tracked.
   from a rough one (the geometry put near its place by hand), against the nearest keyframe, and makes it a keyframe.
   "Refine" tracks again between each pair of keyframes from both ends and blends them (the drift spread between them).
   The tracked poses are stored in "Geometry Track" and prevail over the pins, except at the keyframes of the pins
-  (where the pins adjust them); "Clear Geometry Track" removes them.
+  (where the pins adjust them); "Clear Geometry Track" removes them. The optional "Mask" limits the points followed
+  (and the outline snapped by "Align With" silhouette) to its white areas: an occluding object or a moving part left
+  out with an inverted roto.
 
 The lens (focal length, film back) and the starting pose come from "Camera" (without it: 35 mm on a 36 mm film
 back, looking at the geometry). "Center Geometry" steps the starting camera back along its view axis until the whole
@@ -268,6 +270,10 @@ into keys of a Camera or a ReadGeo.
         desc.Geo(name="geo", label="Geo", description="The geometry to match (e.g. a ReadGeo)."),
         desc.Camera(name="camera", label="Camera", optional=True,
                     description="The lens and the starting pose (the pose of the frames without pins)."),
+        desc.Image(name="mask", label="Mask", optional=True, infoOnly=True,
+                   description="Optional mask: the geometry is only followed (Track Geometry, Align, Refine) where it "
+                               "is white, e.g. a roto of an occluding object or of a moving part, inverted."),
+        *maskParams(),
         desc.BoolParam(name="centerGeometry", label="Center Geometry", value=False,
                        description="Start from the camera stepped back along its view axis until the whole geometry is "
                                    "centered in the view (e.g. a large geometry, the camera close to its center: hard to "
@@ -620,9 +626,21 @@ class _GeoTrackAction:
         self.geo = geo
         self.focalPixels = nodeDesc.startCamera(self.ctx, info=self.info).focalPixels(self.info.width)
         self.poses, self.keyframes = nodeDesc.geoTrack(self.ctx)
+        self.hasMask = context.hasInput("mask")
         pins = nodeDesc.pins(self.ctx, self.info)
         self.allKeyframes = sorted(set(self.keyframes) | set(nodeDesc.pinKeyframes(pins)))
         self._lastPublish = 0.0
+
+    def imageAt(self, frame):
+        """ The plate at a frame, with its mask (geotrack.setMask) when the "mask" input is connected. """
+        from meshroom.live import geotrack, ops
+        image = self.context.render(frame)
+        mask = None
+        if self.hasMask:
+            mask = ops.maskValues(self.context.renderInput("mask", frame), self.context.value("maskChannel"),
+                                  self.context.value("invertMask"), image.bbox)[:, :, 0]
+        # Always set: the image may come from the cache, given a mask by an earlier action
+        return geotrack.setMask(image, mask)
 
     def poseAt(self, frame):
         """ The camera-to-world matrix of the Resection at a frame (when the action started). """
@@ -648,7 +666,7 @@ class _GeoTrackAction:
         def onPose(frame, matrix, inliers, error):
             self.poses[frame] = matrix
             self.publish(frame)
-        tracked, reason = geotrack.trackPose(self.samples, self.settings, frames, self.context.render,
+        tracked, reason = geotrack.trackPose(self.samples, self.settings, frames, self.imageAt,
                                              self.poseAt(frames[0]), self.info.width, self.info.height, self.focalPixels,
                                              cancel=self.context.checkCancelled, progress=progress, onPose=onPose)
         return tracked, reason
@@ -690,7 +708,7 @@ class _GeoTrackAction:
         from meshroom.live.evaluator import EvaluationCancelled
         from meshroom.live.neural import NeuralUnavailable
         method = self.context.value("alignMethod")
-        image, rough = self.context.render(frame), self.poseAt(frame)
+        image, rough = self.imageAt(frame), self.poseAt(frame)
         others = [f for f in self.allKeyframes if f != frame]
         reference = min(others, key=lambda f: (abs(f - frame), f)) if others else None
         if reference is None and method not in ("megapose", "silhouette"):
@@ -723,7 +741,7 @@ class _GeoTrackAction:
                 from meshroom.live.neural.matching import matcher
                 self.context.progress(0.1, f"Align on frame {reference} with LightGlue")
                 samples = geotrack.SurfaceSamples(self.geo, count=200000)
-                referenceImage = self.context.render(reference)
+                referenceImage = self.imageAt(reference)
                 # On the GPU, or on the CPU if the GPU cannot run it
                 rough, _, _ = gpu.withFallback(self.device, lambda device: geotrack.alignWithMatches(
                     samples, self.poseAt(reference), referenceImage, rough, image, self.info.width, self.info.height,
@@ -735,7 +753,7 @@ class _GeoTrackAction:
         self.context.progress(0.6, f"Align on frame {reference}")
         try:
             matrix, _, _ = geotrack.alignPose(self.samples, self.settings, self.poseAt(reference),
-                                              self.context.render(reference), rough, image, self.info.width,
+                                              self.imageAt(reference), rough, image, self.info.width,
                                               self.info.height, self.focalPixels, cancel=self.context.checkCancelled)
         except geotrack.TrackingLost as e:
             if method != "patches":
@@ -761,14 +779,14 @@ class _GeoTrackAction:
                 # The pose shown at the keyframe (at a keyframe of the pins: adjusted by them)
                 self.poses[frame] = self.poseAt(frame)
             forward, reason = geotrack.trackPose(self.samples, self.settings, list(range(first, last + 1)),
-                                                 self.context.render, self.poses[first], self.info.width,
+                                                 self.imageAt, self.poses[first], self.info.width,
                                                  self.info.height, self.focalPixels, self.context.checkCancelled,
                                                  progress)
             done[0] += last - first
             if reason == "cancelled":
                 return reason
             backward, reasonBack = geotrack.trackPose(self.samples, self.settings, list(range(last, first - 1, -1)),
-                                                      self.context.render, self.poses[last], self.info.width,
+                                                      self.imageAt, self.poses[last], self.info.width,
                                                       self.info.height, self.focalPixels, self.context.checkCancelled,
                                                       progress)
             done[0] += last - first

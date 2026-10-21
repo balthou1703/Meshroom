@@ -16,11 +16,42 @@ Positions are in Nuke pixels of the plate format (y up); cameras are camera-to-w
 """
 from __future__ import annotations
 
+import weakref
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from . import scene3d, tracking
+
+# The masks of the images (setMask): where the geometry may be followed
+_MASKS = weakref.WeakKeyDictionary()
+
+
+def setMask(image, mask: Optional[np.ndarray]):
+    """
+    Give an image its mask (h, w) over its bbox: the geometry is only followed where it is above 0.5 (e.g. an
+    occluding object or a moving part left out, a roto inverted). None removes it. Returns the image.
+    """
+    if mask is None:
+        _MASKS.pop(image, None)
+    else:
+        _MASKS[image] = np.asarray(mask, dtype=np.float32).reshape(image.bbox.height, image.bbox.width)
+    return image
+
+
+def maskedOut(image, positions: np.ndarray) -> np.ndarray:
+    """ Whether each image position (n, 2), Nuke pixels, is masked out (False everywhere without mask). """
+    positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
+    mask = _MASKS.get(image) if image is not None else None
+    if mask is None or not len(positions):
+        return np.zeros(len(positions), dtype=bool)
+    bbox = image.bbox
+    rows = np.floor(bbox.y1 - positions[:, 1]).astype(np.int64)
+    columns = np.floor(positions[:, 0] - bbox.x0).astype(np.int64)
+    inside = (rows >= 0) & (rows < mask.shape[0]) & (columns >= 0) & (columns < mask.shape[1])
+    out = np.ones(len(positions), dtype=bool)
+    out[inside] = mask[rows[inside], columns[inside]] < 0.5
+    return out
 
 # flow: Lucas-Kanade optical flow (flow.py); raft: RAFT optical flow (neural/raft.py, Lucas-Kanade without it);
 # patches: the patch of each point searched in the next frame
@@ -259,6 +290,8 @@ def stepPose(samples: SurfaceSamples, settings: TrackSettings, matrixA: np.ndarr
     """
     lumA, lumB = tracking.luminance(imageA), tracking.luminance(imageB)
     indices, positionsA = samples.visible(matrixA, width, height, focalPixels, margin=settings.search / 2.0 + 2)
+    keep = ~maskedOut(imageA, positionsA)
+    indices, positionsA = indices[keep], positionsA[keep]
     minDistance = max(8.0, np.sqrt(width * height / max(1.0, settings.features * 2.0)))
     chosen = selectFeatures(lumA[0], lumA[1], positionsA, settings.features, minDistance)
     if len(chosen) < settings.minInliers:
@@ -267,6 +300,7 @@ def stepPose(samples: SurfaceSamples, settings: TrackSettings, matrixA: np.ndarr
     positionsA = positionsA[chosen]
     centersB, _ = projectPoints(predictedB, points, width, height, focalPixels)
     positionsB, found = _measureMotion(settings, lumA, lumB, imageA, imageB, positionsA, centersB, cancel)
+    found &= ~maskedOut(imageB, positionsB)
     if found.sum() < settings.minInliers:
         raise TrackingLost(f"only {int(found.sum())} points of the geometry were found in the next frame")
     matrix, inliers, error = robustPose(points[found], positionsB[found], width, height, focalPixels, predictedB)
@@ -362,6 +396,8 @@ def alignPose(samples: SurfaceSamples, settings: TrackSettings, referenceMatrix:
     """
     lumReference, lumImage = tracking.luminance(referenceImage), tracking.luminance(image)
     indices, positions = samples.visible(referenceMatrix, width, height, focalPixels, margin=settings.pattern)
+    keep = ~maskedOut(referenceImage, positions)
+    indices, positions = indices[keep], positions[keep]
     minDistance = max(8.0, np.sqrt(width * height / max(1.0, settings.features * 2.0)))
     chosen = selectFeatures(lumReference[0], lumReference[1], positions, settings.features, minDistance)
     if len(chosen) < settings.minInliers:
@@ -374,6 +410,7 @@ def alignPose(samples: SurfaceSamples, settings: TrackSettings, referenceMatrix:
         patchSettings.search = int(search) | 1
         centers, _ = projectPoints(current, points, width, height, focalPixels)
         found, ok = _measureMotion(patchSettings, lumReference, lumImage, None, None, referencePositions, centers, cancel)
+        ok &= ~maskedOut(image, found)
         if ok.sum() < settings.minInliers:
             if inliers:
                 break
@@ -398,7 +435,7 @@ def alignWithMatches(samples: SurfaceSamples, referenceMatrix: np.ndarray, refer
         few matches land on the geometry.
     """
     pointsReference, pointsImage, scores = matcher.match(referenceImage, image)
-    keep = scores >= minScore
+    keep = (scores >= minScore) & ~maskedOut(referenceImage, pointsReference) & ~maskedOut(image, pointsImage)
     pointsReference, pointsImage = pointsReference[keep], pointsImage[keep]
     indices, positions = samples.visible(referenceMatrix, width, height, focalPixels, margin=0.0)
     if not len(indices) or not len(pointsReference):
@@ -626,8 +663,11 @@ def alignToSilhouette(geo, matrix: np.ndarray, image, width: int, height: int, f
             if len(points) < 8:
                 raise TrackingLost("the geometry shows no outline in the image: place it roughly first")
             offsets, strengths = _edgeSearch(gradients, positions, normals, reach)
-            # The weak edges (flat areas: nothing found) are not matches
+            # The weak edges (flat areas: nothing found) are not matches, nor the masked out ones (an occluding object)
             strong = strengths > 0.3 * float(np.percentile(strengths, 90))
+            found = positions + offsets[:, None] * normals
+            strong &= ~maskedOut(image, np.c_[found[:, 0] + bbox.x0, bbox.y1 - found[:, 1]])
+            strong &= ~maskedOut(image, np.c_[positions[:, 0] + bbox.x0, bbox.y1 - positions[:, 1]])
             if strong.sum() < 8:
                 raise TrackingLost("no edge of the image near the outline of the geometry: place it roughly first")
             targets = positions[strong] + offsets[strong, None] * normals[strong]

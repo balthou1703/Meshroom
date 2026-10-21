@@ -60,6 +60,8 @@ def importMediaPipe():
     import types
     if "mediapipe" in sys.modules and hasattr(sys.modules["mediapipe"], "tasks"):
         return sys.modules["mediapipe"]
+    # The leftovers of an earlier failed import (in this session, by this or other code) forgotten first
+    _forgetMediaPipe(set())
     stubs = []
 
     def stub(name):
@@ -206,19 +208,41 @@ def _cropAround(landmarks: np.ndarray, width: int, height: int, scale: float = 2
     return x0, y0, x0 + size, y0 + size
 
 
-def _searchRegions(width: int, height: int) -> List[Tuple[int, int, int, int]]:
-    """ Where a face is searched when none was found at the previous frame: the whole frame, then squares of its
-    height (and half of it) overlapping by half (a small face in a large plate: the landmarker works on ~256 pixels). """
-    regions = [(0, 0, width, height)]
-    side = min(width, height)
+def _searchRegions(width: int, height: int, area=None) -> List[Tuple[int, int, int, int]]:
+    """ Where a face is searched when none was found at the previous frame: the whole frame (or `area`: (x0, y0, x1,
+    y1), rows from the top), then squares of its height (and half of it) overlapping by half (a small face in a large
+    plate: the landmarker works on ~256 pixels). """
+    x0, y0, x1, y1 = area if area is not None else (0, 0, width, height)
+    regionWidth, regionHeight = x1 - x0, y1 - y0
+    regions = [(x0, y0, x1, y1)]
+    side = min(regionWidth, regionHeight)
     for size in (side, side // 2):
-        if size < 128 or (size == side and width == height):
+        if size < 128 or (size == side and regionWidth == regionHeight):
             continue
         step = max(1, size // 2)
-        xs = sorted(set(list(range(0, width - size + 1, step)) + [width - size]))
-        ys = sorted(set(list(range(0, height - size + 1, step)) + [height - size]))
+        xs = sorted(set(list(range(x0, x1 - size + 1, step)) + [x1 - size]))
+        ys = sorted(set(list(range(y0, y1 - size + 1, step)) + [y1 - size]))
         regions += [(x, y, x + size, y + size) for y in ys for x in xs]
     return regions
+
+
+def _maskArea(mask: np.ndarray, margin: int = 16):
+    """ The box (x0, y0, x1, y1) around the white part (above 0.5) of a mask (h, w), rows from the top, with a margin;
+    None when it is all black. """
+    rows, columns = np.nonzero(mask >= 0.5)
+    if not len(rows):
+        return None
+    height, width = mask.shape
+    return (max(0, int(columns.min()) - margin), max(0, int(rows.min()) - margin),
+            min(width, int(columns.max()) + 1 + margin), min(height, int(rows.max()) + 1 + margin))
+
+
+def hiddenLandmarks(landmarks: np.ndarray, mask: np.ndarray) -> List[int]:
+    """ The landmarks (normalized) where the mask (h, w, rows from the top) is below 0.5 (masked out). """
+    height, width = mask.shape
+    columns = np.clip(np.floor(landmarks[:, 0] * width).astype(np.int64), 0, width - 1)
+    rows = np.clip(np.floor(landmarks[:, 1] * height).astype(np.int64), 0, height - 1)
+    return [int(i) for i in np.flatnonzero(mask[rows, columns] < 0.5)]
 
 
 def _detectIn(detector, rgb: np.ndarray, region, timestampMs: int):
@@ -244,11 +268,15 @@ def _detectIn(detector, rgb: np.ndarray, region, timestampMs: int):
 
 def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0, cancel=None,
                progress: Optional[Callable[[int, int], None]] = None,
-               onFrame: Optional[Callable[[int, dict], None]] = None) -> Dict[int, dict]:
+               onFrame: Optional[Callable[[int, dict], None]] = None,
+               maskAt: Optional[Callable[[int], np.ndarray]] = None) -> Dict[int, dict]:
     """
-    The face at each of `frames` (in order): {frame: {"landmarks": (478, 3) normalized, "blendshapes": {...}}}, the
-    frames without face left out. `detector.detect(rgb uint8, timestamp ms)` (see FaceLandmarker) is given a crop
-    around the face of the previous frame, else (or if it finds none there) the whole frame, then tiles of it.
+    The face at each of `frames` (in order): {frame: {"landmarks": (478, 3) normalized, "blendshapes": {...},
+    "hidden": [masked out landmarks]}}, the frames without face left out. `detector.detect(rgb uint8, timestamp ms)`
+    (see FaceLandmarker) is given a crop around the face of the previous frame, else (or if it finds none there) the
+    whole frame, then tiles of it. `maskAt(frame)`: the mask (h, w) over the format, rows from the top: the face is
+    searched in its white part only (the rest blackened), and the landmarks it masks out are "hidden" (not used to
+    place the head, e.g. behind an occluding object).
     """
     from .imageBuffer import BBox
     from .neural import displayRGB
@@ -260,8 +288,13 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
         image = imageAt(frame)
         rgb = displayRGB(image, BBox.fromFormat(*image.format))
         height, width = rgb.shape[:2]
-        regions = _searchRegions(width, height)
-        if previous is not None:
+        mask = np.clip(np.asarray(maskAt(frame), dtype=np.float32), 0.0, 1.0) if maskAt else None
+        area = None
+        if mask is not None:
+            rgb = rgb * mask[:, :, None]
+            area = _maskArea(mask)
+        regions = _searchRegions(width, height, area) if (mask is None or area is not None) else []
+        if previous is not None and regions:
             regions.insert(0, _cropAround(previous, width, height))
         landmarks, blendshapes = None, {}
         timestamp = int(round(index * 1000.0 / max(fps, 1e-3)))
@@ -273,7 +306,8 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
                 break
         previous = landmarks
         if landmarks is not None:
-            faces[frame] = {"landmarks": landmarks, "blendshapes": blendshapes}
+            faces[frame] = {"landmarks": landmarks, "blendshapes": blendshapes,
+                            "hidden": hiddenLandmarks(landmarks, mask) if mask is not None else []}
             if onFrame:
                 onFrame(frame, faces[frame])
         if progress:
@@ -281,16 +315,22 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
     return faces
 
 
-# Storage (the "faceTrack" parameter): {"format": [w, h], "frames": {"1001": {"l": [x, y, z, ...], "b": {...}}}}
+# Storage (the "faceTrack" parameter): {"format": [w, h], "frames": {"1001": {"l": [x, y, z, ...], "b": {...},
+# "h": [hidden landmarks] (when there are)}}}
+
+def _dumpFace(face: dict) -> dict:
+    data = {"l": [round(float(v), 5) for v in np.asarray(face["landmarks"]).ravel()],
+            "b": {name: round(float(value), 4) for name, value in (face.get("blendshapes") or {}).items()}}
+    if face.get("hidden"):
+        data["h"] = [int(i) for i in face["hidden"]]
+    return data
+
 
 def dumpFaces(faces: Dict[int, dict], imageFormat: Tuple[int, int]) -> str:
     if not faces:
         return ""
     return json.dumps({"format": [int(imageFormat[0]), int(imageFormat[1])],
-                       "frames": {str(frame): {"l": [round(float(v), 5) for v in np.asarray(face["landmarks"]).ravel()],
-                                               "b": {name: round(float(value), 4)
-                                                     for name, value in (face.get("blendshapes") or {}).items()}}
-                                  for frame, face in sorted(faces.items())}})
+                       "frames": {str(frame): _dumpFace(face) for frame, face in sorted(faces.items())}})
 
 
 def parseFaces(text: str) -> Tuple[Dict[int, dict], Optional[Tuple[int, int]]]:
@@ -300,7 +340,7 @@ def parseFaces(text: str) -> Tuple[Dict[int, dict], Optional[Tuple[int, int]]]:
     try:
         data = json.loads(text)
         faces = {int(frame): {"landmarks": np.array(face["l"], dtype=np.float64).reshape(-1, 3),
-                              "blendshapes": dict(face.get("b") or {})}
+                              "blendshapes": dict(face.get("b") or {}), "hidden": [int(i) for i in face.get("h") or []]}
                  for frame, face in (data.get("frames") or {}).items()}
         imageFormat = tuple(data["format"]) if data.get("format") else None
     except (TypeError, ValueError, KeyError, AttributeError) as e:
@@ -338,7 +378,8 @@ def toPixels(landmarks: np.ndarray, width: int, height: int) -> np.ndarray:
 
 
 def landmarkTracks(faces: Dict[int, dict], width: int, height: int, indices=None, smoothing: float = 0.0) -> List[dict]:
-    """ The landmarks as tracks of a Tracker (named by their region: lips_013...), keys at the tracked frames. """
+    """ The landmarks as tracks of a Tracker (named by their region: lips_013...), keys at the tracked frames (except
+    where they are hidden by the mask). """
     regions = landmarkRegions()
     if not faces:
         return []
@@ -348,8 +389,11 @@ def landmarkTracks(faces: Dict[int, dict], width: int, height: int, indices=None
                "format": [width, height], "keys": {}} for i in indices]
     for frame in sorted(faces):
         pixels = toPixels(landmarksAt(faces, frame, smoothing), width, height)
+        hidden = set(faces[frame].get("hidden") or ())
         for track, i in zip(tracks, indices):
-            track["keys"][str(frame)] = [round(float(pixels[i, 0]), 3), round(float(pixels[i, 1]), 3)]
+            # A masked out landmark has no key at that frame
+            if i not in hidden:
+                track["keys"][str(frame)] = [round(float(pixels[i, 0]), 3), round(float(pixels[i, 1]), 3)]
     return tracks
 
 
@@ -405,10 +449,11 @@ def _defaultStart(mesh: scene3d.GeoData) -> np.ndarray:
 
 
 def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraData, width: int, height: int,
-              initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True):
+              initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=()):
     """
     The face seen in the image: the pose of the head from the `rigid` landmarks, then each vertex moved at its depth
-    onto the ray of its landmark (`deform`).
+    onto the ray of its landmark (`deform`). The `hidden` landmarks (masked out) are not used: the head is placed
+    with the other rigid ones (all of them if fewer than 6 are left), and their vertices follow the head only.
 
     Args:
         mesh: the face (vertex i: landmark i), its shape the neutral face, in its own space.
@@ -422,7 +467,10 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     """
     from .geotrack import robustPose
     count = min(len(mesh.vertices), len(pixels))
+    hidden = {int(i) for i in hidden}
     rigid = [i for i in rigid if i < count]
+    visibleRigid = [i for i in rigid if i not in hidden]
+    rigid = visibleRigid if len(visibleRigid) >= 6 else rigid
     focal = camera.focalPixels(width)
     start = initial if initial is not None else _defaultStart(mesh)
     cameraToFace, _, error = robustPose(mesh.vertices[rigid], pixels[rigid], width, height, focal, start)
@@ -434,7 +482,9 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         depth = -inCamera[:count, 2]
         rays = np.c_[(pixels[:count, 0] - width / 2.0) / focal, (pixels[:count, 1] - height / 2.0) / focal,
                      -np.ones(count)]
+        moved = np.ones(count, dtype=bool)
+        moved[[i for i in hidden if i < count]] = False
         inCamera = inCamera.copy()
-        inCamera[:count] = rays * depth[:, None]
+        inCamera[:count][moved] = (rays * depth[:, None])[moved]
     world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
     return scene3d.GeoData(world, name="face", topology=mesh.topology), head, cameraToFace, error

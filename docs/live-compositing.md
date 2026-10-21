@@ -540,7 +540,10 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   « Geometry Track » (JSON : poses et keyframes) et priment sur les pins, sauf aux keyframes des pins (qui les
   ajustent : la pose y part de la pose suivie) ; hors des frames suivies, la pose suivie la plus proche est tenue
   quand il n'y a pas de pin ; « Clear Geometry Track » les retire. Si le suivi s'arrête (trop peu de points visibles
-  ou trouvés), les poses déjà trouvées sont gardées et la raison s'affiche.
+  ou trouvés), les poses déjà trouvées sont gardées et la raison s'affiche. Entrée « Mask » (non rendue, lue par les
+  actions ; canal et inversion comme les autres masques) : Track Geometry, Align et Refine ne suivent que les points
+  dans sa partie blanche (`geotrack.setMask` / `maskedOut` : un objet qui passe devant ou une partie qui bouge, son
+  roto inversé).
 - **Disconnect and Bake** (clic droit sur un edge) : l'edge est retiré et l'entrée garde ce qu'elle recevait. Un
   paramètre garde la valeur de sa source, et ses clés si elle est animée (pour un enfant, x d'une valeur 2D : les
   clés du groupe). Une entrée caméra ou matrice devient des clés des paramètres du nœud sur la plage de la timeline
@@ -561,6 +564,10 @@ CPU) sur toute la plage : 478 points par frame et 52 coefficients d'expression, 
 Le landmarker (qui travaille sur ~256 pixels) voit un carré autour du visage de la frame précédente, sinon toute
 l'image, sinon des tuiles carrées de la hauteur de l'image puis de sa moitié : un petit visage dans une grande plaque
 est trouvé ; chaque carré sombre est éclairci (au plus x8). Un visage très masqué (feuillage) peut rester introuvable.
+Entrée « Mask » (canal et inversion comme les autres masques) : le visage n'est cherché que dans sa partie blanche
+(le reste noirci, recherche limitée à sa boîte) ; les points qu'il masque (« h » dans « Face Track ») ne placent pas
+la tête, leurs sommets suivent seulement la tête, et ils n'ont pas de clé de piste à ces frames (un feuillage devant
+le visage : son roto inversé).
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le
@@ -611,7 +618,8 @@ les plaques, et sa licence est non commerciale. MegaPose a un modèle RGB seul.
   que la texture à l'intérieur de l'objet ne l'attire pas ; la pose est résolue sur la distance le long des normales
   (Levenberg-Marquardt, poids de Tukey), du flou au net, sur « Silhouette Search » pixels au plus (40 par défaut,
   avancé) ; il faut un objet qui se détache de son fond et une géométrie placée à moins de cette distance ; un objet
-  symétrique peut se recaler sur une pose symétrique), lightglue (les features de la
+  symétrique peut se recaler sur une pose symétrique ; l'entrée « Mask » de la Resection limite aussi le contour
+  recalé à sa partie blanche), lightglue (les features de la
   keyframe appariées dans la frame courante puis posées sur la géométrie : marche loin de la bonne position et sous
   un autre angle, `geotrack.alignWithMatches`), megapose (la pose du maillage trouvée dans l'image depuis la boîte où
   la pose actuelle le montre, sans keyframe). Dans tous les cas, s'il y a une keyframe, la pose est ensuite affinée sur les patches de la

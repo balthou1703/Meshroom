@@ -7,7 +7,7 @@ import numpy as np
 
 from meshroom.core import desc
 from meshroom.live import scene3d
-from meshroom.live.params import imageInput
+from meshroom.live.params import imageInput, maskParams
 
 _COLOR = "#6E9E8A"
 
@@ -29,7 +29,8 @@ Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools 
 
 Outputs: "Face" (the face mesh at each frame, in the world of the camera), "Head Matrix" (the rigid pose of the head:
 face space to world, e.g. for the "Input Matrix" of a ReadGeo), "Camera" (the plate camera), and the plate with the face
-drawn. Its tracks (the landmarks, named by region: lips_013, leftEye_033...) can drive a Roto, a Stabilize or a
+drawn. The optional "Mask" limits the search to its white part and leaves out the landmarks it masks out (an
+occluding object: its roto, inverted). Its tracks (the landmarks, named by region: lips_013, leftEye_033...) can drive a Roto, a Stabilize or a
 CornerPin like those of a Tracker: connect it to their "Tracker" input.
 
 Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
@@ -43,6 +44,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.Geo(name="face", label="Face", optional=True,
                  description="A face mesh with the MediaPipe face topology (468 or 478 vertices in the landmark order), "
                              "e.g. a scan of the actor retopologized on it. Without it: the canonical face of MediaPipe."),
+        desc.Image(name="mask", label="Mask", optional=True, infoOnly=True,
+                   description="Optional mask: the face is searched in its white part only, and the landmarks it "
+                               "masks out (e.g. behind foliage: a roto of it, inverted) do not place the head nor "
+                               "move their vertices, and give no track key."),
+        *maskParams(),
         desc.FloatParam(name="minConfidence", label="Min Confidence", value=0.5, range=(0.1, 0.95, 0.05),
                         invalidate=False,
                         description="A face is found (and followed) when MediaPipe is at least this confident."),
@@ -115,8 +121,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return scene3d.GeoData(), np.eye(4)
         landmarks = face.landmarksAt(faces, frame, ctx.value("smoothing"))
         pixels = face.toPixels(landmarks, info.width, info.height)
+        tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
         geo, head, _, _ = face.solveFace(self.mesh(ctx, frame), pixels, self.camera(ctx, frame), info.width, info.height,
-                                         rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"))
+                                         rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
+                                         hidden=tracked.get("hidden") or ())
         return geo, head
 
     def computeData(self, ctx, outputName):
@@ -174,10 +182,19 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             if now - lastPublish[0] >= 0.5:
                 lastPublish[0] = now
                 context.publish({"faceTrack": face.dumpFaces(faces, (width, height))}, frame)
+        maskAt = None
+        if context.hasInput("mask"):
+            from meshroom.live import ops
+            from meshroom.live.imageBuffer import BBox
+            channel, invert = context.value("maskChannel"), context.value("invertMask")
+
+            def maskAt(frame):
+                return ops.maskValues(context.renderInput("mask", frame), channel, invert,
+                                      BBox.fromFormat(width, height))[:, :, 0]
         try:
             face.trackFaces(context.render, context.frames, detector, cancel=context.checkCancelled,
                             progress=lambda done, count: context.progress(done / float(count), "Track Face"),
-                            onFrame=onFrame)
+                            onFrame=onFrame, maskAt=maskAt)
         finally:
             detector.close()
         if not faces:

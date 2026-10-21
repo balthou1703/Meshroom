@@ -220,3 +220,42 @@ def test_mediapipeImportedWithoutMatplotlib(monkeypatch, tmp_path):
     finally:
         for name in [name for name in sys.modules if name.split(".")[0] == "mediapipe"]:
             del sys.modules[name]
+
+
+def test_maskLimitsTheSearchAndHidesLandmarks():
+    from meshroom.live import ImageBuffer
+    width, height = 1200, 400
+    rgba = np.full((height, width, 4), 0.01, np.float32)
+    rgba[:, :, 3] = 1.0
+    # Two "faces": the left one masked out, the right one half masked
+    rgba[100:200, 100:200, :3] = 0.5
+    rgba[100:200, 900:1000, :3] = 0.5
+    plate = ImageBuffer.fromRGBA(rgba, (width, height))
+    mask = np.zeros((height, width), np.float32)
+    mask[:, 600:960] = 1.0
+    finder = SquareFinder()
+    faces = face.trackFaces(lambda frame: plate, [1], finder, maskAt=lambda frame: mask)
+    landmarks = faces[1]["landmarks"]
+    # The right face (cut by the mask at 960: the finder sees its unmasked part), the left one never seen
+    assert landmarks[:, 0].min() * width >= 900 - 1e-6
+    hidden = faces[1]["hidden"]
+    assert hidden == [i for i in range(face.LANDMARKS) if landmarks[i, 0] * width >= 960]
+    # Stored, and no track key where hidden
+    stored, _ = face.parseFaces(face.dumpFaces(faces, (width, height)))
+    assert stored[1]["hidden"] == hidden
+    tracks = face.landmarkTracks(stored, width, height)
+    assert all(not track["keys"] for i, track in enumerate(tracks) if i in hidden)
+
+
+def test_hiddenLandmarksDoNotMoveTheHead():
+    landmarks = landmarksAt(3)
+    pixels = face.toPixels(landmarks, W, H)
+    wrong = pixels.copy()
+    # Landmarks pulled away (e.g. a hand in front of the face), masked out
+    hidden = RIGID[: len(RIGID) // 3]
+    wrong[hidden] += 40.0
+    geo, head, _, _ = face.solveFace(FACE, wrong, CAMERA, W, H, rigid=RIGID, deform=True, hidden=hidden)
+    np.testing.assert_allclose(head, headAt(3), atol=1e-3)
+    # Their vertices follow the head (not pulled)
+    xy, _, _ = CAMERA.project(geo.vertices[hidden], W, H)
+    np.testing.assert_allclose(xy, pixels[hidden], atol=0.05)

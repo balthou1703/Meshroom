@@ -244,11 +244,12 @@ def resectionGraph(tmp_path):
     return graph, plate, resection
 
 
-def runAction(resection, plate, name, frame):
+def runAction(resection, plate, name, frame, inputPlans=None):
     """ Run an action of the Resection as the interface does (ActionContext), returns its result. """
     values = {attr.name: _snapshotValue(attr) for attr in resection.attributes
               if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
-    context = ActionContext(values, Evaluator(), buildPlan(plate), frame, nodePlan=buildPlan(resection))
+    context = ActionContext(values, Evaluator(), buildPlan(plate), frame, nodePlan=buildPlan(resection),
+                            inputPlans=inputPlans)
     return resection.nodeDesc.runAction(name, context)
 
 
@@ -291,6 +292,53 @@ def test_resectionAlignsTheSilhouetteWithoutKeyframe(tmp_path):
     result = runAction(resection, plate, "alignGeo", 6)
     poses, keyframes = geotrack.parsePoses(result["geoTrack"])
     assert keyframes == [6] and pixelError(poses[6], 6) < 1.5
+
+
+def test_maskedOutPositions():
+    image = renderCube(cameraAt(0))
+    mask = np.ones((H, W), np.float32)
+    mask[:, : W // 2] = 0.0
+    assert not geotrack.maskedOut(image, [[10.0, 10.0], [300.0, 10.0]]).any()
+    geotrack.setMask(image, mask)
+    # Nuke pixels: x from the left; outside the image is masked out
+    assert geotrack.maskedOut(image, [[10.0, 10.0], [300.0, 10.0], [400.0, 10.0]]).tolist() == [True, False, True]
+    geotrack.setMask(image, None)
+    assert not geotrack.maskedOut(image, [[10.0, 10.0]]).any()
+
+
+def test_silhouetteIgnoresTheMaskedOutParts():
+    camera = cameraAt(4)
+    rough = camera.matrix @ scene3d.composeTRS((0.15, -0.1, 0.25), (2, -2, 3))
+    image = renderCube(camera)
+    # An occluder over the left half of the plate, masked out
+    rgba = np.array(image.rgba())
+    rgba[:, : W // 2 - 20, :3] = 0.9
+    occluded = ImageBuffer.fromRGBA(rgba, (W, H))
+    mask = np.ones((H, W), np.float32)
+    mask[:, : W // 2 - 10] = 0.0
+    geotrack.setMask(occluded, mask)
+    matrix, _, _ = geotrack.alignToSilhouette(CUBE, rough, occluded, W, H, camera.focalPixels(W))
+    assert pixelError(matrix, 4) < 2.0
+    geotrack.setMask(occluded, np.zeros((H, W), np.float32))
+    with pytest.raises(geotrack.TrackingLost):
+        geotrack.alignToSilhouette(CUBE, rough, occluded, W, H, camera.focalPixels(W))
+
+
+def test_resectionFollowsTheGeometryInsideItsMask(tmp_path):
+    graph, plate, resection = resectionGraph(tmp_path)
+    # A black constant: everything masked out
+    mask = graph.addNewNode("Constant")
+    graph.addEdge(mask.output, resection.mask)
+    rough = cameraAt(6).matrix.copy()
+    rough[:3, 3] += [0.12, -0.08, 0.2]
+    resection.geoTrack.value = geotrack.dumpPoses({6: rough}, [])
+    graph.update()
+    with pytest.raises(RuntimeError):
+        runAction(resection, plate, "alignGeo", 6, {"mask": buildPlan(mask)})
+    resection.invertMask.value = True
+    graph.update()
+    poses, _ = geotrack.parsePoses(runAction(resection, plate, "alignGeo", 6, {"mask": buildPlan(mask)})["geoTrack"])
+    assert pixelError(poses[6], 6) < 1.5
 
 
 def test_resectionRefinesBetweenKeyframes(tmp_path):
