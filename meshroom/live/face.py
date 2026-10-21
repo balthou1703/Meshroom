@@ -39,18 +39,27 @@ class FaceUnavailable(RuntimeError):
 
 
 def landmarkRegions() -> Dict[int, str]:
-    """ The region of each landmark ({index: "lips"...}) from the connections of MediaPipe, {} without it. """
-    try:
-        from mediapipe.python.solutions import face_mesh_connections as connections
-    except Exception:
-        return {}
-    names = {"lips": "FACEMESH_LIPS", "leftEye": "FACEMESH_LEFT_EYE", "rightEye": "FACEMESH_RIGHT_EYE",
-             "leftEyebrow": "FACEMESH_LEFT_EYEBROW", "rightEyebrow": "FACEMESH_RIGHT_EYEBROW",
-             "leftIris": "FACEMESH_LEFT_IRIS", "rightIris": "FACEMESH_RIGHT_IRIS", "nose": "FACEMESH_NOSE",
-             "faceOval": "FACEMESH_FACE_OVAL"}
+    """
+    The region of each landmark ({index: "lips"...}) from the connections of MediaPipe (its tasks API, or the former
+    solutions API), {} without it.
+    """
     regions = {}
+    try:
+        # MediaPipe tasks (0.10 and later): Connection(start, end)
+        from mediapipe.tasks.python.vision.face_landmarker import FaceLandmarksConnections as connections
+        prefix = "FACE_LANDMARKS_"
+    except Exception:
+        try:
+            from mediapipe.python.solutions import face_mesh_connections as connections
+            prefix = "FACEMESH_"
+        except Exception:
+            return regions
+    names = {"lips": "LIPS", "leftEye": "LEFT_EYE", "rightEye": "RIGHT_EYE", "leftEyebrow": "LEFT_EYEBROW",
+             "rightEyebrow": "RIGHT_EYEBROW", "leftIris": "LEFT_IRIS", "rightIris": "RIGHT_IRIS", "nose": "NOSE",
+             "faceOval": "FACE_OVAL"}
     for region in _REGIONS:
-        for pair in getattr(connections, names[region], ()):
+        for connection in getattr(connections, prefix + names[region], None) or ():
+            pair = (connection.start, connection.end) if hasattr(connection, "start") else connection
             for index in pair:
                 regions.setdefault(int(index), region)
     return regions
