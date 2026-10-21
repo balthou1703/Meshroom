@@ -434,6 +434,106 @@ def alignWithMatches(samples: SurfaceSamples, referenceMatrix: np.ndarray, refer
     return pose, int(inliers.sum()), error
 
 
+def imageEdges(image, bbox=None, threshold: float = 0.2) -> np.ndarray:
+    """
+    The edges of an image over `bbox` (h, w) bool: where its gradient is above `threshold` x its strong gradients
+    (99th percentile), on the luminance compressed like the display (bright areas do not hide the rest).
+    """
+    from .ops import alignToBBox
+    bbox = bbox or image.bbox
+    rgba = alignToBBox(image.rgba(), image.bbox, bbox)
+    lum = 0.2126 * rgba[:, :, 0] + 0.7152 * rgba[:, :, 1] + 0.0722 * rgba[:, :, 2]
+    lum = np.power(np.clip(lum, 0.0, None), 1.0 / 2.2)
+    gradRows, gradColumns = np.gradient(lum.astype(np.float64))
+    magnitude = np.hypot(gradRows, gradColumns)
+    strong = float(np.percentile(magnitude, 99)) if magnitude.size else 0.0
+    return magnitude > max(1e-4, threshold * strong)
+
+
+def _edgeSamples(geo, matrix: np.ndarray, width: int, height: int, focalPixels: float, bbox, creaseDegrees: float,
+                 spacing: float, maxSamples: int):
+    """
+    Points (k, 3) along the visible feature edges of a geometry seen by a camera (silhouettes, creases, open edges;
+    the hidden parts removed), every `spacing` pixels, and their image positions (k, 2).
+    """
+    from . import geoRender
+    camera = scene3d.CameraData(matrix, focalLength=focalPixels / float(width) * 36.0, horizontalAperture=36.0)
+    shape = (bbox.height, bbox.width)
+    u, v, z, inFront = geoRender.screenPositions(geo, camera, width, height, bbox)
+    zbuffer, _ = geoRender.rasterize(u, v, z, geo.triangles(), shape)
+    edges = geoRender.featureEdges(geo, camera.position, creaseDegrees)
+    if len(edges):
+        edges = edges[inFront[edges[:, 0]] & inFront[edges[:, 1]]]
+    if not len(edges):
+        return np.zeros((0, 3)), np.zeros((0, 2))
+    a, b = edges[:, 0], edges[:, 1]
+    lengths = np.maximum(1, np.ceil(np.hypot(u[b] - u[a], v[b] - v[a]) / spacing).astype(np.int64))
+    lengths = np.minimum(lengths, 4 * max(shape))
+    segment = np.repeat(np.arange(len(a)), lengths)
+    firsts = np.r_[0, np.cumsum(lengths)[:-1]]
+    t = ((np.arange(len(segment)) - firsts[segment]) + 0.5) / lengths[segment]
+    points = geo.vertices[a][segment] * (1 - t)[:, None] + geo.vertices[b][segment] * t[:, None]
+    su = u[a][segment] + (u[b] - u[a])[segment] * t
+    sv = v[a][segment] + (v[b] - v[a])[segment] * t
+    sz = z[a][segment] + (z[b] - z[a])[segment] * t
+    h, w = shape
+    inside = (su >= 0) & (su < w) & (sv >= 0) & (sv < h)
+    columns = np.clip(np.floor(su).astype(np.int64), 0, w - 1)
+    rows = np.clip(np.floor(sv).astype(np.int64), 0, h - 1)
+    visible = inside & (sz <= zbuffer[rows, columns] * 1.004 + 1e-9)
+    points, su, sv = points[visible], su[visible], sv[visible]
+    if len(points) > maxSamples:
+        chosen = np.linspace(0, len(points) - 1, maxSamples).astype(np.int64)
+        points, su, sv = points[chosen], su[chosen], sv[chosen]
+    return points, np.c_[su, sv]
+
+
+def alignToSilhouette(geo, matrix: np.ndarray, image, width: int, height: int, focalPixels: float,
+                      iterations: int = 20, maxDistance: float = 80.0, minDistance: float = 3.0,
+                      creaseDegrees: float = 40.0, cancel=None):
+    """
+    Experimental (not used by the nodes yet: it does not converge reliably on textured objects).
+    "Find the right position" without keyframe nor network: the silhouette and the creases of the geometry snapped to
+    the edges of the image (an ICP on the edges): each point along the visible feature edges of the geometry, seen
+    from the current pose, is matched to the nearest edge of the image (a distance transform), within a distance going
+    down from `maxDistance` to `minDistance` pixels, and the pose is solved from these matches (robustly), again and
+    again. Needs a rough pose (the geometry roughly on its place) and an object standing out of its background.
+
+    Returns:
+        (camera-to-world matrix, number of points fitting it, their RMS error in pixels). Raises TrackingLost when the
+        geometry has no visible edge or no image edge is near it.
+    """
+    from scipy import ndimage
+    bbox = image.bbox
+    edges = imageEdges(image, bbox)
+    if not edges.any():
+        raise TrackingLost("the image has no edge")
+    # The nearest edge pixel of every pixel
+    distances, (nearestRows, nearestColumns) = ndimage.distance_transform_edt(~edges, return_indices=True)
+    current = scene3d.toMatrix4(matrix)
+    inliers, error = 0, 0.0
+    for iteration in range(iterations):
+        if cancel:
+            cancel()
+        points, positions = _edgeSamples(geo, current, width, height, focalPixels, bbox, creaseDegrees, 3.0, 3000)
+        if len(points) < 8:
+            raise TrackingLost("the geometry shows no edge in the image: place it roughly first")
+        rows = np.clip(np.floor(positions[:, 1]).astype(np.int64), 0, bbox.height - 1)
+        columns = np.clip(np.floor(positions[:, 0]).astype(np.int64), 0, bbox.width - 1)
+        reach = maxDistance * (minDistance / maxDistance) ** (iteration / max(1, iterations - 1))
+        near = distances[rows, columns] <= reach
+        if near.sum() < 8:
+            if iteration == 0:
+                raise TrackingLost("no edge of the image near the geometry: place it roughly first")
+            break
+        # The nearest edge pixel, in Nuke pixels (format coordinates)
+        targets = np.c_[nearestColumns[rows[near], columns[near]] + 0.5 + bbox.x0,
+                        bbox.y1 - nearestRows[rows[near], columns[near]] - 0.5]
+        current, fitting, error = robustPose(points[near], targets, width, height, focalPixels, current)
+        inliers = int(fitting.sum())
+    return current, inliers, error
+
+
 def blendPoses(forward: Dict[int, np.ndarray], backward: Dict[int, np.ndarray], first: int, last: int) -> Dict[int, np.ndarray]:
     """
     The poses between two keyframes from a track forward from `first` and a track backward from `last`: weighted
