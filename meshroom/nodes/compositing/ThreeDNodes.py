@@ -311,7 +311,7 @@ into keys of a Camera or a ReadGeo.
                              description="Remove the poses tracked with 'Track Geometry' (the pins solve again)."),
         desc.StringParam(name="geoTrack", label="Geometry Track", value="", semantic="geoTrack", advanced=True,
                          description="Poses tracked with 'Track Geometry' and the keyframes (JSON)."),
-        desc.ChoiceParam(name="display", label="Display", value="shaded",
+        desc.ChoiceParam(name="display", label="Display", value="wireframe",
                          values=["shaded", "edges", "wireframe", "points", "none"],
                          description="What is drawn over the plate: shaded (the surface lit from the camera, with its "
                                      "edges), edges (silhouettes, creases and open edges only: the shape of a dense "

@@ -502,9 +502,9 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
 - **ReadGeo** : OBJ, PLY (ascii / binaire), USD, Alembic, FBX (mêmes conditions), échantillons de temps lus à chaque
   frame ; translate / rotate / scale / uniform scale ou « Input Matrix ». **MergeGeo** : jusqu'à 4 géométries.
 - **Affichage de la géométrie** (Resection, « Display », `meshroom/live/geoRender.py`) : shaded (surface éclairée
-  depuis la caméra, avec ses arêtes caractéristiques ; par défaut), edges (silhouettes, arêtes vives au-delà de
+  depuis la caméra, avec ses arêtes caractéristiques), edges (silhouettes, arêtes vives au-delà de
   « Crease Angle », bords ouverts : la forme d'un maillage dense sans le remplir), wireframe (toutes les arêtes des
-  faces), points, none. « Hide Hidden Lines » retire ce qui est derrière la surface (tampon de profondeur : chaque
+  faces ; par défaut), points, none. « Hide Hidden Lines » retire ce qui est derrière la surface (tampon de profondeur : chaque
   pixel prend le triangle le plus proche qui contient son centre, un triangle plus petit qu'un pixel prend le pixel
   de son centre ; sur le GPU avec « Use GPU »). Lignes antialiasées. Les faces d'une géométrie (triangles, arêtes,
   voisinage des arêtes) sont une `Topology` partagée par toutes ses frames (`scene3d.Topology`) : calculées une fois,

@@ -57,7 +57,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                         description="Gaussian smoothing of the landmarks in time, in frames (0: as tracked)."),
         desc.BoolParam(name="deform", label="Non Rigid", value=True,
                        description="The face follows the expressions (mouth, eyes); off: only the rigid head pose."),
-        desc.ChoiceParam(name="display", label="Display", value="edges",
+        desc.ChoiceParam(name="display", label="Display", value="wireframe",
                          values=["shaded", "edges", "wireframe", "points", "landmarks", "none"],
                          description="What is drawn over the plate: the face mesh (shaded, its edges, its wireframe or "
                                      "its vertices), the landmarks, or nothing."),
