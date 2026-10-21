@@ -249,6 +249,7 @@ Item {
     }
 
     MouseArea {
+        id: trackMouse
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
         hoverEnabled: false
@@ -257,6 +258,9 @@ Item {
         property int dragged: -1
         property point startMouse
         property var startPosition: null
+        // Box selection (Ctrl + drag on an empty area): its corners on screen, null when not selecting
+        property var boxStart: null
+        property point boxEnd
 
         onWheel: function(wheel) { wheel.accepted = false }
 
@@ -298,6 +302,14 @@ Item {
             }
             var hit = root.hitTrack(mouse.x, mouse.y)
             if (hit < 0) {
+                if (mouse.modifiers & Qt.ControlModifier) {
+                    // Box selection (added to the selection with Shift)
+                    if (!(mouse.modifiers & Qt.ShiftModifier))
+                        root.selectedNames = []
+                    boxStart = Qt.point(mouse.x, mouse.y)
+                    boxEnd = boxStart
+                    return
+                }
                 if (!(mouse.modifiers & Qt.ShiftModifier))
                     root.selectedNames = []
                 // Let the viewer pan
@@ -316,6 +328,10 @@ Item {
             root.begin()
         }
         onPositionChanged: function(mouse) {
+            if (pressed && boxStart) {
+                boxEnd = Qt.point(mouse.x, mouse.y)
+                return
+            }
             if (!pressed || dragged < 0 || !startPosition)
                 return
             var newTracks = root.copy(root.rawTracks)
@@ -334,16 +350,52 @@ Item {
             root.apply(newTracks)
         }
         onReleased: {
+            if (boxStart) {
+                var x0 = Math.min(boxStart.x, boxEnd.x), x1 = Math.max(boxStart.x, boxEnd.x)
+                var y0 = Math.min(boxStart.y, boxEnd.y), y1 = Math.max(boxStart.y, boxEnd.y)
+                var inside = []
+                root.tracks.forEach(function(t) {
+                    var p = root.position(t, root.frame)
+                    if (p && root.sx(p[0]) >= x0 && root.sx(p[0]) <= x1 && root.sy(p[1]) >= y0 && root.sy(p[1]) <= y1
+                            && !root.isSelected(t.name))
+                        inside.push(t.name)
+                })
+                root.selectedNames = root.selectedNames.concat(inside)
+                boxStart = null
+                return
+            }
             dragged = -1
             root.end()
         }
         onCanceled: {
+            if (boxStart) {
+                boxStart = null
+                return
+            }
             dragged = -1
             root.end()
         }
     }
 
+    // The box being drawn (Ctrl + drag)
+    Rectangle {
+        visible: !!trackMouse.boxStart
+        x: trackMouse.boxStart ? Math.min(trackMouse.boxStart.x, trackMouse.boxEnd.x) : 0
+        y: trackMouse.boxStart ? Math.min(trackMouse.boxStart.y, trackMouse.boxEnd.y) : 0
+        width: trackMouse.boxStart ? Math.abs(trackMouse.boxEnd.x - trackMouse.boxStart.x) : 0
+        height: trackMouse.boxStart ? Math.abs(trackMouse.boxEnd.y - trackMouse.boxStart.y) : 0
+        color: Qt.rgba(0.96, 0.76, 0.42, 0.12)
+        border.color: root.selectedColor
+    }
+
+    function selectAll() { selectedNames = tracks.map(function(t) { return t.name }) }
+
     HoverHandler { id: trackerHover }
+    Shortcut {
+        sequence: StandardKey.SelectAll
+        enabled: root.visible && trackerHover.hovered && !root.tracking
+        onActivated: root.selectAll()
+    }
     Shortcut {
         sequences: ["Delete", "Backspace"]
         enabled: root.visible && trackerHover.hovered && root.selectedNames.length > 0 && !root.tracking
@@ -465,6 +517,21 @@ Item {
                 onClicked: root.adding = !root.adding
                 ToolTip.text: root.pinMode ? "Add a pin: click on the " + (root.geoMode ? "geometry" : "face") + ", then drag the pin onto its place in the plate"
                                            : "Add a track: click on a feature to track"
+            }
+            MaterialToolButton {
+                font.pointSize: 16
+                text: MaterialIcons.select_all
+                enabled: root.tracks.length > 0
+                checked: root.tracks.length > 0 && root.selectedNames.length === root.tracks.length
+                onClicked: checked ? (root.selectedNames = []) : root.selectAll()
+                ToolTip.text: "Select all the " + root.itemName + "s (Ctrl+A), or none. Ctrl + drag: select in a box, " +
+                              "Shift + click: add to the selection. The Track buttons track the selected ones together " +
+                              "(all of them when none is selected)"
+            }
+            Label {
+                text: root.selectedNames.length > 0 ? root.selectedNames.length + "/" + root.tracks.length
+                                                    : (root.tracks.length > 0 ? "all" : "")
+                opacity: 0.7
             }
             MaterialToolButton {
                 font.pointSize: 16
