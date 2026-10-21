@@ -596,3 +596,13 @@ def test_resectionCenterGeometry(tmp_path):
     assert (xy[:, 0] > 0).all() and (xy[:, 0] < 640).all() and (xy[:, 1] > 0).all() and (xy[:, 1] < 360).all()
     center, _, _ = solved.project(np.zeros((1, 3)), 640, 360)
     np.testing.assert_allclose(center[0], [320, 180], atol=1e-6)
+
+
+def test_objectNamesMatchTheirTransform():
+    from meshroom.live.scene3d import _namesMatch
+    assert _namesMatch("/cam_022b_040_base/cam_022b_040_baseShape", "cam_022b_040_base")
+    assert _namesMatch("/cam_022b_040_base/cam_022b_040_baseShape", "cam_022b_040_baseShape")
+    assert _namesMatch("/root/cam_A/cam_AShape", "/root/cam_A")
+    assert _namesMatch("/root/cam_A/cam_AShape", "")
+    assert not _namesMatch("/root/cam_A/cam_AShape", "cam")
+    assert not _namesMatch("/root/cam_A/cam_AShape", "root")

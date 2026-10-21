@@ -668,7 +668,7 @@ class SceneFile:
         self.cameras: "OrderedDict[str, dict]" = OrderedDict()
 
     def geo(self, frame: float, name: str = "") -> GeoData:
-        names = [n for n in self.meshes if not name or n == name or n.endswith("/" + name)]
+        names = [n for n in self.meshes if not name or _namesMatch(n, name)]
         if name and not names:
             raise RuntimeError(f"No geometry '{name}' in the file (geometries: {', '.join(self.meshes) or 'none'}).")
         geos = []
@@ -684,13 +684,27 @@ class SceneFile:
         return GeoData.merged(geos)
 
     def camera(self, frame: float, name: str = "") -> CameraData:
-        names = [n for n in self.cameras if not name or n == name or n.endswith("/" + name)]
+        names = [n for n in self.cameras if not name or _namesMatch(n, name)]
         if not names:
-            raise RuntimeError(f"No camera '{name}' in the file." if name else "No camera in the file.")
+            raise RuntimeError(f"No camera '{name}' in the file (cameras: {', '.join(self.cameras) or 'none'})."
+                               if name else "No camera in the file.")
         camera = self.cameras[names[0]]
         values = {key: sampleAt(camera.get(key), frame) for key in
                   ("matrix", "focalLength", "horizontalAperture", "verticalAperture", "near", "far")}
         return CameraData(name=names[0], **{key: value for key, value in values.items() if value is not None})
+
+
+def _namesMatch(fullName: str, name: str) -> bool:
+    """
+    Whether an object of a file (its full path, e.g. /cam_A/cam_AShape) is the one named `name`: its path, the end of
+    it, or its parent transform (in Alembic, Maya and FBX files the shape is under a transform of the name seen in
+    the 3D software: /cam_A/cam_AShape is "cam_A").
+    """
+    parts = [part for part in fullName.split("/") if part]
+    wanted = [part for part in name.split("/") if part]
+    if not wanted:
+        return True
+    return parts[-len(wanted):] == wanted or (len(parts) > len(wanted) and parts[-len(wanted) - 1:-1] == wanted)
 
 
 def sampleAt(samples, frame: float):
