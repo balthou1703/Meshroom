@@ -475,3 +475,81 @@ def test_deletePosesOfTheGeometryTrack():
     assert sorted(geotrack.parsePoses(tracked)[0]) == [2, 6]
     backward, removed = geotrack.deletePoses(text, 4, "backward")
     assert min(geotrack.parsePoses(backward)[0]) == 4 and removed == 4
+
+
+# Deformation by the optical flow
+
+def _planeGeo(size=21):
+    """ A square grid of 2 x 2 units at z = 0, facing +Z. """
+    u, v = np.meshgrid(np.linspace(-1, 1, size), np.linspace(-1, 1, size))
+    vertices = np.c_[u.ravel(), v.ravel(), np.zeros(size * size)]
+    faces = [[r * size + c, r * size + c + 1, (r + 1) * size + c + 1, (r + 1) * size + c]
+             for r in range(size - 1) for c in range(size - 1)]
+    return scene3d.GeoData(vertices, [4] * len(faces), np.array(faces).ravel())
+
+
+def _bulge(x, y, frame):
+    """ The true motion (pixels) of the plate at frame: a bump pushed to the right around the image center. """
+    return 0.8 * frame * np.exp(-((x - W / 2.0) ** 2 + (y - H / 2.0) ** 2) / (2 * 30.0 ** 2))
+
+
+def _warpedPlate(frame):
+    rows, columns = np.mgrid[0:H, 0:W]
+    x, y = columns + 0.5, H - rows - 0.5
+    # A point seen at x was at x - motion: the texture moved with the bump
+    sx = x - _bulge(x, y, frame)
+    lum = 0.5 + 0.12 * (np.sin(0.21 * sx + 0.13 * y) + np.sin(0.17 * y - 0.09 * sx) + np.sin(0.31 * sx) * np.sin(0.27 * y))
+    lum = lum.astype(np.float32)
+    return ImageBuffer.fromRGBA(np.stack([lum, lum, lum, np.ones_like(lum)], -1), (W, H))
+
+
+def test_geometryDeformsWithTheFlow():
+    plane = _planeGeo()
+    camera = scene3d.CameraData(scene3d.lookAt((0, 0, 3.0), (0, 0, 0)), 35, 36, 24)
+    focal = camera.focalPixels(W)
+    deform, reason = geotrack.trackDeformation(plane, geotrack.TrackSettings("flow"), list(range(0, 9)), _warpedPlate,
+                                               lambda frame: camera.matrix, W, H, focal, {})
+    assert reason == "" and sorted(deform["frames"]) == list(range(9))
+    controls = plane.vertices[deform["indices"]]
+    xy, _ = geotrack.projectPoints(camera.matrix, controls, W, H, focal)
+    truth = _bulge(xy[:, 0], xy[:, 1], 8)
+    offsets = deform["frames"][8]
+    inside = (xy[:, 0] > 20) & (xy[:, 0] < W - 20) & (xy[:, 1] > 20) & (xy[:, 1] < H - 20)
+    assert np.abs(offsets[inside, 0] - truth[inside]).max() < 1.5 and np.abs(offsets[inside, 1]).max() < 1.0
+    assert truth[inside].max() > 5.0
+    # Stored, and every vertex moved smoothly with the controls (the bump center moved, the borders did not)
+    stored = geotrack.parseDeform(geotrack.dumpDeform(deform))
+    weights = geotrack.DeformWeights(plane, stored["indices"], stored["radius"])
+    moved = geotrack.deformVertices(plane.vertices, camera.matrix, W, H, focal, weights.shifts(stored["frames"][8]))
+    before, _ = geotrack.projectPoints(camera.matrix, plane.vertices, W, H, focal)
+    after, _ = geotrack.projectPoints(camera.matrix, moved, W, H, focal)
+    center = np.argmin(np.hypot(before[:, 0] - W / 2.0, before[:, 1] - H / 2.0))
+    assert abs(after[center, 0] - before[center, 0] - _bulge(W / 2.0, H / 2.0, 8)) < 1.5
+    np.testing.assert_allclose(moved[:, 2], 0.0, atol=1e-9)
+
+
+def test_resectionDeformsWithTheFlow(tmp_path):
+    graph, plate, resection = resectionGraph(tmp_path)
+    resection.geoTrack.value = runAction(resection, plate, "trackGeoForward", 0)["geoTrack"]
+    resection.limitTrackRange.value = True
+    resection.trackFirst.value, resection.trackLast.value = 0, 6
+    graph.update()
+    result = runAction(resection, plate, "deformForward", 0)
+    deform = geotrack.parseDeform(result["geoDeform"])
+    # A rigid cube: the flow leaves it (nearly) as it is
+    assert sorted(deform["frames"]) == list(range(7)) and len(deform["indices"]) == 8
+    assert np.abs(deform["frames"][6]).max() < 3.0
+    resection.geoDeform.value = result["geoDeform"]
+    graph.update()
+    plan = buildPlan(resection)
+    geo = Evaluator().data(plan, plan.target, "geoOutput", 6)
+    assert len(geo.vertices) == 8 and np.abs(geo.vertices - _CUBE).max() < 0.1
+    assert runAction(resection, plate, "clearDeform", 0) == {"geoDeform": ""}
+
+
+def test_deleteDeformFrames():
+    deform = {"indices": np.array([0, 1]), "radius": 1.0, "frames": {f: np.full((2, 2), f, float) for f in range(1, 6)}}
+    text, removed = geotrack.deleteDeform(geotrack.dumpDeform(deform), 3, "forward")
+    assert removed == 2 and sorted(geotrack.parseDeform(text)["frames"]) == [1, 2, 3]
+    text, removed = geotrack.deleteDeform(text, 2, "backward")
+    assert removed == 1 and sorted(geotrack.parseDeform(text)["frames"]) == [2, 3]

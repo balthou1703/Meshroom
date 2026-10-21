@@ -852,6 +852,10 @@ class LiveController(QObject):
                 text, removed = geotrack.deletePoses(node.attribute("geoTrack").value, self._currentFrame, mode)
                 if removed:
                     changes.append((node.attribute("geoTrack"), text))
+            if mode in ("forward", "backward") and node.hasAttribute("geoDeform") and node.attribute("geoDeform").value:
+                text, removed = geotrack.deleteDeform(node.attribute("geoDeform").value, self._currentFrame, mode)
+                if removed:
+                    changes.append((node.attribute("geoDeform"), text))
         except (ValueError, RuntimeError) as e:
             self._setError(f"Delete keys: {e}", node.name)
             return

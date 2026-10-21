@@ -669,6 +669,35 @@ Item {
                 onClicked: root.live.runAction(root.node, "clearGeoTrack")
                 ToolTip.text: "Clear the geometry track (the pins solve again)"
             }
+            // Resection: the geometry deformed by the optical flow (non rigid)
+            Rectangle { visible: root.geoMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
+            MaterialToolButton {
+                visible: root.geoMode
+                font.pointSize: 16
+                text: MaterialIcons.west
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
+                onClicked: root.live.runAction(root.node, "deformBackward")
+                ToolTip.text: "Deform With Flow backward: the geometry follows the optical flow of the plate (non rigid), " +
+                              "from the current frame back to the start of the track range"
+            }
+            MaterialToolButton {
+                visible: root.geoMode
+                font.pointSize: 16
+                text: MaterialIcons.waves
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
+                onClicked: root.live.runAction(root.node, "deformForward")
+                ToolTip.text: "Deform With Flow forward: the geometry follows the optical flow of the plate (non rigid), " +
+                              "from the current frame to the end of the track range"
+            }
+            MaterialToolButton {
+                visible: root.geoMode
+                font.pointSize: 16
+                text: MaterialIcons.blur_off
+                enabled: !root.tracking && !!root.live && root.live.actionProgress < 0 && root.node.hasAttribute("geoDeform")
+                         && root.node.attribute("geoDeform").value !== ""
+                onClicked: root.live.runAction(root.node, "clearDeform")
+                ToolTip.text: "Clear the deformation (the rigid geometry)"
+            }
             // Pins of the Resection at this frame and their reprojection error
             Label {
                 visible: root.geoMode

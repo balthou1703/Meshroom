@@ -544,6 +544,14 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   actions ; canal et inversion comme les autres masques) : Track Geometry, Align et Refine ne suivent que les points
   dans sa partie blanche (`geotrack.setMask` / `maskedOut` : un objet qui passe devant ou une partie qui bouge, son
   roto inversé).
+- **Deform With Flow** (Resection, non rigide, `geotrack.trackDeformation`) : depuis la frame courante jusqu'au bout
+  de la plage de tracking (avant / arrière), des sommets de contrôle répartis sur la géométrie (« Deform Points »,
+  400) suivent le flot optique de la plaque (Lucas-Kanade, ou RAFT avec « Track Geometry With » : raft) à partir de
+  la pose rigide ; un sommet caché par la géométrie ou masqué garde son décalage. Leurs décalages (pixels, par
+  rapport à la pose rigide) sont gardés dans « Geometry Deformation » ; chaque sommet suit ses contrôles voisins
+  (gaussiennes normalisées, `DeformWeights`) dans l'image, à sa profondeur. Sortie « Geo » : la géométrie déformée
+  (celle de l'entrée sans déformation), affichée par le viewer ; « Clear Deformation » la retire ; les boutons de
+  suppression avant / arrière retirent aussi ses frames.
 - **Disconnect and Bake** (clic droit sur un edge) : l'edge est retiré et l'entrée garde ce qu'elle recevait. Un
   paramètre garde la valeur de sa source, et ses clés si elle est animée (pour un enfant, x d'une valeur 2D : les
   clés du groupe). Une entrée caméra ou matrice devient des clés des paramètres du nœud sur la plage de la timeline

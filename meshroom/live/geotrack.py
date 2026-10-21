@@ -748,3 +748,191 @@ def deletePoses(text: str, frame: int, mode: str) -> Tuple[str, int]:
     for f in removed:
         del poses[f]
     return dumpPoses(poses, keyframes), len(removed)
+
+
+# Deformation of the geometry by the optical flow ("Deform With Flow" of a Resection): control vertices of the geometry
+# follow the flow of the plate, frame after frame; their offsets (pixels, from where the rigid pose puts them) move every
+# vertex in the image, at its depth. Stored as {"indices": [control vertices], "radius": r, "frames": {"f": [dx, dy...]}}
+
+def deformControls(geo, count: int = 400) -> np.ndarray:
+    """ About `count` vertices spread over a geometry (the first one of each cell of a grid): the control vertices. """
+    vertices = np.asarray(geo.vertices, dtype=np.float64)
+    if len(vertices) <= count:
+        return np.arange(len(vertices))
+    low, high = vertices.min(axis=0), vertices.max(axis=0)
+    extent = np.maximum(high - low, 1e-9)
+    # Cells of a grid sized for about `count` occupied cells (a surface fills about the square of the cells per axis)
+    cell = float(np.sqrt(np.prod(np.sort(extent)[1:]) / count)) if np.sort(extent)[1] > 1e-6 else float(extent.max() / count)
+    for _ in range(12):
+        keys = np.floor((vertices - low) / max(cell, 1e-12)).astype(np.int64)
+        _, first = np.unique(keys, axis=0, return_index=True)
+        if len(first) > 1.5 * count:
+            cell *= 1.3
+        elif len(first) < 0.6 * count:
+            cell /= 1.3
+        else:
+            break
+    return np.sort(first)
+
+
+def deformRadius(geo, indices: np.ndarray) -> float:
+    """ The reach of each control vertex: twice the typical distance between neighboring controls. """
+    from scipy.spatial import cKDTree
+    points = np.asarray(geo.vertices, dtype=np.float64)[indices]
+    if len(points) < 2:
+        return 1.0
+    distances, _ = cKDTree(points).query(points, k=2)
+    return max(2.0 * float(np.median(distances[:, 1])), 1e-6)
+
+
+class DeformWeights:
+    """ How each vertex follows the control vertices: gaussian weights of its nearest controls (in the rest shape). """
+
+    def __init__(self, geo, indices: np.ndarray, radius: float, neighbors: int = 8):
+        from scipy.spatial import cKDTree
+        vertices = np.asarray(geo.vertices, dtype=np.float64)
+        controls = vertices[np.asarray(indices, dtype=np.int64)]
+        k = min(neighbors, len(controls))
+        distances, self.nearest = cKDTree(controls).query(vertices, k=k)
+        distances, self.nearest = distances.reshape(len(vertices), k), self.nearest.reshape(len(vertices), k)
+        weights = np.exp(-(distances / max(radius, 1e-9)) ** 2)
+        # Normalized (a vertex far from every control follows the nearest ones)
+        weights[:, 0] = np.maximum(weights[:, 0], 1e-12)
+        self.weights = weights / weights.sum(axis=1, keepdims=True)
+
+    def shifts(self, offsets: np.ndarray) -> np.ndarray:
+        """ The shift (n, 2) of every vertex for the offsets (k, 2) of the controls. """
+        return (np.asarray(offsets, dtype=np.float64)[self.nearest] * self.weights[:, :, None]).sum(axis=1)
+
+
+def deformVertices(vertices: np.ndarray, matrix: np.ndarray, width: int, height: int, focalPixels: float,
+                   shifts: np.ndarray) -> np.ndarray:
+    """ World vertices moved in the image of the camera (camera-to-world `matrix`) by `shifts` (n, 2) pixels, each
+    at its depth. """
+    view = np.linalg.inv(matrix)
+    inCamera = vertices @ view[:3, :3].T + view[:3, 3]
+    depth = -inCamera[:, 2]
+    front = depth > 1e-9
+    xy = np.c_[focalPixels * inCamera[:, 0] / np.where(front, depth, 1.0),
+               focalPixels * inCamera[:, 1] / np.where(front, depth, 1.0)] + shifts
+    moved = inCamera.copy()
+    moved[front] = np.c_[xy[front] / focalPixels, -np.ones(int(front.sum()))] * depth[front, None]
+    return moved @ matrix[:3, :3].T + matrix[:3, 3]
+
+
+def parseDeform(text: str) -> dict:
+    """ {"indices": array, "radius": float, "frames": {frame: offsets (k, 2)}} of a stored deformation ({} if none). """
+    import json
+    if not text or not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+        indices = np.array(data["indices"], dtype=np.int64)
+        frames = {int(frame): np.array(values, dtype=np.float64).reshape(-1, 2)
+                  for frame, values in (data.get("frames") or {}).items()}
+        return {"indices": indices, "radius": float(data.get("radius", 1.0)), "frames": frames}
+    except (TypeError, ValueError, KeyError, AttributeError) as e:
+        raise ValueError(f"Invalid geometry deformation: {e}") from e
+
+
+def dumpDeform(deform: dict) -> str:
+    import json
+    if not deform or not deform.get("frames"):
+        return ""
+    return json.dumps({"indices": [int(i) for i in deform["indices"]], "radius": round(float(deform["radius"]), 9),
+                       "frames": {str(frame): [round(float(v), 2) for v in np.asarray(offsets).ravel()]
+                                  for frame, offsets in sorted(deform["frames"].items())}})
+
+
+def deformOffsetsAt(deform: dict, frame: int) -> Optional[np.ndarray]:
+    """ The offsets of the controls at a frame: its own, else held from the nearest deformed frame; None without. """
+    frames = deform.get("frames") or {}
+    if not frames:
+        return None
+    if frame in frames:
+        return frames[frame]
+    return frames[min(frames, key=lambda f: (abs(f - frame), f))]
+
+
+def trackDeformation(geo, settings: TrackSettings, frames: List[int], imageAt: Callable, poseAt: Callable,
+                     width: int, height: int, focalPixels: float, deform: dict, cancel=None,
+                     progress: Optional[Callable[[int, int], None]] = None,
+                     onFrame: Optional[Callable[[int, np.ndarray], None]] = None) -> Tuple[dict, str]:
+    """
+    Deform the geometry with the optical flow of the plate through `frames` (consecutive, forward or backward), from
+    its deformation at the first one (none: the rigid geometry). Each visible control vertex (not hidden by the
+    geometry nor masked out) moves with the flow (Lucas-Kanade or RAFT: `settings.method`); a hidden one keeps its
+    offset. `poseAt(frame)`: the camera-to-world matrix (the rigid pose) at a frame.
+
+    Returns:
+        (the deformation {"indices", "radius", "frames"} with the new frames, why it stopped ("" at the end)).
+    """
+    from . import geoRender
+    from .evaluator import EvaluationCancelled, EvaluationError
+    from .flow import computeFlow, sampleRows
+    if not deform:
+        indices = deformControls(geo)
+        deform = {"indices": indices, "radius": deformRadius(geo, indices), "frames": {}}
+    indices = deform["indices"]
+    controls = np.asarray(geo.vertices, dtype=np.float64)[indices]
+    weights = DeformWeights(geo, indices, deform["radius"])
+    offsets = deformOffsetsAt(deform, frames[0]) if frames[0] in deform["frames"] else np.zeros((len(indices), 2))
+    deform["frames"][frames[0]] = offsets
+    method = "raft" if settings.method == "raft" else "lucasKanade"
+    try:
+        imageA = imageAt(frames[0])
+    except (EvaluationCancelled, EvaluationError) as e:
+        return deform, getattr(e, "message", "") or "cancelled"
+    for index, frame in enumerate(frames[1:], start=1):
+        try:
+            if cancel:
+                cancel()
+            imageB = imageAt(frame)
+            matrixA, matrixB = poseAt(frames[index - 1]), poseAt(frame)
+            rigidA, depthA = projectPoints(matrixA, controls, width, height, focalPixels)
+            positionsA = rigidA + offsets
+            # Visible at A: in front, in the image, not hidden by the (deformed) geometry, not masked out
+            vertices = deformVertices(geo.vertices, matrixA, width, height, focalPixels, weights.shifts(offsets))
+            camera = scene3d.CameraData(matrixA, focalLength=focalPixels / float(width) * 36.0, horizontalAperture=36.0)
+            bbox = imageA.bbox
+            u, v, z, _ = geoRender.screenPositions(scene3d.GeoData(vertices, topology=geo.topology), camera, width,
+                                                   height, bbox)
+            zbuffer, _ = geoRender.rasterize(u, v, z, geo.triangles(), (bbox.height, bbox.width))
+            columns, rows = np.floor(u[indices]).astype(np.int64), np.floor(v[indices]).astype(np.int64)
+            inside = (columns >= 0) & (columns < bbox.width) & (rows >= 0) & (rows < bbox.height) & (depthA > 0)
+            visible = inside.copy()
+            visible[inside] = z[indices][inside] <= zbuffer[rows[inside], columns[inside]] * 1.01 + 1e-9
+            visible &= ~maskedOut(imageA, positionsA)
+            field = computeFlow(imageA, imageB, cancel=cancel, useGpu=settings.device is not None, method=method)
+            motion = sampleRows(field, (bbox.y1 - positionsA[:, 1] - 0.5).astype(np.float32),
+                                (positionsA[:, 0] - bbox.x0 - 0.5).astype(np.float32)).astype(np.float64)
+            rigidB, _ = projectPoints(matrixB, controls, width, height, focalPixels)
+            # Moved with the flow (visible), else kept where the rigid motion and their offset put them
+            updated = offsets.copy()
+            updated[visible] = positionsA[visible] + motion[visible] - rigidB[visible]
+            visibleB = ~maskedOut(imageB, rigidB + updated)
+            updated[~visibleB] = offsets[~visibleB]
+            offsets = updated
+        except EvaluationCancelled:
+            return deform, "cancelled"
+        except EvaluationError as e:
+            return deform, f"frame {frame}: {e.message}"
+        deform["frames"][frame] = offsets
+        if onFrame:
+            onFrame(frame, offsets)
+        if progress:
+            progress(index, len(frames) - 1)
+        imageA = imageB
+    return deform, ""
+
+
+def deleteDeform(text: str, frame: int, mode: str) -> Tuple[str, int]:
+    """ The deformation (dumpDeform JSON) without its frames after ("forward") or before ("backward") `frame`, and the
+    number removed. """
+    deform = parseDeform(text)
+    if not deform:
+        return text, 0
+    removed = [f for f in deform["frames"] if (f > frame if mode == "forward" else f < frame)]
+    for f in removed:
+        del deform["frames"][f]
+    return dumpDeform(deform), len(removed)

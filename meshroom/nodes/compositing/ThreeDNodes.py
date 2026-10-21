@@ -325,6 +325,22 @@ into keys of a Camera or a ReadGeo.
                              description="Remove the poses tracked with 'Track Geometry' (the pins solve again)."),
         desc.StringParam(name="geoTrack", label="Geometry Track", value="", semantic="geoTrack", advanced=True,
                          description="Poses tracked with 'Track Geometry' and the keyframes (JSON)."),
+        desc.PushButtonParam(name="deformBackward", label="Deform With Flow Backward", semantic="liveAction",
+                             description="Deform the geometry with the optical flow of the plate (non rigid), from the "
+                                         "current frame back to the start of the track range."),
+        desc.PushButtonParam(name="deformForward", label="Deform With Flow Forward", semantic="liveAction",
+                             description="Deform the geometry with the optical flow of the plate (non rigid), from the "
+                                         "current frame to the end of the track range."),
+        desc.PushButtonParam(name="clearDeform", label="Clear Deformation", semantic="liveAction",
+                             description="Remove the deformation (the rigid geometry)."),
+        desc.IntParam(name="deformPoints", label="Deform Points", value=400, range=(20, 5000, 10), invalidate=False,
+                      advanced=True,
+                      description="Number of vertices of the geometry following the flow ('Deform With Flow'): the "
+                                  "others follow them smoothly. More: finer deformations, more noise. Taken at the "
+                                  "first deformation (Clear Deformation to change it)."),
+        desc.StringParam(name="geoDeform", label="Geometry Deformation", value="", semantic="geoDeform", advanced=True,
+                         description="The deformation by 'Deform With Flow' (JSON: control vertices and their offsets "
+                                     "in pixels at each frame)."),
         desc.ChoiceParam(name="display", label="Display", value="wireframe",
                          values=["shaded", "edges", "wireframe", "points", "none"],
                          description="What is drawn over the plate: shaded (the surface lit from the camera, with its "
@@ -346,6 +362,9 @@ into keys of a Camera or a ReadGeo.
         desc.Matrix(name="cameraMatrix", label="Camera Matrix", description="Transform of the solved camera."),
         desc.Matrix(name="geoMatrix", label="Geo Matrix",
                     description="Transform of the geometry matching the plate, seen from the input camera."),
+        desc.Geo(name="geoOutput", label="Geo",
+                 description="The geometry deformed by 'Deform With Flow' (in the world of the input geometry, seen by "
+                             "'Camera'); the input geometry when it is not deformed."),
         desc.Image(name="output", label="Output", description="The plate, with the geometry and the pins drawn over it."),
     ]
 
@@ -429,6 +448,8 @@ into keys of a Camera or a ReadGeo.
         if outputName == "geoMatrix":
             solved = ctx.ownData("cameraOutput", ctx.frame)
             return self.inputCamera(ctx).matrix @ np.linalg.inv(solved.matrix)
+        if outputName == "geoOutput":
+            return self.deformedGeo(ctx)
         if outputName != "cameraOutput":
             return super().computeData(ctx, outputName)
         info = ctx.inputInfo("input")
@@ -490,9 +511,30 @@ into keys of a Camera or a ReadGeo.
         """ Geometry tracking actions (see the documentation): returns {"geoTrack": the new poses}. """
         if name == "clearGeoTrack":
             return {"geoTrack": ""}
-        if name not in ("trackGeoForward", "trackGeoBackward", "alignGeo", "refineGeo"):
+        if name == "clearDeform":
+            return {"geoDeform": ""}
+        if name not in ("trackGeoForward", "trackGeoBackward", "alignGeo", "refineGeo", "deformForward", "deformBackward"):
             raise RuntimeError(f"Unknown action: {name}")
         return _GeoTrackAction(self, context).run(name)
+
+    def deformedGeo(self, ctx):
+        """ The input geometry deformed by "Deform With Flow" at the frame (seen from the solved camera). """
+        from meshroom.live import geotrack
+        geo = ctx.inputData("geo")
+        try:
+            deform = geotrack.parseDeform(ctx.value("geoDeform"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        info = ctx.inputInfo("input")
+        offsets = geotrack.deformOffsetsAt(deform, ctx.frame) if deform else None
+        if geo is None or geo.isEmpty or offsets is None or info is None or len(deform["indices"]) != len(offsets) \
+                or int(deform["indices"].max()) >= len(geo.vertices):
+            return geo
+        camera = ctx.ownData("cameraOutput", ctx.frame)
+        weights = geotrack.DeformWeights(geo, deform["indices"], deform["radius"])
+        vertices = geotrack.deformVertices(geo.vertices, camera.matrix, info.width, info.height,
+                                           camera.focalPixels(info.width), weights.shifts(offsets))
+        return scene3d.GeoData(vertices, name=geo.name, topology=geo.topology)
 
     def reprojectionError(self, ctx) -> float:
         """ RMS distance in pixels between the pins and their points seen from the solved camera, at the frame. """
@@ -518,7 +560,7 @@ into keys of a Camera or a ReadGeo.
 
     def render(self, ctx, inputs):
         image = inputs["input"]
-        geo = ctx.inputData("geo")
+        geo = ctx.ownData("geoOutput", ctx.frame)
         camera = ctx.ownData("cameraOutput", ctx.frame)
         from meshroom.live import geoRender
         rgba = np.array(image.rgba(), dtype=np.float32)
@@ -672,9 +714,47 @@ class _GeoTrackAction:
                                              cancel=self.context.checkCancelled, progress=progress, onPose=onPose)
         return tracked, reason
 
+    def deform(self, name):
+        """ "Deform With Flow" forward / backward from the current frame to the end of the track range. """
+        import time
+        from meshroom.live import geotrack
+        frame, frames = self.context.currentFrame, self.context.frames
+        if frame not in frames:
+            raise RuntimeError("The current frame is outside the track range (Limit Track Range).")
+        sequence = [f for f in frames if f >= frame] if name == "deformForward" else [f for f in frames if f <= frame][::-1]
+        if len(sequence) < 2:
+            raise RuntimeError("Nothing to deform: the current frame is the end of the plate (or of the track range).")
+        try:
+            deform = geotrack.parseDeform(self.context.value("geoDeform"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        if deform and (len(deform["indices"]) == 0 or int(deform["indices"].max()) >= len(self.geo.vertices)):
+            deform = {}  # Made on another geometry
+        if not deform:
+            indices = geotrack.deformControls(self.geo, self.context.value("deformPoints"))
+            deform = {"indices": indices, "radius": geotrack.deformRadius(self.geo, indices), "frames": {}}
+        lastPublish = [0.0]
+
+        def onFrame(f, offsets):
+            now = time.monotonic()
+            if now - lastPublish[0] >= 0.25:
+                lastPublish[0] = now
+                self.context.publish({"geoDeform": geotrack.dumpDeform(deform)}, f)
+        deform, reason = geotrack.trackDeformation(
+            self.geo, self.settings, sequence, self.imageAt, self.poseAt, self.info.width, self.info.height,
+            self.focalPixels, deform, cancel=self.context.checkCancelled, onFrame=onFrame,
+            progress=lambda i, n: self.context.progress(i / float(n), "Deform With Flow"))
+        result = {"geoDeform": geotrack.dumpDeform(deform)}
+        if reason and reason != "cancelled":
+            self.context.publish(result, None)
+            raise RuntimeError(f"Stopped: {reason}. The frames deformed so far are kept.")
+        return result
+
     def run(self, name):
         frame = self.context.currentFrame
         frames = self.context.frames
+        if name in ("deformForward", "deformBackward"):
+            return self.deform(name)
         if name in ("trackGeoForward", "trackGeoBackward"):
             if frame not in frames:
                 raise RuntimeError("The current frame is outside the track range (Limit Track Range).")
