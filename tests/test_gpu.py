@@ -322,3 +322,38 @@ def test_gpuDepthBuffer(torchCpu):
     assert (np.isfinite(zCpu) == np.isfinite(zGpu)).mean() > 0.999
     both = np.isfinite(zCpu) & np.isfinite(zGpu)
     np.testing.assert_allclose(zGpu[both], zCpu[both], rtol=1e-5)
+
+
+def test_aGpuTooOldForPyTorchIsNotUsed(monkeypatch):
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 1
+
+        @staticmethod
+        def get_device_capability(index):
+            return (5, 2)
+
+        @staticmethod
+        def get_device_name(index):
+            return "Quadro M4000"
+
+        @staticmethod
+        def get_arch_list():
+            return ["sm_70", "sm_75", "sm_80", "sm_86", "compute_86"]
+
+    class FakeTorch:
+        cuda = FakeCuda
+
+        @staticmethod
+        def device(*args):
+            return args
+
+    monkeypatch.delenv("MESHROOM_GPU", raising=False)
+    monkeypatch.setattr(gpu, "torchModule", lambda: FakeTorch)
+    assert gpu.device(True) is None
+    assert "Quadro M4000" in gpu.status() and "5.2" in gpu.status()

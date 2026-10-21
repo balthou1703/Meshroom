@@ -47,13 +47,49 @@ def _detect():
             except ValueError:
                 index = 0
             index = min(max(index, 0), torch.cuda.device_count() - 1)
-            return torch.device("cuda", index), ""
+            device = torch.device("cuda", index)
+            reason = _unsupportedReason(torch, index)
+            if reason:
+                return None, reason
+            return device, ""
         mps = getattr(torch.backends, "mps", None)
         if mps is not None and mps.is_available():
             return torch.device("mps"), ""
     except Exception as e:
         return None, f"the GPU cannot be used ({e})"
     return None, "no CUDA (or MPS) GPU"
+
+
+def _unsupportedReason(torch, index: int) -> str:
+    """
+    Why PyTorch cannot compute on the CUDA device `index` ("" if it can): a GPU too old (or too new) for the
+    architectures this PyTorch was built for (it is seen, but no kernel runs on it), checked with a small computation.
+    """
+    try:
+        major, minor = torch.cuda.get_device_capability(index)
+        name = torch.cuda.get_device_name(index)
+        arches = list(torch.cuda.get_arch_list() or [])
+    except Exception as e:
+        return f"the GPU cannot be queried ({e})"
+    capability = major * 10 + minor
+
+    def runs(arch):
+        # sm_XY: compiled for that architecture (runs on the same major version); compute_XY: compiled on the fly
+        kind, _, number = arch.partition("_")
+        if not number.isdigit():
+            return False
+        value = int(number)
+        if kind == "sm":
+            return value // 10 == major and value % 10 <= minor
+        return kind == "compute" and value <= capability
+    if arches and not any(runs(arch) for arch in arches):
+        return (f"{name} (CUDA capability {major}.{minor}) is not supported by this PyTorch (built for "
+                f"{', '.join(arches)})")
+    try:
+        (torch.ones(4, device=torch.device("cuda", index)) * 2).sum().item()
+    except Exception as e:
+        return f"{name} cannot run PyTorch ({e})"
+    return ""
 
 
 def availableDevice():
