@@ -18,8 +18,9 @@ class FaceTracker(desc.ImageOpNode):
     documentation = """
 Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools FaceTracker.
 
-- "Track Face": MediaPipe Face Landmarker finds the 478 landmarks of the face at every frame of the plate (it follows
-  the face from frame to frame), with 52 expression coefficients. They are stored in the node.
+- "Track Face": MediaPipe Face Landmarker finds the 478 landmarks of the face at every frame of the plate, with 52
+  expression coefficients (it looks around the face of the previous frame, else in the whole frame, then in tiles:
+  a small face in a large plate is found; dark frames are brightened). They are stored in the node.
 - The face mesh is then fitted at each frame: the head pose from the landmarks that move little with the expressions
   (forehead, nose bridge, eye corners, temples), then, with "Non Rigid", every vertex moved at its depth onto its
   landmark: the lips and the eyelids follow.

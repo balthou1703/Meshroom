@@ -2,9 +2,10 @@
 Face tracking (the FaceTracker node): the landmarks of a face found at each frame by MediaPipe Face Landmarker
 (Google, Apache-2.0: 478 points, 52 expression coefficients), then a face mesh fitted on them, non rigid.
 
-- `trackFaces` runs the landmarker through frames (video mode: it follows the face from frame to frame) and keeps,
-  for each frame, the landmarks (normalized: x, y in [0, 1] from the top left corner, z the relative depth) and the
-  expression coefficients ("blendshapes").
+- `trackFaces` runs the landmarker through frames and keeps, for each frame, the landmarks (normalized: x, y in [0, 1] from the top left corner, z the relative depth) and the
+  expression coefficients ("blendshapes"). The landmarker sees the face in a crop around where it was at the previous
+  frame (a small face in a large plate is found as well as a close-up), else in the whole frame, else in tiles; each
+  crop is brightened when dark.
 - `solveFace` fits a face mesh whose vertex i is the landmark i (the MediaPipe face topology: 468 vertices, or 478
   with the irises): the head pose from the landmarks that move little with the expressions (forehead, nose bridge,
   eye corners, temples), then every vertex moved, at its depth, onto the ray of its landmark: the mouth and the
@@ -38,12 +39,48 @@ class FaceUnavailable(RuntimeError):
     """ The face landmarker cannot be used: MediaPipe or its model is missing. """
 
 
+def importMediaPipe():
+    """
+    The mediapipe module, or FaceUnavailable. `import mediapipe` also loads its drawing utilities, which need
+    matplotlib and OpenCV, not used here: when they are not installed, stand-ins are given to that import only.
+    """
+    import importlib
+    import sys
+    import types
+    stubs = []
+    try:
+        for _ in range(4):
+            try:
+                return importlib.import_module("mediapipe")
+            except ModuleNotFoundError as e:
+                missing = (e.name or "").split(".")[0]
+                if missing not in ("matplotlib", "cv2") or missing in stubs:
+                    raise
+                # The stand-in module (and matplotlib.pyplot), removed once mediapipe is imported
+                stubs.append(missing)
+                sys.modules[missing] = types.ModuleType(missing)
+                if missing == "matplotlib":
+                    sys.modules["matplotlib.pyplot"] = sys.modules["matplotlib"].pyplot = types.ModuleType("matplotlib.pyplot")
+        raise ImportError("mediapipe cannot be imported")
+    except Exception as e:
+        raise FaceUnavailable(f"MediaPipe is not installed (pip install mediapipe): {e}") from e
+    finally:
+        for name in stubs:
+            sys.modules.pop(name, None)
+            if name == "matplotlib":
+                sys.modules.pop("matplotlib.pyplot", None)
+
+
 def landmarkRegions() -> Dict[int, str]:
     """
     The region of each landmark ({index: "lips"...}) from the connections of MediaPipe (its tasks API, or the former
     solutions API), {} without it.
     """
     regions = {}
+    try:
+        importMediaPipe()
+    except FaceUnavailable:
+        return regions
     try:
         # MediaPipe tasks (0.10 and later): Connection(start, end)
         from mediapipe.tasks.python.vision.face_landmarker import FaceLandmarksConnections as connections
@@ -72,18 +109,21 @@ def trackName(index: int, regions: Dict[int, str]) -> str:
 # The landmarker
 
 class FaceLandmarker:
-    """ MediaPipe Face Landmarker in video mode (the face followed from frame to frame). """
+    """
+    MediaPipe Face Landmarker on single images (trackFaces gives it a crop around the face of the previous frame: in
+    video mode MediaPipe would follow the face in the coordinates of the previous crop).
+    """
 
     def __init__(self, modelPath: str, minConfidence: float = 0.5):
+        mp = importMediaPipe()
         try:
-            import mediapipe as mp
             from mediapipe.tasks import python as tasks
             from mediapipe.tasks.python import vision
         except Exception as e:
             raise FaceUnavailable(f"MediaPipe is not installed (pip install mediapipe): {e}") from e
         self._mp = mp
         options = vision.FaceLandmarkerOptions(
-            base_options=tasks.BaseOptions(model_asset_path=modelPath), running_mode=vision.RunningMode.VIDEO,
+            base_options=tasks.BaseOptions(model_asset_path=modelPath), running_mode=vision.RunningMode.IMAGE,
             num_faces=1, output_face_blendshapes=True, output_facial_transformation_matrixes=False,
             min_face_detection_confidence=minConfidence, min_face_presence_confidence=minConfidence,
             min_tracking_confidence=minConfidence)
@@ -92,13 +132,13 @@ class FaceLandmarker:
         except Exception as e:
             raise FaceUnavailable(f"cannot load the face landmarker model {modelPath}: {e}") from e
 
-    def detect(self, rgb: np.ndarray, timestampMs: int):
+    def detect(self, rgb: np.ndarray, timestampMs: int = 0):
         """
-        The landmarks (478, 3) of the face in an image (h, w, 3) uint8, rows from the top, and its expression
-        coefficients {name: value}; (None, {}) when there is no face.
+        The landmarks (478, 3) of the face in an image (h, w, 3) uint8, rows from the top (normalized: x, y in [0, 1],
+        z relative to the width), and its expression coefficients {name: value}; (None, {}) when there is no face.
         """
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
-        result = self._landmarker.detect_for_video(image, int(timestampMs))
+        result = self._landmarker.detect(image)
         if not result.face_landmarks:
             return None, {}
         landmarks = np.array([[point.x, point.y, point.z] for point in result.face_landmarks[0]], dtype=np.float64)
@@ -125,23 +165,83 @@ def landmarker(minConfidence: float = 0.5) -> FaceLandmarker:
     return FaceLandmarker(path, minConfidence)
 
 
+def _cropAround(landmarks: np.ndarray, width: int, height: int, scale: float = 2.2) -> Tuple[int, int, int, int]:
+    """ The square (x0, y0, x1, y1) in pixels, rows from the top, `scale` times the face of normalized `landmarks`,
+    moved (and shrunk) to stay in the image. """
+    x, y = landmarks[:, 0] * width, landmarks[:, 1] * height
+    size = int(round(min(max(64.0, scale * max(x.max() - x.min(), y.max() - y.min())), width, height)))
+    cx, cy = 0.5 * (x.min() + x.max()), 0.5 * (y.min() + y.max())
+    x0 = int(round(min(max(cx - size / 2.0, 0), width - size)))
+    y0 = int(round(min(max(cy - size / 2.0, 0), height - size)))
+    return x0, y0, x0 + size, y0 + size
+
+
+def _searchRegions(width: int, height: int) -> List[Tuple[int, int, int, int]]:
+    """ Where a face is searched when none was found at the previous frame: the whole frame, then squares of its
+    height (and half of it) overlapping by half (a small face in a large plate: the landmarker works on ~256 pixels). """
+    regions = [(0, 0, width, height)]
+    side = min(width, height)
+    for size in (side, side // 2):
+        if size < 128 or (size == side and width == height):
+            continue
+        step = max(1, size // 2)
+        xs = sorted(set(list(range(0, width - size + 1, step)) + [width - size]))
+        ys = sorted(set(list(range(0, height - size + 1, step)) + [height - size]))
+        regions += [(x, y, x + size, y + size) for y in ys for x in xs]
+    return regions
+
+
+def _detectIn(detector, rgb: np.ndarray, region, timestampMs: int):
+    """ The landmarks (normalized to the whole image) and blendshapes of the face in a region of `rgb` (floats in [0,
+    1]), brightened when dark; (None, {}) without face. """
+    x0, y0, x1, y1 = region
+    crop = rgb[y0:y1, x0:x1]
+    # Dark crops brightened (the landmarker is trained on well exposed photos), at most 8 times (noise)
+    level = float(np.percentile(crop.max(axis=2), 99.9)) if crop.size else 1.0
+    if level < 0.6:
+        crop = np.clip(crop * min(8.0, 0.9 / max(level, 1e-6)), 0.0, 1.0)
+    landmarks, blendshapes = detector.detect((crop * 255.0 + 0.5).astype(np.uint8), timestampMs)
+    if landmarks is None:
+        return None, {}
+    height, width = rgb.shape[:2]
+    cropWidth, cropHeight = x1 - x0, y1 - y0
+    landmarks = np.asarray(landmarks, dtype=np.float64).copy()
+    landmarks[:, 0] = (landmarks[:, 0] * cropWidth + x0) / width
+    landmarks[:, 1] = (landmarks[:, 1] * cropHeight + y0) / height
+    landmarks[:, 2] *= cropWidth / float(width)
+    return landmarks, blendshapes
+
+
 def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0, cancel=None,
                progress: Optional[Callable[[int, int], None]] = None,
                onFrame: Optional[Callable[[int, dict], None]] = None) -> Dict[int, dict]:
     """
     The face at each of `frames` (in order): {frame: {"landmarks": (478, 3) normalized, "blendshapes": {...}}}, the
-    frames without face left out. `detector.detect(rgb uint8, timestamp ms)` (see FaceLandmarker).
+    frames without face left out. `detector.detect(rgb uint8, timestamp ms)` (see FaceLandmarker) is given a crop
+    around the face of the previous frame, else (or if it finds none there) the whole frame, then tiles of it.
     """
     from .imageBuffer import BBox
     from .neural import displayRGB
     faces = {}
+    previous = None
     for index, frame in enumerate(frames):
         if cancel:
             cancel()
         image = imageAt(frame)
-        rgb = (displayRGB(image, BBox.fromFormat(*image.format)) * 255.0 + 0.5).astype(np.uint8)
-        # Video mode: increasing time stamps, whatever the direction
-        landmarks, blendshapes = detector.detect(rgb, int(round(index * 1000.0 / max(fps, 1e-3))))
+        rgb = displayRGB(image, BBox.fromFormat(*image.format))
+        height, width = rgb.shape[:2]
+        regions = _searchRegions(width, height)
+        if previous is not None:
+            regions.insert(0, _cropAround(previous, width, height))
+        landmarks, blendshapes = None, {}
+        timestamp = int(round(index * 1000.0 / max(fps, 1e-3)))
+        for region in regions:
+            if cancel:
+                cancel()
+            landmarks, blendshapes = _detectIn(detector, rgb, region, timestamp)
+            if landmarks is not None:
+                break
+        previous = landmarks
         if landmarks is not None:
             faces[frame] = {"landmarks": landmarks, "blendshapes": blendshapes}
             if onFrame:
@@ -238,9 +338,12 @@ def canonicalFace() -> scene3d.GeoData:
     """
     candidates = []
     try:
-        import mediapipe
-        candidates.append(os.path.join(os.path.dirname(mediapipe.__file__), "modules", "face_geometry", "data",
-                                       "canonical_face_model.obj"))
+        # Found without importing mediapipe (its drawing utilities need matplotlib)
+        import importlib.util
+        spec = importlib.util.find_spec("mediapipe")
+        if spec is not None and spec.origin:
+            candidates.append(os.path.join(os.path.dirname(spec.origin), "modules", "face_geometry", "data",
+                                           "canonical_face_model.obj"))
     except Exception:
         pass
     try:

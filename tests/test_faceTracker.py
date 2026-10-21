@@ -132,6 +132,8 @@ class FakeLandmarker:
 def test_faceTrackerNode(tmp_path, monkeypatch):
     monkeypatch.setattr(face, "RIGID_LANDMARKS", tuple(RIGID))
     monkeypatch.setattr(face, "landmarker", lambda minConfidence=0.5: FakeLandmarker())
+    # The fake landmarker sees the whole frame (the crops are tested by test_smallDarkFaceFoundInALargePlate)
+    monkeypatch.setattr(face, "_cropAround", lambda landmarks, width, height: (0, 0, width, height))
     graph, plate, tracker = faceGraph(tmp_path)
     tracker.exportTracks.value = "all"
     graph.update()
@@ -153,3 +155,64 @@ def test_faceTrackerNode(tmp_path, monkeypatch):
     np.testing.assert_allclose(xy, face.toPixels(landmarksAt(1), W, H), atol=0.01)
     image = evaluator.render(plan, 1)
     assert image.rgba()[:, :, 2].max() > 0.5
+
+
+class SquareFinder:
+    """ A fake landmarker finding a bright square (the "face") when it is large enough in the image it is given. """
+
+    def __init__(self):
+        self.sizes = []
+
+    def detect(self, rgb, timestampMs):
+        self.sizes.append(rgb.shape[:2])
+        rows, columns = np.nonzero(rgb[:, :, 0] > 160)
+        if not len(rows) or columns.max() - columns.min() + 1 < 0.15 * rgb.shape[1]:
+            return None, {}
+        h, w = rgb.shape[:2]
+        # 478 landmarks on the square (normalized to the image given), z relative to its width
+        t = np.linspace(0.0, 1.0, face.LANDMARKS)
+        x = (columns.min() + t * (columns.max() + 1 - columns.min())) / w
+        y = (rows.min() + t * (rows.max() + 1 - rows.min())) / h
+        return np.c_[x, y, np.full(len(t), 10.0 / w)], {}
+
+
+def test_smallDarkFaceFoundInALargePlate():
+    from meshroom.live import ImageBuffer
+    width, height = 3000, 1000
+    rgba = np.full((height, width, 4), 0.002, np.float32)
+    rgba[:, :, 3] = 1.0
+    # A dark 80 pixel "face", rows 300 to 379 from the top, columns 2400 to 2479
+    rgba[300:380, 2400:2480, :3] = 0.03
+    plate = ImageBuffer.fromRGBA(rgba, (width, height))
+    finder = SquareFinder()
+    faces = face.trackFaces(lambda frame: plate, [1, 2], finder)
+    assert sorted(faces) == [1, 2]
+    for frame in (1, 2):
+        landmarks = faces[frame]["landmarks"]
+        np.testing.assert_allclose([landmarks[:, 0].min() * width, landmarks[:, 0].max() * width], [2400, 2480], atol=1e-6)
+        np.testing.assert_allclose([landmarks[:, 1].min() * height, landmarks[:, 1].max() * height], [300, 380], atol=1e-6)
+        # z rescaled to the width of the whole frame
+        np.testing.assert_allclose(landmarks[:, 2], 10.0 / width)
+    # Frame 2: found at once in the crop around the face of frame 1
+    assert finder.sizes[-1][0] < 300 and finder.sizes[-1][0] == finder.sizes[-1][1]
+
+
+def test_mediapipeImportedWithoutMatplotlib(monkeypatch):
+    import sys
+    import types
+    calls = []
+
+    def importModule(name):
+        calls.append(name)
+        if "matplotlib" not in sys.modules:
+            error = ModuleNotFoundError("No module named 'matplotlib'")
+            error.name = "matplotlib"
+            raise error
+        assert sys.modules["matplotlib"].pyplot is sys.modules["matplotlib.pyplot"]
+        return types.ModuleType("mediapipe")
+    import importlib
+    monkeypatch.setattr(importlib, "import_module", importModule)
+    monkeypatch.delitem(sys.modules, "matplotlib", raising=False)
+    assert face.importMediaPipe().__name__ == "mediapipe" and len(calls) == 2
+    # The stand-in is gone: matplotlib is still missing for everything else
+    assert "matplotlib" not in sys.modules and "matplotlib.pyplot" not in sys.modules

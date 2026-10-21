@@ -558,6 +558,9 @@ voir 4.14 pour le GPU) ; lecture Alembic / FBX non testée ici (modules absents)
 **FaceTracker** (Comp 3D, `meshroom/nodes/compositing/FaceNodes.py`, `meshroom/live/face.py`) : un visage suivi dans
 la plaque, bouche et yeux compris (non rigide). « Track Face » passe MediaPipe Face Landmarker (Google, Apache-2.0,
 CPU) sur toute la plage : 478 points par frame et 52 coefficients d'expression, gardés dans le nœud (« Face Track »).
+Le landmarker (qui travaille sur ~256 pixels) voit un carré autour du visage de la frame précédente, sinon toute
+l'image, sinon des tuiles carrées de la hauteur de l'image puis de sa moitié : un petit visage dans une grande plaque
+est trouvé ; chaque carré sombre est éclairci (au plus x8). Un visage très masqué (feuillage) peut rester introuvable.
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le
@@ -567,7 +570,8 @@ canonique de MediaPipe. Sorties : « Face » (le maillage à chaque frame, dans 
 (pose rigide de la tête : à brancher dans l'« Input Matrix » d'un ReadGeo), « Camera » (la caméra de la plaque :
 entrée « Camera », sinon 35 mm à l'origine), l'image (maillage ou points dessinés). Ses pistes (« Tracks » :
 features, all ou none ; nommées par région, lips_013, leftEye_033...) pilotent Roto, Stabilize et CornerPin comme
-celles d'un Tracker. Installation : `pip install mediapipe` et
+celles d'un Tracker. Installation : `pip install mediapipe` (matplotlib et OpenCV, demandés par les utilitaires
+de dessin de MediaPipe, ne sont pas nécessaires : remplacés à l'import quand ils manquent, `face.importMediaPipe`) et
 `python -m meshroom.live.neural.download facelandmarker` (modèle et visage canonique dans MESHROOM_MODELS_PATH).
 Limite : les sommets gardent leur profondeur neutre (le mouvement des lèvres vers l'avant n'est pas suivi).
 
