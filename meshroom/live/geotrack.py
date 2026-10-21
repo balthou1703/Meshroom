@@ -434,103 +434,218 @@ def alignWithMatches(samples: SurfaceSamples, referenceMatrix: np.ndarray, refer
     return pose, int(inliers.sum()), error
 
 
-def imageEdges(image, bbox=None, threshold: float = 0.2) -> np.ndarray:
-    """
-    The edges of an image over `bbox` (h, w) bool: where its gradient is above `threshold` x its strong gradients
-    (99th percentile), on the luminance compressed like the display (bright areas do not hide the rest).
-    """
+def _luminance(image, bbox):
+    """ The luminance (h, w) of an image over `bbox`, compressed like the display (bright areas do not hide the rest). """
     from .ops import alignToBBox
-    bbox = bbox or image.bbox
     rgba = alignToBBox(image.rgba(), image.bbox, bbox)
     lum = 0.2126 * rgba[:, :, 0] + 0.7152 * rgba[:, :, 1] + 0.0722 * rgba[:, :, 2]
-    lum = np.power(np.clip(lum, 0.0, None), 1.0 / 2.2)
-    gradRows, gradColumns = np.gradient(lum.astype(np.float64))
-    magnitude = np.hypot(gradRows, gradColumns)
-    strong = float(np.percentile(magnitude, 99)) if magnitude.size else 0.0
-    return magnitude > max(1e-4, threshold * strong)
+    return np.power(np.clip(lum.astype(np.float64), 0.0, None), 1.0 / 2.2)
 
 
-def _edgeSamples(geo, matrix: np.ndarray, width: int, height: int, focalPixels: float, bbox, creaseDegrees: float,
-                 spacing: float, maxSamples: int):
+def _silhouetteSamples(geo, matrix: np.ndarray, width: int, height: int, focalPixels: float, bbox, creaseDegrees: float,
+                       spacing: float, maxSamples: int):
     """
-    Points (k, 3) along the visible feature edges of a geometry seen by a camera (silhouettes, creases, open edges;
-    the hidden parts removed), every `spacing` pixels, and their image positions (k, 2).
+    Points along the visible outline of a geometry seen by a camera (its silhouettes and open edges, and its creases
+    sharper than `creaseDegrees` when it is below 180), every `spacing` pixels, the hidden parts removed.
+
+    Returns:
+        (points (k, 3), positions (k, 2) in the buffer over `bbox` (u: columns, v: rows from the top), normals (k, 2):
+        the unit direction across the edge in the image, pointing out of the geometry for a silhouette).
     """
     from . import geoRender
+    empty = np.zeros((0, 3)), np.zeros((0, 2)), np.zeros((0, 2))
     camera = scene3d.CameraData(matrix, focalLength=focalPixels / float(width) * 36.0, horizontalAperture=36.0)
     shape = (bbox.height, bbox.width)
     u, v, z, inFront = geoRender.screenPositions(geo, camera, width, height, bbox)
     zbuffer, _ = geoRender.rasterize(u, v, z, geo.triangles(), shape)
-    edges = geoRender.featureEdges(geo, camera.position, creaseDegrees)
+    edges = geoRender.featureEdges(geo, camera.position, min(float(creaseDegrees), 180.0))
     if len(edges):
         edges = edges[inFront[edges[:, 0]] & inFront[edges[:, 1]]]
     if not len(edges):
-        return np.zeros((0, 3)), np.zeros((0, 2))
+        return empty
     a, b = edges[:, 0], edges[:, 1]
-    lengths = np.maximum(1, np.ceil(np.hypot(u[b] - u[a], v[b] - v[a]) / spacing).astype(np.int64))
-    lengths = np.minimum(lengths, 4 * max(shape))
-    segment = np.repeat(np.arange(len(a)), lengths)
-    firsts = np.r_[0, np.cumsum(lengths)[:-1]]
-    t = ((np.arange(len(segment)) - firsts[segment]) + 0.5) / lengths[segment]
+    lengths = np.hypot(u[b] - u[a], v[b] - v[a])
+    counts = np.minimum(np.maximum(1, np.ceil(lengths / spacing).astype(np.int64)), 4 * max(shape))
+    segment = np.repeat(np.arange(len(a)), counts)
+    firsts = np.r_[0, np.cumsum(counts)[:-1]]
+    t = ((np.arange(len(segment)) - firsts[segment]) + 0.5) / counts[segment]
     points = geo.vertices[a][segment] * (1 - t)[:, None] + geo.vertices[b][segment] * t[:, None]
-    su = u[a][segment] + (u[b] - u[a])[segment] * t
-    sv = v[a][segment] + (v[b] - v[a])[segment] * t
-    sz = z[a][segment] + (z[b] - z[a])[segment] * t
+    # Projected exactly (perspective), in the buffer
+    xy, depth = projectPoints(matrix, points, width, height, focalPixels)
+    su, sv = xy[:, 0] - bbox.x0, bbox.y1 - xy[:, 1]
+    direction = np.c_[(u[b] - u[a])[segment], (v[b] - v[a])[segment]]
+    normals = np.c_[-direction[:, 1], direction[:, 0]] / np.maximum(lengths[segment], 1e-9)[:, None]
     h, w = shape
-    inside = (su >= 0) & (su < w) & (sv >= 0) & (sv < h)
+    inside = (su >= 0) & (su < w) & (sv >= 0) & (sv < h) & (depth > 0) & (lengths[segment] > 1e-6)
     columns = np.clip(np.floor(su).astype(np.int64), 0, w - 1)
     rows = np.clip(np.floor(sv).astype(np.int64), 0, h - 1)
-    visible = inside & (sz <= zbuffer[rows, columns] * 1.004 + 1e-9)
-    points, su, sv = points[visible], su[visible], sv[visible]
-    if len(points) > maxSamples:
-        chosen = np.linspace(0, len(points) - 1, maxSamples).astype(np.int64)
-        points, su, sv = points[chosen], su[chosen], sv[chosen]
-    return points, np.c_[su, sv]
+    visible = inside & (depth <= zbuffer[rows, columns] * 1.004 + 1e-9)
+    # The sides of the edge: the normal is turned toward the side without geometry (a silhouette); the samples with
+    # geometry on both sides (creases) keep their normal
+    covered = np.isfinite(zbuffer)
+
+    def coveredAt(offset):
+        r = np.clip(np.floor(sv + offset * normals[:, 1]).astype(np.int64), 0, h - 1)
+        c = np.clip(np.floor(su + offset * normals[:, 0]).astype(np.int64), 0, w - 1)
+        return covered[r, c]
+    flip = coveredAt(2.0) & ~coveredAt(-2.0)
+    normals[flip] *= -1
+    chosen = np.flatnonzero(visible)
+    if len(chosen) > maxSamples:
+        chosen = chosen[np.linspace(0, len(chosen) - 1, maxSamples).astype(np.int64)]
+    return points[chosen], np.c_[su, sv][chosen], normals[chosen]
+
+
+def _edgeSearch(gradients, positions: np.ndarray, normals: np.ndarray, reach: float):
+    """
+    The edge of the image across each sample: the strongest gradient along its normal within `reach` pixels
+    (sub-pixel), as in RAPiD / moving edges trackers. `gradients`: (d/drow, d/dcolumn) of the luminance.
+
+    Returns:
+        (offsets (k,) along the normals in pixels, strengths (k,): the gradient across the edge found).
+    """
+    from scipy import ndimage
+    gradRows, gradColumns = gradients
+    steps = np.arange(-np.ceil(reach), np.ceil(reach) + 1.0)
+    u = positions[:, 0][:, None] + steps[None, :] * normals[:, 0][:, None]
+    v = positions[:, 1][:, None] + steps[None, :] * normals[:, 1][:, None]
+    # Pixel (r, c) is centered on (c + 0.5, r + 0.5)
+    coordinates = np.stack([v.ravel() - 0.5, u.ravel() - 0.5])
+    gr = ndimage.map_coordinates(gradRows, coordinates, order=1, mode="nearest").reshape(u.shape)
+    gc = ndimage.map_coordinates(gradColumns, coordinates, order=1, mode="nearest").reshape(u.shape)
+    across = np.abs(gc * normals[:, 0][:, None] + gr * normals[:, 1][:, None])
+    # A little preference for the nearest edges (between two edges as strong, the nearest)
+    score = across * (1.0 - 0.25 * np.abs(steps)[None, :] / max(reach, 1.0))
+    best = np.argmax(score, axis=1)
+    k = np.arange(len(best))
+    offsets = steps[best].astype(np.float64)
+    # Sub-pixel: the parabola through the scores around the best
+    inner = (best > 0) & (best < len(steps) - 1)
+    left, middle, right = score[k[inner], best[inner] - 1], score[k[inner], best[inner]], score[k[inner], best[inner] + 1]
+    curvature = left - 2 * middle + right
+    offsets[inner] += np.where(curvature < -1e-12, 0.5 * (left - right) / np.where(curvature < -1e-12, curvature, -1.0), 0.0)
+    return offsets, across[k, best]
+
+
+def _solveAlongNormals(points: np.ndarray, targets: np.ndarray, normals: np.ndarray, width: int, height: int,
+                       focalPixels: float, bbox, initial: np.ndarray, iterations: int = 10):
+    """
+    The camera pose putting the 3D `points` on the image edges through `targets` across `normals` (buffer over `bbox`):
+    only the distance along the normal counts (an edge does not tell where along it a point is). Robust (Tukey weights:
+    the points far from the others' fit are ignored), Levenberg-Marquardt.
+
+    Returns:
+        (camera-to-world matrix, inliers (k,) bool, RMS distance of the inliers in pixels).
+    """
+    from .camera import rodrigues
+    rotation0, translation0 = scene3d.cvPose(scene3d.toMatrix4(initial))
+    # The targets in normalized camera coordinates (x right, y down)
+    tx = (targets[:, 0] + bbox.x0 - width / 2.0) / focalPixels
+    ty = (targets[:, 1] - bbox.y1 + height / 2.0) / focalPixels
+    nx, ny = normals[:, 0], normals[:, 1]
+
+    def distances(params):
+        camera = points @ (rodrigues(params[:3]) @ rotation0).T + translation0 + params[3:]
+        z = np.where(camera[:, 2] < 1e-9, 1e-9, camera[:, 2])
+        return focalPixels * (nx * (camera[:, 0] / z - tx) + ny * (camera[:, 1] / z - ty))
+
+    params = np.zeros(6)
+    weights = np.ones(len(points))
+    for _ in range(iterations):
+        current = distances(params)
+        # Tukey weights, 4.7 robust standard deviations (at least 1 pixel)
+        spread = max(1.0, 4.685 * 1.4826 * float(np.median(np.abs(current))))
+        weights = np.where(np.abs(current) < spread, (1 - (current / spread) ** 2) ** 2, 0.0)
+        if weights.sum() < 6:
+            break
+        jacobian = np.empty((len(points), 6))
+        for k in range(6):
+            step = np.zeros(6)
+            step[k] = 1e-6
+            jacobian[:, k] = (distances(params + step) - current) / 1e-6
+        normal = jacobian.T @ (jacobian * weights[:, None])
+        gradient = jacobian.T @ (weights * current)
+        cost = np.sum(weights * current ** 2)
+        delta = None
+        # Levenberg-Marquardt: the step shortened until it lowers the cost
+        for damping in (1e-6, 1e-3, 1e-1, 1.0, 10.0, 100.0):
+            try:
+                step = -np.linalg.solve(normal + damping * np.diag(np.diag(normal) + 1e-9), gradient)
+            except np.linalg.LinAlgError:
+                continue
+            if np.sum(weights * distances(params + step) ** 2) < cost:
+                delta = step
+                break
+        if delta is None:
+            break
+        params = params + delta
+        if np.linalg.norm(delta) < 1e-9:
+            break
+    final = distances(params)
+    inliers = weights > 0
+    error = float(np.sqrt(np.mean(final[inliers] ** 2))) if inliers.any() else 0.0
+    return scene3d.cameraMatrixFromCvPose(rodrigues(params[:3]) @ rotation0, translation0 + params[3:]), inliers, error
 
 
 def alignToSilhouette(geo, matrix: np.ndarray, image, width: int, height: int, focalPixels: float,
-                      iterations: int = 20, maxDistance: float = 80.0, minDistance: float = 3.0,
-                      creaseDegrees: float = 40.0, cancel=None):
+                      maxDistance: float = 40.0, creaseDegrees: float = 180.0, iterations: int = 6, cancel=None):
     """
-    Experimental (not used by the nodes yet: it does not converge reliably on textured objects).
-    "Find the right position" without keyframe nor network: the silhouette and the creases of the geometry snapped to
-    the edges of the image (an ICP on the edges): each point along the visible feature edges of the geometry, seen
-    from the current pose, is matched to the nearest edge of the image (a distance transform), within a distance going
-    down from `maxDistance` to `minDistance` pixels, and the pose is solved from these matches (robustly), again and
-    again. Needs a rough pose (the geometry roughly on its place) and an object standing out of its background.
+    "Find the right position" without keyframe nor network: the outline of the geometry (its silhouettes, seen from
+    the current pose) snapped onto the edges of the image. Each point along the outline searches the strongest edge
+    of the image across the outline (along its normal, as RAPiD / moving edges trackers do: the texture inside the
+    object, along the outline, does not attract it), and the pose is solved from these matches (robustly), again and
+    again; coarse to fine: on the image blurred (the edges found from far, the details ignored), then sharper, with a
+    shorter search. Needs a rough pose (the geometry roughly on its place, within `maxDistance` pixels) and an object
+    whose outline stands out of its background. `creaseDegrees` < 180 also snaps the creases of the geometry.
 
     Returns:
         (camera-to-world matrix, number of points fitting it, their RMS error in pixels). Raises TrackingLost when the
-        geometry has no visible edge or no image edge is near it.
+        geometry shows no outline in the image or no edge of the image is near it.
     """
     from scipy import ndimage
     bbox = image.bbox
-    edges = imageEdges(image, bbox)
-    if not edges.any():
-        raise TrackingLost("the image has no edge")
-    # The nearest edge pixel of every pixel
-    distances, (nearestRows, nearestColumns) = ndimage.distance_transform_edt(~edges, return_indices=True)
-    current = scene3d.toMatrix4(matrix)
+    lum = _luminance(image, bbox)
+    start = current = scene3d.toMatrix4(matrix)
     inliers, error = 0, 0.0
-    for iteration in range(iterations):
-        if cancel:
-            cancel()
-        points, positions = _edgeSamples(geo, current, width, height, focalPixels, bbox, creaseDegrees, 3.0, 3000)
-        if len(points) < 8:
-            raise TrackingLost("the geometry shows no edge in the image: place it roughly first")
-        rows = np.clip(np.floor(positions[:, 1]).astype(np.int64), 0, bbox.height - 1)
-        columns = np.clip(np.floor(positions[:, 0]).astype(np.int64), 0, bbox.width - 1)
-        reach = maxDistance * (minDistance / maxDistance) ** (iteration / max(1, iterations - 1))
-        near = distances[rows, columns] <= reach
-        if near.sum() < 8:
-            if iteration == 0:
-                raise TrackingLost("no edge of the image near the geometry: place it roughly first")
+    # Coarse to fine: blur (pixels) and reach of the search
+    levels = []
+    sigma, reach = max(1.0, maxDistance / 8.0), float(maxDistance)
+    while True:
+        levels.append((sigma, reach))
+        if sigma <= 1.0:
             break
-        # The nearest edge pixel, in Nuke pixels (format coordinates)
-        targets = np.c_[nearestColumns[rows[near], columns[near]] + 0.5 + bbox.x0,
-                        bbox.y1 - nearestRows[rows[near], columns[near]] - 0.5]
-        current, fitting, error = robustPose(points[near], targets, width, height, focalPixels, current)
-        inliers = int(fitting.sum())
+        sigma, reach = max(1.0, sigma / 2.0), max(3.0, reach / 2.0)
+    for sigma, reach in levels:
+        blurred = ndimage.gaussian_filter(lum, sigma)
+        gradients = np.gradient(blurred)
+        for _ in range(iterations):
+            if cancel:
+                cancel()
+            points, positions, normals = _silhouetteSamples(geo, current, width, height, focalPixels, bbox,
+                                                             creaseDegrees, 2.0, 2000)
+            if len(points) < 8:
+                raise TrackingLost("the geometry shows no outline in the image: place it roughly first")
+            offsets, strengths = _edgeSearch(gradients, positions, normals, reach)
+            # The weak edges (flat areas: nothing found) are not matches
+            strong = strengths > 0.3 * float(np.percentile(strengths, 90))
+            if strong.sum() < 8:
+                raise TrackingLost("no edge of the image near the outline of the geometry: place it roughly first")
+            targets = positions[strong] + offsets[strong, None] * normals[strong]
+            previous = current
+            current, fitting, error = _solveAlongNormals(points[strong], targets, normals[strong], width, height,
+                                                         focalPixels, bbox, current)
+            inliers = int(fitting.sum())
+            moved, _ = projectPoints(current, points, width, height, focalPixels)
+            before, _ = projectPoints(previous, points, width, height, focalPixels)
+            if float(np.abs(moved - before).max()) < 0.05:
+                break
+    # Snapped onto edges much farther than searched: another outline (a wrong solution), not a correction
+    outline, _, _ = _silhouetteSamples(geo, start, width, height, focalPixels, bbox, creaseDegrees, 4.0, 500)
+    if len(outline):
+        a, _ = projectPoints(start, outline, width, height, focalPixels)
+        b, _ = projectPoints(current, outline, width, height, focalPixels)
+        if float(np.median(np.hypot(*(b - a).T))) > 2.0 * maxDistance:
+            raise TrackingLost("the outline snapped far from where the geometry was: place it closer first")
     return current, inliers, error
 
 

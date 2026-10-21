@@ -187,6 +187,21 @@ def test_alignFindsTheRightPosition():
     assert inliers >= 8 and pixelError(matrix, 6) < 1.5
 
 
+def test_silhouetteSnapsOntoTheOutline():
+    # Without keyframe: the outline of the cube snapped onto the edges of the plate (the texture inside ignored)
+    camera = cameraAt(4)
+    rough = camera.matrix @ scene3d.composeTRS((0.3, -0.2, 0.5), (4, -3, 5))
+    assert pixelError(rough, 4) > 30.0
+    matrix, inliers, error = geotrack.alignToSilhouette(CUBE, rough, renderCube(camera), W, H, camera.focalPixels(W))
+    assert inliers >= 50 and error < 1.0 and pixelError(matrix, 4) < 1.5
+
+
+def test_silhouetteNeedsEdgesNearTheGeometry():
+    flat = ImageBuffer.fromRGBA(np.full((H, W, 4), 0.5, np.float32), (W, H))
+    with pytest.raises(geotrack.TrackingLost):
+        geotrack.alignToSilhouette(CUBE, cameraAt(4).matrix, flat, W, H, cameraAt(4).focalPixels(W))
+
+
 def test_blendPosesTrustsTheNearestKeyframe():
     a, b = np.eye(4), np.eye(4)
     b[:3, 3] = [4.0, 0, 0]
@@ -260,6 +275,19 @@ def test_resectionAlignsTheGeometryAtAFrame(tmp_path):
     resection.geoTrack.value = geotrack.dumpPoses({6: rough}, [])
     graph.update()
     assert pixelError(cameraOutput(resection, 6).matrix, 6) > 8.0
+    result = runAction(resection, plate, "alignGeo", 6)
+    poses, keyframes = geotrack.parsePoses(result["geoTrack"])
+    assert keyframes == [6] and pixelError(poses[6], 6) < 1.5
+
+
+def test_resectionAlignsTheSilhouetteWithoutKeyframe(tmp_path):
+    graph, plate, resection = resectionGraph(tmp_path)
+    resection.tracks.value = "[]"
+    resection.alignMethod.value = "silhouette"
+    rough = cameraAt(6).matrix @ scene3d.composeTRS((0.2, -0.1, 0.3), (3, 2, -3))
+    resection.geoTrack.value = geotrack.dumpPoses({6: rough}, [])
+    graph.update()
+    assert pixelError(cameraOutput(resection, 6).matrix, 6) > 10.0
     result = runAction(resection, plate, "alignGeo", 6)
     poses, keyframes = geotrack.parsePoses(result["geoTrack"])
     assert keyframes == [6] and pixelError(poses[6], 6) < 1.5

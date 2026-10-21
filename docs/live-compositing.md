@@ -601,10 +601,16 @@ les plaques, et sa licence est non commerciale. MegaPose a un modèle RGB seul.
   positions trouvées (`tracking.trackManyNeural`).
 - **Features : lightglue** : les features ALIKED de chaque frame appariées à celles de la suivante par LightGlue ;
   une feature réappariée prolonge sa piste (`camera.autoTrackMatched`).
-- **Align With** : patches (comme avant : la géométrie doit être placée à peu près), lightglue (les features de la
+- **Align With** : patches (comme avant : la géométrie doit être placée à peu près), silhouette (sans keyframe ni
+  réseau, `geotrack.alignToSilhouette` : le contour de la géométrie vu depuis la pose actuelle est recalé sur les
+  bords de l'image ; chaque point du contour cherche le bord le plus fort le long de sa normale, à la RAPiD, si bien
+  que la texture à l'intérieur de l'objet ne l'attire pas ; la pose est résolue sur la distance le long des normales
+  (Levenberg-Marquardt, poids de Tukey), du flou au net, sur « Silhouette Search » pixels au plus (40 par défaut,
+  avancé) ; il faut un objet qui se détache de son fond et une géométrie placée à moins de cette distance ; un objet
+  symétrique peut se recaler sur une pose symétrique), lightglue (les features de la
   keyframe appariées dans la frame courante puis posées sur la géométrie : marche loin de la bonne position et sous
   un autre angle, `geotrack.alignWithMatches`), megapose (la pose du maillage trouvée dans l'image depuis la boîte où
-  la pose actuelle le montre, sans keyframe). Dans les deux cas, la pose est ensuite affinée sur les patches de la
+  la pose actuelle le montre, sans keyframe). Dans tous les cas, s'il y a une keyframe, la pose est ensuite affinée sur les patches de la
   keyframe la plus proche.
 - Un réseau absent (PyTorch, paquet, poids) : le nœud prend la méthode classique (avertissement dans le log ; pour
   Align, un message d'erreur dit ce qui manque).

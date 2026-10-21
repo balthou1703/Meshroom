@@ -281,14 +281,21 @@ into keys of a Camera or a ReadGeo.
                                      "flow of the plate), raft (the RAFT optical flow network: large motions, sharp "
                                      "edges; PyTorch and its weights needed, else flow) or patches (the image around "
                                      "each point searched in the next frame)."),
-        desc.ChoiceParam(name="alignMethod", label="Align With", value="patches", values=["patches", "lightglue", "megapose"],
+        desc.ChoiceParam(name="alignMethod", label="Align With", value="patches", values=["patches", "silhouette", "lightglue", "megapose"],
                          invalidate=False,
                          description="How 'Align' finds the right position: patches (the points of the nearest keyframe "
                                      "searched close to where the current pose puts them: the geometry must be roughly "
-                                     "placed), lightglue (features of the keyframe matched by LightGlue: far from its "
+                                     "placed), silhouette (the outline of the geometry snapped onto the edges of "
+                                     "the image: no keyframe nor network; the geometry roughly placed, its outline "
+                                     "standing out of the background), lightglue (features of the keyframe matched by LightGlue: far from its "
                                      "place, other angle), megapose (MegaPose finds the pose of the mesh in the image, "
                                      "without keyframe, from where the current pose shows it; a CUDA GPU needed). Then "
                                      "refined on the patches."),
+        desc.FloatParam(name="silhouetteDistance", label="Silhouette Search", value=40.0, range=(5.0, 200.0, 1.0),
+                        invalidate=False, advanced=True,
+                        description="Align With silhouette: how far (pixels) the edges of the image are searched across "
+                                    "the outline of the geometry. Larger: from farther, but more risk of snapping onto "
+                                    "another edge."),
         pointTrackerParam(),
         gpuParam(),
         desc.IntParam(name="trackPoints", label="Track Points", value=150, range=(30, 1000, 10), invalidate=False,
@@ -685,11 +692,19 @@ class _GeoTrackAction:
         image, rough = self.context.render(frame), self.poseAt(frame)
         others = [f for f in self.allKeyframes if f != frame]
         reference = min(others, key=lambda f: (abs(f - frame), f)) if others else None
-        if reference is None and method != "megapose":
+        if reference is None and method not in ("megapose", "silhouette"):
             raise RuntimeError("No keyframe to align to: place the geometry with pins at another frame first "
-                               "(or align with megapose).")
+                               "(or align with silhouette or megapose).")
         try:
-            if method == "megapose":
+            if method == "silhouette":
+                self.context.progress(0.1, "Align the silhouette")
+                rough, _, _ = geotrack.alignToSilhouette(self.geo, rough, image, self.info.width, self.info.height,
+                                                         self.focalPixels,
+                                                         maxDistance=self.context.value("silhouetteDistance"),
+                                                         cancel=self.context.checkCancelled)
+                if reference is None:
+                    return rough
+            elif method == "megapose":
                 from meshroom.live.neural import megapose
                 self.context.progress(0.1, "Align with MegaPose")
                 rough = megapose.estimatePose(image, self.geo, rough, self.focalPixels, self.device)
