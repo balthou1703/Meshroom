@@ -166,11 +166,18 @@ def computeFlow(image, target, maxSize: int = 960, window: int = 11, iterations:
         return np.zeros((h, w, 2), np.float32)
     factor = max(1, int(math.ceil(max(h, w) / float(max(64, maxSize)))))
     if method == "raft":
+        from .evaluator import EvaluationCancelled
         from .neural import NeuralUnavailable, warnUnavailable
         try:
             from .neural import raft
             return raft.computeFlow(image, target, factor, gpu.device(useGpu), cancel)
         except NeuralUnavailable as e:
+            warnUnavailable("RAFT", e)
+        except EvaluationCancelled:
+            raise
+        except Exception as e:
+            # E.g. a GPU PyTorch cannot run on, out of memory: the Lucas-Kanade flow instead
+            gpu.failed("RAFT", e)
             warnUnavailable("RAFT", e)
     a = _luminance(image, bbox)
     b = _luminance(target, bbox)

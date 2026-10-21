@@ -779,6 +779,7 @@ class LiveController(QObject):
                         raise
                     except Exception as e:
                         # E.g. out of memory on the GPU: tracked again with the patterns
+                        gpu.failed(method, e)
                         logging.warning(f"[Live] {method} failed, tracked with patches", exc_info=True)
                         self._trackWarning.emit(f"{method} failed, tracked with patches: {e}", nodeName)
                 if allKeys is None:

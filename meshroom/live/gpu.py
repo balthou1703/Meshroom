@@ -3,7 +3,9 @@ GPU acceleration of the compositing nodes (filters, optical flow, tracking), wit
 
 A node with the "Use GPU" parameter (`gpuParam`) computes on the GPU when the machine has one that PyTorch can use
 (CUDA, or MPS on macOS), else on the CPU; a failure on the GPU (out of memory, an operation the device does not
-support) also falls back on the CPU, with a warning in the log (once per operation). The results are the same within
+support) also falls back on the CPU, with a warning in the log (once per operation); when the error says the GPU cannot run PyTorch
+at all (e.g. "no kernel image is available": a GPU too old for this PyTorch build), the GPU is no longer used in the
+session (`disable`). The results are the same within
 floating point precision, so the parameter is not part of the node uid.
 
 Environment:
@@ -86,10 +88,79 @@ def _unsupportedReason(torch, index: int) -> str:
         return (f"{name} (CUDA capability {major}.{minor}) is not supported by this PyTorch (built for "
                 f"{', '.join(arches)})")
     try:
-        (torch.ones(4, device=torch.device("cuda", index)) * 2).sum().item()
+        # A few kernels of the kinds the nodes use (elementwise, reductions, cuBLAS, cuDNN, FFT): a PyTorch built for
+        # other GPUs may run some and not others ("no kernel image is available")
+        cuda = torch.device("cuda", index)
+        values = torch.rand(1, 2, 16, 16, device=cuda)
+        (values * 2).sum().item()
+        (values[0, 0] @ values[0, 1]).sum().item()
+        torch.nn.functional.conv2d(values, torch.rand(2, 2, 3, 3, device=cuda), padding=1).sum().item()
+        torch.fft.rfft2(values).abs().sum().item()
+        torch.cuda.synchronize(cuda)
     except Exception as e:
-        return f"{name} cannot run PyTorch ({e})"
+        return f"{name} cannot run PyTorch ({_firstLine(e)})"
     return ""
+
+
+def _firstLine(error: Exception) -> str:
+    text = str(error).strip()
+    return text.splitlines()[0] if text else type(error).__name__
+
+
+# Errors telling that the GPU cannot run PyTorch (not a passing problem, as running out of memory)
+_DEVICE_FAILURES = ("no kernel image", "cuda error", "cublas_status", "cudnn_status", "cudnn error", "cufft",
+                    "device-side assert", "illegal memory access", "unspecified launch failure", "not compiled with cuda",
+                    "is not supported on", "invalid device function", "mps backend", "unsupported gpu")
+
+
+def isDeviceFailure(error: Exception) -> bool:
+    """ Whether `error` says the GPU cannot run PyTorch (then it is not used again in this session). """
+    text = str(error).lower()
+    return "out of memory" not in text and any(failure in text for failure in _DEVICE_FAILURES)
+
+
+def disable(reason: str):
+    """ Stop using the GPU for the rest of the session (everything computed on the CPU), logged once. """
+    with _lock:
+        if "device" in _state and _state["device"] is None:
+            return
+        _state["device"], _state["reason"] = None, reason
+    logging.warning(f"[GPU] The GPU is not used anymore in this session, everything is computed on the CPU: {reason}.")
+
+
+def failed(what: str, error: Exception):
+    """ A computation failed on the GPU (the caller computes it on the CPU): logged once, memory given back, and the
+    GPU disabled for the session when it cannot run PyTorch (e.g. "no kernel image is available"). """
+    _warnOnce(what, error)
+    emptyCache()
+    if isDeviceFailure(error):
+        disable(f"{what or 'a computation'} failed ({_firstLine(error)})")
+
+
+def usable(device):
+    """ `device` when it is a GPU still in use (not disabled after a failure), else None (the CPU). """
+    if device is None or getattr(device, "type", "") == "cpu":
+        return device
+    return device if availableDevice() is not None else None
+
+
+def withFallback(device, function: Callable, what: str = ""):
+    """
+    `function(device)` on the GPU `device` (still usable), else, or if it fails there, `function(None)` (the CPU).
+    For the computations given a device beforehand (the networks: on the CPU they are slower, not different).
+    """
+    from .evaluator import EvaluationCancelled
+    current = usable(device)
+    if current is not None:
+        try:
+            return function(current)
+        except EvaluationCancelled:
+            raise
+        except Exception as e:
+            if type(e).__name__ == "NeuralUnavailable":
+                raise
+            failed(what, e)
+    return function(None)
 
 
 def availableDevice():
@@ -166,8 +237,7 @@ def run(enabled: bool, gpuFunction: Callable, cpuFunction: Callable, what: str =
         except EvaluationCancelled:
             raise
         except Exception as e:
-            _warnOnce(what, e)
-            emptyCache()
+            failed(what, e)
     return cpuFunction()
 
 

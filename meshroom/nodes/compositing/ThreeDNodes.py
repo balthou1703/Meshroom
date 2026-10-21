@@ -687,6 +687,7 @@ class _GeoTrackAction:
     def align(self, frame):
         """ The right pose at `frame` ("Align"), with the method of "Align With". """
         from meshroom.live import geotrack
+        from meshroom.live.evaluator import EvaluationCancelled
         from meshroom.live.neural import NeuralUnavailable
         method = self.context.value("alignMethod")
         image, rough = self.context.render(frame), self.poseAt(frame)
@@ -705,18 +706,28 @@ class _GeoTrackAction:
                 if reference is None:
                     return rough
             elif method == "megapose":
+                from meshroom.live import gpu
                 from meshroom.live.neural import megapose
                 self.context.progress(0.1, "Align with MegaPose")
-                rough = megapose.estimatePose(image, self.geo, rough, self.focalPixels, self.device)
+                try:
+                    rough = megapose.estimatePose(image, self.geo, rough, self.focalPixels, gpu.usable(self.device))
+                except (NeuralUnavailable, EvaluationCancelled):
+                    raise
+                except Exception as e:
+                    gpu.failed("MegaPose", e)
+                    raise RuntimeError(f"MegaPose failed on the GPU ({gpu.status()}): {e}") from e
                 if reference is None:
                     return rough
             elif method == "lightglue":
+                from meshroom.live import gpu
                 from meshroom.live.neural.matching import matcher
                 self.context.progress(0.1, f"Align on frame {reference} with LightGlue")
-                rough, _, _ = geotrack.alignWithMatches(geotrack.SurfaceSamples(self.geo, count=200000),
-                                                        self.poseAt(reference), self.context.render(reference), rough,
-                                                        image, self.info.width, self.info.height, self.focalPixels,
-                                                        matcher(self.device))
+                samples = geotrack.SurfaceSamples(self.geo, count=200000)
+                referenceImage = self.context.render(reference)
+                # On the GPU, or on the CPU if the GPU cannot run it
+                rough, _, _ = gpu.withFallback(self.device, lambda device: geotrack.alignWithMatches(
+                    samples, self.poseAt(reference), referenceImage, rough, image, self.info.width, self.info.height,
+                    self.focalPixels, matcher(device)), "LightGlue")
         except NeuralUnavailable as e:
             raise RuntimeError(f"Align with {method}: {e}") from e
         except geotrack.TrackingLost as e:

@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from . import gpu
+
 
 def parseTracks(text: str) -> List[dict]:
     """ Return the tracks stored in a JSON string ([] if empty). Raises ValueError if it is not valid. """
@@ -382,7 +384,7 @@ def trackMany(tracks: List[dict], frames: List[int], imageAt, cancel=None, minSc
         except (EvaluationCancelled, EvaluationError):
             break
         predicted = model.predict(frame, {index: state["position"] for index, state in active.items()}) if model else {}
-        if device is not None:
+        if gpu.usable(device) is not None:
             found = _trackSteps(active, previous, current, predicted, minScore, device)
         else:
             found = {}
@@ -491,7 +493,7 @@ def matchMany(patterns: np.ndarray, lum: np.ndarray, bbox, centers: np.ndarray, 
     Returns:
         (n, 3): the position (x, y) and the score of each match, NaN where the search area leaves the image.
     """
-    from . import gpu
+    device = gpu.usable(device)
     if device is not None and len(patterns):
         from .evaluator import EvaluationCancelled
         try:
@@ -500,8 +502,7 @@ def matchMany(patterns: np.ndarray, lum: np.ndarray, bbox, centers: np.ndarray, 
         except EvaluationCancelled:
             raise
         except Exception as e:
-            gpu._warnOnce("Pattern matching", e)
-            gpu.emptyCache()
+            gpu.failed("Pattern matching", e)
     result = np.full((len(patterns), 3), np.nan)
     for index, (pattern, (x, y)) in enumerate(zip(patterns, centers)):
         match = matchPattern(pattern, lum, bbox, x, y, searchSize)

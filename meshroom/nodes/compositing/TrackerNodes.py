@@ -492,21 +492,23 @@ its white areas (e.g. a roto of a moving object, inverted): masked out areas are
 
             from meshroom.live import gpu
             device = gpu.device(gpu.enabled(context))
-            matcher = None
+            tracks = None
             if context.value("detector") == "lightglue":
                 from meshroom.live.neural import NeuralUnavailable, warnUnavailable
-                try:
+
+                def autoTrackMatched(onDevice):
                     from meshroom.live.neural.matching import matcher as lightGlue
-                    matcher = lightGlue(device)
+                    return camera.autoTrackMatched(context.render, context.frames, lightGlue(onDevice),
+                                                   count=context.value("features"), checkCancelled=context.checkCancelled,
+                                                   progress=lambda f: context.progress(f, "Autotrack (LightGlue)"),
+                                                   maskAt=maskAt, onFrame=onFrame, pattern=context.value("pattern"),
+                                                   search=context.value("search"))
+                try:
+                    # On the GPU, or on the CPU if the GPU cannot run it
+                    tracks = gpu.withFallback(device, autoTrackMatched, "LightGlue")
                 except NeuralUnavailable as e:
                     warnUnavailable("LightGlue", e)
-            if matcher is not None:
-                tracks = camera.autoTrackMatched(context.render, context.frames, matcher, count=context.value("features"),
-                                                 checkCancelled=context.checkCancelled,
-                                                 progress=lambda f: context.progress(f, "Autotrack (LightGlue)"),
-                                                 maskAt=maskAt, onFrame=onFrame, pattern=context.value("pattern"),
-                                                 search=context.value("search"))
-            else:
+            if tracks is None:
                 tracks = camera.autoTrack(context.render, context.frames, count=context.value("features"),
                                           pattern=context.value("pattern"), search=context.value("search"),
                                           minScore=context.value("minScore"), checkCancelled=context.checkCancelled,

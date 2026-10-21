@@ -357,3 +357,23 @@ def test_aGpuTooOldForPyTorchIsNotUsed(monkeypatch):
     monkeypatch.setattr(gpu, "torchModule", lambda: FakeTorch)
     assert gpu.device(True) is None
     assert "Quadro M4000" in gpu.status() and "5.2" in gpu.status()
+
+
+def test_aGpuThatCannotRunPyTorchIsDisabled():
+    class FakeGpu:
+        type = "cuda"
+    gpu._state.update(device=FakeGpu, reason="")
+
+    def outOfMemory(device):
+        raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+    # A passing failure: on the CPU this time, the GPU kept
+    assert gpu.run(True, outOfMemory, lambda: "cpu", "Test") == "cpu" and gpu.device(True) is FakeGpu
+
+    def noKernel(device):
+        raise RuntimeError("CUDA error: no kernel image is available for execution on the device\nCUDA kernel errors...")
+    # A GPU PyTorch cannot run on: the CPU from now on, everywhere (the devices given beforehand too)
+    assert gpu.withFallback(FakeGpu, lambda device: device or "cpu", "Test") is FakeGpu
+    assert gpu.withFallback(FakeGpu, lambda device: noKernel(device) if device else "cpu", "LightGlue") == "cpu"
+    assert gpu.device(True) is None and "no kernel image" in gpu.status()
+    assert gpu.usable(FakeGpu) is None
+    assert gpu.withFallback(FakeGpu, lambda device: device or "cpu") == "cpu"
