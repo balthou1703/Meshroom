@@ -210,3 +210,28 @@ def pointTrackerParam():
                     "(sees many frames at once: fast motions, blur; a hidden track stops). cotracker: CoTracker3 "
                     "(the same, non-commercial license only). The networks need PyTorch and their weights "
                     "(MESHROOM_MODELS_PATH); without them, patches.")
+
+
+def trackRangeParams():
+    """
+    The frame range of the tracking actions of a node (Track buttons, autotrack, Track Face, Track Geometry...):
+    "Limit Track Range" off: the whole input; on: from "Track First" to "Track Last" only (see trackRange).
+    """
+    return [
+        desc.BoolParam(name="limitTrackRange", label="Limit Track Range", value=False, invalidate=False,
+                       description="Track only between 'Track First' and 'Track Last' (not over the whole input)."),
+        desc.IntParam(name="trackFirst", label="Track First", value=1001, range=(0, 10000, 1), invalidate=False,
+                      enabled=lambda node: node.limitTrackRange.value,
+                      description="First frame tracked when 'Limit Track Range' is on."),
+        desc.IntParam(name="trackLast", label="Track Last", value=1100, range=(0, 10000, 1), invalidate=False,
+                      enabled=lambda node: node.limitTrackRange.value,
+                      description="Last frame tracked when 'Limit Track Range' is on."),
+    ]
+
+
+def trackRange(values, frames):
+    """ `frames` (any order) limited to the track range of a node's values ({name: value}); unchanged without it. """
+    if not values.get("limitTrackRange"):
+        return list(frames)
+    first, last = sorted((int(values.get("trackFirst", 0)), int(values.get("trackLast", 0))))
+    return [frame for frame in frames if first <= frame <= last]

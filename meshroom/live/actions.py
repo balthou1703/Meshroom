@@ -53,11 +53,13 @@ class ActionContext:
 
     @property
     def frames(self):
-        """ The frames of the input (the current frame for a still image). """
+        """ The frames of the input (the current frame for a still image), within the track range of the node
+        ("Limit Track Range", params.trackRangeParams) when it has one. """
+        from .params import trackRange
         info = self.info
         if info is None or not info.hasFrameRange:
             return [self.currentFrame]
-        return list(range(info.firstFrame, info.lastFrame + 1))
+        return trackRange(self.values, range(info.firstFrame, info.lastFrame + 1))
 
     def inputFrames(self, name: str):
         """ The frames of the image input `name` (the current frame for a still image or a disconnected input). """

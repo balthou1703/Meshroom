@@ -13,7 +13,7 @@ import numpy as np
 
 from meshroom.core import Version, desc
 from meshroom.live import BBox, ImageBuffer
-from meshroom.live.params import (colorParam, colorValue, drawInfoOnlyInputs, formatInput, formatParams,
+from meshroom.live.params import (trackRangeParams, colorParam, colorValue, drawInfoOnlyInputs, formatInput, formatParams,
                                   imageInput, imageOutput, inputUsageParam, linkedVec2, outputInfo)
 
 
@@ -379,6 +379,7 @@ the matte).
         desc.PushButtonParam(name="flowBackward", label="Track Shapes Backward", semantic="liveAction",
                              description="Move the shapes along the optical flow from the current frame to the start of "
                                          "the frame range, with a key at each frame."),
+        *trackRangeParams(),
         desc.ChoiceParam(name="outputMode", label="Output", value="over",
                          values=["over", "replaceAlpha", "addAlpha", "cutOut"],
                          description="over: the color, premultiplied by the matte, over the input. replaceAlpha: the "

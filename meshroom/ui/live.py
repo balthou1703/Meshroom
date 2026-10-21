@@ -32,6 +32,12 @@ CHANNEL_MODES = ["rgb", "r", "g", "b", "a", "luminance"]
 PROXY_FACTORS = (2, 3, 4, 8)
 
 
+
+def _editableTracks(node) -> str:
+    """ The attribute holding the tracks edited in the viewer and tracked by the Track buttons: "tracks", or the one
+    the node type names (`editableTracks`, e.g. the pins of a FaceTracker, whose "tracks" are its landmarks). """
+    return getattr(getattr(node, "nodeDesc", None), "editableTracks", "tracks")
+
 class LiveImageProvider(QQuickImageProvider):
     """
     Serves the displayed image to QML as "image://live/<revision>", and small images (track patterns
@@ -676,7 +682,7 @@ class LiveController(QObject):
         """
         from meshroom.live import tracking
         # Not while an action runs (e.g. the geometry tracking of a Resection: both would edit the node)
-        if self._trackToken is not None or self._actionToken is not None or node is None or not node.hasAttribute("tracks"):
+        if self._trackToken is not None or self._actionToken is not None or node is None or not node.hasAttribute(_editableTracks(node)):
             return
         input = node.attribute("input")
         if not input.isLink or not isImageOpNode(input.inputRootLink.node):
@@ -685,7 +691,7 @@ class LiveController(QObject):
         try:
             plan = buildPlan(input.inputRootLink.node)
             info = self._evaluator.info(plan)
-            tracks = tracking.parseTracks(node.attribute("tracks").value)
+            tracks = tracking.parseTracks(node.attribute(_editableTracks(node)).value)
         except Exception as e:
             self._setError(f"Cannot track: {e}", node.name)
             return
@@ -700,7 +706,14 @@ class LiveController(QObject):
         else:
             end = start + 100 * step
         frames = list(range(start, end + step, step))
-        if len(frames) < 2:
+        # Within the track range of the node ("Limit Track Range")
+        from meshroom.live.params import trackRange
+        values = {name: node.attribute(name).value for name in ("limitTrackRange", "trackFirst", "trackLast")
+                  if node.hasAttribute(name)}
+        frames = trackRange(values, frames)
+        if len(frames) < 2 or frames[0] != start:
+            if frames != [start] and values.get("limitTrackRange"):
+                self._setError("The current frame is outside the track range (Limit Track Range).", node.name)
             return
         token = CancelToken()
         self._trackToken = token
@@ -708,7 +721,7 @@ class LiveController(QObject):
         self._setTrackingProgress(0.0)
         self._trackNode = node
         self._trackPending = []
-        self._beginInteractiveEdit(node.attribute("tracks"))
+        self._beginInteractiveEdit(node.attribute(_editableTracks(node)))
 
         def cancel():
             if token.cancelled:
@@ -830,11 +843,11 @@ class LiveController(QObject):
             return
         changes = []
         try:
-            if node.hasAttribute("tracks"):
-                tracks, removed = tracking.deleteKeys(tracking.parseTracks(node.attribute("tracks").value), list(names or []),
+            if node.hasAttribute(_editableTracks(node)):
+                tracks, removed = tracking.deleteKeys(tracking.parseTracks(node.attribute(_editableTracks(node)).value), list(names or []),
                                                       self._currentFrame, mode)
                 if removed:
-                    changes.append((node.attribute("tracks"), json.dumps(tracks)))
+                    changes.append((node.attribute(_editableTracks(node)), json.dumps(tracks)))
             if node.hasAttribute("geoTrack") and node.attribute("geoTrack").value:
                 text, removed = geotrack.deletePoses(node.attribute("geoTrack").value, self._currentFrame, mode)
                 if removed:
@@ -894,7 +907,7 @@ class LiveController(QObject):
                 uiGraph = self.parent()
                 if uiGraph is not None and hasattr(uiGraph, "cancelInteractiveEdit"):
                     try:
-                        uiGraph.cancelInteractiveEdit(node.attribute("tracks"))
+                        uiGraph.cancelInteractiveEdit(node.attribute(_editableTracks(node)))
                     except RuntimeError:
                         pass
             return
@@ -903,7 +916,7 @@ class LiveController(QObject):
         # The keys not written yet (the live display writes them as they come), then one undo step
         self._trackApplyTimer.stop()
         self._applyTrackedKeys()
-        self._endInteractiveEdit(node.attribute("tracks"))
+        self._endInteractiveEdit(node.attribute(_editableTracks(node)))
         self._trackNode = None
         self._setCurrentFrame(lastFrame)
 
@@ -925,7 +938,7 @@ class LiveController(QObject):
         if node is None or not pending or not self._isCurrentNode(node, self._operationGeneration):
             return
         try:
-            tracks = tracking.parseTracks(node.attribute("tracks").value)
+            tracks = tracking.parseTracks(node.attribute(_editableTracks(node)).value)
         except (ValueError, RuntimeError):
             return
         for index, name, frame, x, y, score, trackFormat in pending:
@@ -934,7 +947,7 @@ class LiveController(QObject):
                 tracks[index].setdefault("format", trackFormat)
                 tracks[index].setdefault("keys", {})[str(frame)] = [x, y]
                 tracks[index].setdefault("scores", {})[str(frame)] = round(score, 4)
-        self._setInteractively(node.attribute("tracks"), json.dumps(tracks))
+        self._setInteractively(node.attribute(_editableTracks(node)), json.dumps(tracks))
         self._setCurrentFrame(pending[-1][2])
 
     def _beginInteractiveEdit(self, attribute):
@@ -1569,13 +1582,13 @@ class LiveController(QObject):
         """
         import json
         from meshroom.live import tracking
-        if node is None or not node.hasAttribute("tracks"):
+        if node is None or not node.hasAttribute(_editableTracks(node)):
             return ""
         image = self._inputImageAt(node, frame)
         if image is None:
             return ""
         try:
-            track = tracking.findTrack(json.loads(node.attribute("tracks").value or "[]"), trackName)
+            track = tracking.findTrack(json.loads(node.attribute(_editableTracks(node)).value or "[]"), trackName)
         except ValueError:
             return ""
         if track:

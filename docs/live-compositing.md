@@ -568,6 +568,12 @@ Entrée « Mask » (canal et inversion comme les autres masques) : le visage n'e
 (le reste noirci, recherche limitée à sa boîte) ; les points qu'il masque (« h » dans « Face Track ») ne placent pas
 la tête, leurs sommets suivent seulement la tête, et ils n'ont pas de clé de piste à ces frames (un feuillage devant
 le visage : son roto inversé).
+Pins (« Pins », comme GeoTracker, `face.solveFace(pins=...)`) : dans le viewer, « Add pin » puis clic sur le visage
+(le point est gardé sur le visage neutre : triangle et coordonnées barycentriques), puis glisser le pin à sa place ;
+les boutons Track suivent les pins comme des pistes. Ils placent la tête avec les points rigides (comptés trois fois),
+puis, avec « Non Rigid », le visage est déplacé autour de chacun (gaussiennes sur le visage neutre de rayon « Pin
+Radius », résolues pour que chaque pin passe exactement par sa position) : un pin au coin des lèvres tire la lèvre,
+pas la tête. Le viewer les dessine reliés au point du visage (l'erreur).
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le
@@ -581,6 +587,11 @@ celles d'un Tracker. Installation : `pip install mediapipe` (matplotlib et OpenC
 de dessin de MediaPipe, ne sont pas nécessaires : remplacés à l'import quand ils manquent, `face.importMediaPipe`) et
 `python -m meshroom.live.neural.download facelandmarker` (modèle et visage canonique dans MESHROOM_MODELS_PATH).
 Limite : les sommets gardent leur profondeur neutre (le mouvement des lèvres vers l'avant n'est pas suivi).
+
+**Plage de tracking** (« Limit Track Range », « Track First », « Track Last » : Tracker, CameraTracker, Resection,
+FaceTracker, Roto ; `params.trackRangeParams` / `trackRange`) : les actions de tracking (boutons Track du viewer,
+Autotrack, Track Geometry et Refine, Track Face, Track Shapes) ne calculent que dans cette plage ; une frame courante
+hors de la plage est refusée.
 
 ### 4.14 GPU et réseaux de neurones
 

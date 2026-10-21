@@ -259,3 +259,63 @@ def test_hiddenLandmarksDoNotMoveTheHead():
     # Their vertices follow the head (not pulled)
     xy, _, _ = CAMERA.project(geo.vertices[hidden], W, H)
     np.testing.assert_allclose(xy, pixels[hidden], atol=0.05)
+
+
+def test_pinsPullTheFaceNonRigid():
+    pixels = face.toPixels(landmarksAt(2), W, H)
+    # A pin on a mouth vertex, dragged 15 pixels to the right: the mouth follows, the far side of the face does not
+    pinned = MOUTH[len(MOUTH) // 2]
+    target = pixels[pinned] + [15.0, 0.0]
+    geo, head, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True,
+                                     pins=(FACE.vertices[[pinned]], target[None]), pinRadius=2.5)
+    xy, _, _ = CAMERA.project(geo.vertices, W, H)
+    np.testing.assert_allclose(xy[pinned], target, atol=0.3)
+    far = np.linalg.norm(FACE.vertices - FACE.vertices[pinned], axis=1) > 8.0
+    np.testing.assert_allclose(xy[far], pixels[far], atol=0.3)
+    # A pin on the surface between vertices goes through its position too
+    point = FACE.vertices[FACE.triangles()[100]].mean(axis=0)
+    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True,
+                                  pins=(point[None], np.array([[300.0, 200.0]])), pinRadius=3.0)
+    (triangle, weights), = face.pinLocations(FACE, point[None])
+    onFace = geo.vertices[FACE.triangles()[triangle]].T @ weights
+    xy, _, _ = CAMERA.project(onFace[None], W, H)
+    np.testing.assert_allclose(xy[0], [300.0, 200.0], atol=1.0)
+
+
+def test_trackRangeLimitsTheFrames():
+    from meshroom.live.params import trackRange
+    assert trackRange({}, range(1, 6)) == [1, 2, 3, 4, 5]
+    assert trackRange({"limitTrackRange": True, "trackFirst": 2, "trackLast": 4}, range(1, 6)) == [2, 3, 4]
+    assert trackRange({"limitTrackRange": True, "trackFirst": 4, "trackLast": 2}, range(5, 0, -1)) == [4, 3, 2]
+    assert trackRange({"limitTrackRange": False, "trackFirst": 2, "trackLast": 4}, [1, 5]) == [1, 5]
+
+
+def test_faceTrackerPins(tmp_path, monkeypatch):
+    from meshroom.live.evaluator import RenderContext
+    monkeypatch.setattr(face, "RIGID_LANDMARKS", tuple(RIGID))
+    monkeypatch.setattr(face, "landmarker", lambda minConfidence=0.5: FakeLandmarker())
+    monkeypatch.setattr(face, "_cropAround", lambda landmarks, width, height: (0, 0, width, height))
+    graph, plate, tracker = faceGraph(tmp_path)
+    values = {attr.name: _snapshotValue(attr) for attr in tracker.attributes
+              if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+    context = ActionContext(values, Evaluator(), buildPlan(plate), 1, nodePlan=buildPlan(tracker))
+    tracker.faceTrack.value = tracker.nodeDesc.runAction("trackFace", context)["faceTrack"]
+    tracker.smoothing.value = 0.0
+    graph.update()
+    plan = buildPlan(tracker)
+    evaluator = Evaluator()
+    # A pin picked on the face where the mouth vertex is seen: its point on the neutral face is that vertex
+    pinned = MOUTH[len(MOUTH) // 2]
+    geo = evaluator.data(plan, plan.target, "geoOutput", 1)
+    (x, y), = CAMERA.project(geo.vertices[[pinned]], W, H)[0]
+    ctx = RenderContext(plan.nodes[plan.target], 1, evaluator, plan)
+    point = tracker.nodeDesc.pickPoint(ctx, x, y)
+    np.testing.assert_allclose(point, FACE.vertices[pinned], atol=0.05)
+    # Dragged 12 pixels up: the face goes through it
+    tracker.pins.value = json.dumps([{"name": "pin1", "enabled": True, "point": list(point), "format": [W, H],
+                                      "keys": {"1": [x, y + 12.0]}, "keyframes": [1]}])
+    graph.update()
+    plan = buildPlan(tracker)
+    geo = Evaluator().data(plan, plan.target, "geoOutput", 1)
+    xy, _, _ = CAMERA.project(geo.vertices[[pinned]], W, H)
+    np.testing.assert_allclose(xy[0], [x, y + 12.0], atol=0.5)

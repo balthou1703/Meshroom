@@ -434,7 +434,7 @@ Panel {
         TrackerGizmo {
             anchors.fill: parent
             readonly property var selected: _currentScene ? _currentScene.selectedNode : null
-            node: selected && ["Tracker", "CameraTracker", "Resection"].indexOf(selected.nodeType) >= 0 && root.hasImage ? selected : null
+            node: selected && ["Tracker", "CameraTracker", "Resection", "FaceTracker"].indexOf(selected.nodeType) >= 0 && root.hasImage ? selected : null
             // The tracks of the autotrack are shown, not edited
             readOnly: !!node && node.nodeType === "CameraTracker"
             formatWidth: root.live ? root.live.imageWidth : 0

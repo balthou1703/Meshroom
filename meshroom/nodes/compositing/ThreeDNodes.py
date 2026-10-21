@@ -14,7 +14,7 @@ import numpy as np
 from meshroom.core import desc
 from meshroom.live import scene3d
 from meshroom.live.gpu import gpuParam
-from meshroom.live.params import imageInput, maskParams, pointTrackerParam
+from meshroom.live.params import imageInput, maskParams, pointTrackerParam, trackRangeParams
 
 _COLOR = "#6E9E8A"
 _FILE_FILTER = "3D files (*.usd *.usda *.usdc *.usdz *.abc *.fbx *.obj *.ply)"
@@ -304,6 +304,7 @@ into keys of a Camera or a ReadGeo.
                                     "another edge."),
         pointTrackerParam(),
         gpuParam(),
+        *trackRangeParams(),
         desc.IntParam(name="trackPoints", label="Track Points", value=150, range=(30, 1000, 10), invalidate=False,
                       description="Number of points of the geometry (on textured parts of the plate) followed at each "
                                   "frame by 'Track Geometry'."),
@@ -675,6 +676,8 @@ class _GeoTrackAction:
         frame = self.context.currentFrame
         frames = self.context.frames
         if name in ("trackGeoForward", "trackGeoBackward"):
+            if frame not in frames:
+                raise RuntimeError("The current frame is outside the track range (Limit Track Range).")
             step = 1 if name == "trackGeoForward" else -1
             # To the next keyframe (excluded), or the end of the frame range
             ahead = [f for f in self.allKeyframes if (f - frame) * step > 0]
@@ -765,7 +768,9 @@ class _GeoTrackAction:
     def refine(self):
         """ Each span between two keyframes tracked from both ends, the two tracks blended. Returns why it stopped. """
         from meshroom.live import geotrack
-        spans = [(a, b) for a, b in zip(self.allKeyframes, self.allKeyframes[1:]) if b - a > 1]
+        # The spans inside the track range ("Limit Track Range")
+        inRange = set(self.context.frames)
+        spans = [(a, b) for a, b in zip(self.allKeyframes, self.allKeyframes[1:]) if b - a > 1 and a in inRange and b in inRange]
         if not spans:
             raise RuntimeError("Refine needs two keyframes (pins placed by hand or aligned frames) with frames between them.")
         total = sum(b - a for a, b in spans) * 2

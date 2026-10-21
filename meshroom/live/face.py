@@ -448,12 +448,45 @@ def _defaultStart(mesh: scene3d.GeoData) -> np.ndarray:
     return scene3d.lookAt(center + np.array([0.0, 0.0, 4.0 * size]), center)
 
 
+# Pins: points of the face (in the space of its neutral mesh) placed by hand in the plate, and tracked
+
+def surfaceLocation(vertices: np.ndarray, triangles: np.ndarray, point: np.ndarray) -> Tuple[int, np.ndarray]:
+    """ (the triangle, the barycentric coordinates (3,)) of the point of a mesh surface nearest to `point`. """
+    a, b, c = (vertices[triangles[:, i]] for i in range(3))
+    ab, ac, ap = b - a, c - a, np.asarray(point, dtype=np.float64) - a
+    # The barycentric coordinates of the point projected on each triangle plane, clamped into the triangle
+    d00, d01, d11 = (ab * ab).sum(1), (ab * ac).sum(1), (ac * ac).sum(1)
+    d20, d21 = (ap * ab).sum(1), (ap * ac).sum(1)
+    denominator = np.where(np.abs(d00 * d11 - d01 * d01) > 1e-20, d00 * d11 - d01 * d01, 1e-20)
+    v = np.clip((d11 * d20 - d01 * d21) / denominator, 0.0, 1.0)
+    w = np.clip((d00 * d21 - d01 * d20) / denominator, 0.0, 1.0)
+    total = np.maximum(v + w, 1.0)
+    v, w = v / total, w / total
+    closest = a + ab * v[:, None] + ac * w[:, None]
+    best = int(np.argmin(((closest - point) ** 2).sum(1)))
+    return best, np.array([1.0 - v[best] - w[best], v[best], w[best]])
+
+
+def pinLocations(mesh: scene3d.GeoData, points: np.ndarray) -> List[Tuple[int, np.ndarray]]:
+    """ The place of each pin point (neutral face space) on the mesh: (triangle, barycentric coordinates). """
+    triangles = mesh.triangles()
+    return [surfaceLocation(mesh.vertices, triangles, point) for point in np.asarray(points, dtype=np.float64).reshape(-1, 3)]
+
+
+def _onSurface(vertices: np.ndarray, triangles: np.ndarray, locations) -> np.ndarray:
+    return np.array([vertices[triangles[t]].T @ weights for t, weights in locations]).reshape(-1, 3)
+
+
 def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraData, width: int, height: int,
-              initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=()):
+              initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=(),
+              pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5):
     """
     The face seen in the image: the pose of the head from the `rigid` landmarks, then each vertex moved at its depth
     onto the ray of its landmark (`deform`). The `hidden` landmarks (masked out) are not used: the head is placed
     with the other rigid ones (all of them if fewer than 6 are left), and their vertices follow the head only.
+    `pins`: (points (k, 3) on the neutral face, their image positions (k, 2), Nuke pixels): they place the head with
+    the rigid landmarks (counted three times), then, non rigid, the face is moved around each of them (a smooth
+    interpolation of their remaining errors, over `pinRadius` units of the mesh) so that it goes through them.
 
     Args:
         mesh: the face (vertex i: landmark i), its shape the neutral face, in its own space.
@@ -473,7 +506,16 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     rigid = visibleRigid if len(visibleRigid) >= 6 else rigid
     focal = camera.focalPixels(width)
     start = initial if initial is not None else _defaultStart(mesh)
-    cameraToFace, _, error = robustPose(mesh.vertices[rigid], pixels[rigid], width, height, focal, start)
+    fitPoints, fitPixels = mesh.vertices[rigid], pixels[rigid]
+    locations = []
+    if pins is not None and len(pins[0]):
+        locations = pinLocations(mesh, pins[0])
+        pinPoints = _onSurface(mesh.vertices, mesh.triangles(), locations)
+        pinPixels = np.asarray(pins[1], dtype=np.float64).reshape(-1, 2)
+        # Placed by hand: weighted more than a landmark
+        fitPoints = np.r_[fitPoints, np.repeat(pinPoints, 3, axis=0)]
+        fitPixels = np.r_[fitPixels, np.repeat(pinPixels, 3, axis=0)]
+    cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
     head = camera.matrix @ np.linalg.inv(cameraToFace)
     view = np.linalg.inv(cameraToFace)
     inCamera = mesh.vertices @ view[:3, :3].T + view[:3, 3]
@@ -486,5 +528,40 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         moved[[i for i in hidden if i < count]] = False
         inCamera = inCamera.copy()
         inCamera[:count][moved] = (rays * depth[:, None])[moved]
+        if locations:
+            inCamera = _followPins(inCamera, mesh, locations, pinPixels, width, height, focal, pinRadius)
     world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
     return scene3d.GeoData(world, name="face", topology=mesh.topology), head, cameraToFace, error
+
+
+def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixels: np.ndarray, width: int, height: int,
+                focal: float, radius: float) -> np.ndarray:
+    """
+    The face (vertices in camera space) moved in the image, each vertex at its depth, so that the pins go through
+    their positions: their errors interpolated over the neutral face by gaussians of `radius` (exact at the pins).
+    """
+    def project(points):
+        z = np.where(points[:, 2] < -1e-9, -points[:, 2], 1e-9)
+        return np.c_[width / 2.0 + focal * points[:, 0] / z, height / 2.0 + focal * points[:, 1] / z], z
+    triangles = mesh.triangles()
+    centers = _onSurface(mesh.vertices, triangles, locations)
+    radius = max(float(radius), 1e-6)
+    # The shift of each vertex for a unit error of each pin (gaussians around the pins), and what it gives at the pins
+    # (interpolated from the vertices of their triangle): solved so that each pin lands on its position
+    vertexKernel = np.exp(-((mesh.vertices[:, None, :] - centers[None, :, :]) ** 2).sum(-1) / (radius * radius))
+    atPins = np.array([weights @ vertexKernel[triangles[t]] for t, weights in locations])
+    count = len(inCamera)
+    moved = inCamera.copy()
+    # Twice: the perspective makes the first step a little short
+    for _ in range(2):
+        current, _ = project(_onSurface(moved, triangles, locations))
+        try:
+            weights = np.linalg.solve(atPins + 1e-6 * np.eye(len(centers)), pinPixels - current)
+        except np.linalg.LinAlgError:
+            weights = np.linalg.lstsq(atPins, pinPixels - current, rcond=None)[0]
+        shift = vertexKernel @ weights
+        n = min(count, len(shift))
+        xy, depth = project(moved[:n])
+        xy = xy + shift[:n]
+        moved[:n] = np.c_[(xy[:, 0] - width / 2.0) / focal, (xy[:, 1] - height / 2.0) / focal, -np.ones(n)] * depth[:, None]
+    return moved

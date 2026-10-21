@@ -34,8 +34,10 @@ Item {
 
     // Tracks shown but not edited (CameraTracker: the autotrack)
     property bool readOnly: false
-    // Pins of a Resection: tracks stuck to a point of its geometry ("point"), added by clicking on the geometry
-    readonly property bool pinMode: !!node && node.nodeType === "Resection"
+    // Pins of a Resection or a FaceTracker: tracks stuck to a point of its geometry ("point"), added by clicking on it
+    readonly property bool pinMode: !!node && (node.nodeType === "Resection" || node.nodeType === "FaceTracker")
+    // Resection only: the geometry track (Track Geometry, Align, Refine)
+    readonly property bool geoMode: !!node && node.nodeType === "Resection"
     readonly property string itemName: pinMode ? "pin" : "track"
     property bool adding: false
     property var selectedNames: []
@@ -48,7 +50,8 @@ Item {
         return tracks.find(function(t) { return t.name === name }) || null
     }
 
-    readonly property var tracksAttribute: node ? node.attribute("tracks") : null
+    // The edited tracks: the pins of a FaceTracker ("tracks" are its landmarks), else "tracks"
+    readonly property var tracksAttribute: node ? node.attribute(node.hasAttribute("pins") ? "pins" : "tracks") : null
     // Width of the displayed image format: tracks made on another resolution are scaled to it
     property int formatWidth: 0
     // The tracks as stored (each in the format of the image it was tracked on)
@@ -453,14 +456,14 @@ Item {
             anchors.centerIn: parent
             spacing: 2
 
-            Label { text: root.pinMode ? "Resection" : "Tracker"; font.bold: true; leftPadding: 4; rightPadding: 6 }
+            Label { text: root.pinMode ? root.node.nodeType : "Tracker"; font.bold: true; leftPadding: 4; rightPadding: 6 }
             MaterialToolButton {
                 font.pointSize: 16
                 text: MaterialIcons.add_location_alt
                 checked: root.adding
                 enabled: !root.tracking
                 onClicked: root.adding = !root.adding
-                ToolTip.text: root.pinMode ? "Add a pin: click on the geometry, then drag the pin onto its place in the plate"
+                ToolTip.text: root.pinMode ? "Add a pin: click on the " + (root.geoMode ? "geometry" : "face") + ", then drag the pin onto its place in the plate"
                                            : "Add a track: click on a feature to track"
             }
             MaterialToolButton {
@@ -507,7 +510,7 @@ Item {
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.deleteKeys(root.node, root.selectedNames, "backward")
                 ToolTip.text: "Delete the keys before the current frame (its key kept), of the selected tracks or all" +
-                              (root.pinMode ? ", and the geometry track before it" : "")
+                              (root.geoMode ? ", and the geometry track before it" : "")
             }
             MaterialToolButton {
                 font.pointSize: 16
@@ -515,7 +518,7 @@ Item {
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.deleteKeys(root.node, root.selectedNames, "forward")
                 ToolTip.text: "Delete the keys after the current frame (its key kept), of the selected tracks or all" +
-                              (root.pinMode ? ", and the geometry track after it" : "")
+                              (root.geoMode ? ", and the geometry track after it" : "")
             }
             MaterialToolButton {
                 font.pointSize: 16
@@ -523,7 +526,7 @@ Item {
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
                 onClicked: root.live.deleteKeys(root.node, root.selectedNames, "tracked")
                 ToolTip.text: "Delete the tracked keys, keeping the keyframes placed by hand, of the selected tracks or all" +
-                              (root.pinMode ? " (and the tracked poses of the geometry, its keyframes kept)" : "")
+                              (root.geoMode ? " (and the tracked poses of the geometry, its keyframes kept)" : "")
             }
             MaterialToolButton {
                 font.pointSize: 16
@@ -541,7 +544,7 @@ Item {
             }
             // Resection: start from the camera stepped back to see the whole geometry, centered
             MaterialToolButton {
-                readonly property var attribute: root.pinMode && root.node.hasAttribute("centerGeometry")
+                readonly property var attribute: root.geoMode && root.node.hasAttribute("centerGeometry")
                                                  ? root.node.attribute("centerGeometry") : null
                 visible: !!attribute
                 font.pointSize: 16
@@ -554,9 +557,9 @@ Item {
                               "is centered in the view (large geometry around the camera)"
             }
             // Resection: the geometry itself tracked by many points of its surface (optical flow / patches)
-            Rectangle { visible: root.pinMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
+            Rectangle { visible: root.geoMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
             MaterialToolButton {
-                visible: root.pinMode
+                visible: root.geoMode
                 font.pointSize: 16
                 text: MaterialIcons.skip_previous
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
@@ -565,7 +568,7 @@ Item {
                               "frame back to the previous keyframe"
             }
             MaterialToolButton {
-                visible: root.pinMode
+                visible: root.geoMode
                 font.pointSize: 16
                 text: MaterialIcons.skip_next
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
@@ -574,7 +577,7 @@ Item {
                               "frame to the next keyframe"
             }
             MaterialToolButton {
-                visible: root.pinMode
+                visible: root.geoMode
                 font.pointSize: 16
                 text: MaterialIcons.my_location
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
@@ -583,7 +586,7 @@ Item {
                               "the nearest keyframe; the frame becomes a keyframe"
             }
             MaterialToolButton {
-                visible: root.pinMode
+                visible: root.geoMode
                 font.pointSize: 16
                 text: MaterialIcons.auto_fix_high
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
@@ -591,7 +594,7 @@ Item {
                 ToolTip.text: "Refine: track the geometry again between each pair of keyframes, from both ends, and blend"
             }
             MaterialToolButton {
-                visible: root.pinMode
+                visible: root.geoMode
                 font.pointSize: 16
                 text: MaterialIcons.layers_clear
                 enabled: !root.tracking && !!root.live && root.live.actionProgress < 0 && root.node.hasAttribute("geoTrack")
@@ -601,11 +604,11 @@ Item {
             }
             // Pins of the Resection at this frame and their reprojection error
             Label {
-                visible: root.pinMode
+                visible: root.geoMode
                 leftPadding: 6
                 rightPadding: 4
                 text: {
-                    if (!root.pinMode || !root.live)
+                    if (!root.geoMode || !root.live)
                         return ""
                     root.live.statusRevision  // Refreshed with the renders
                     root.frame

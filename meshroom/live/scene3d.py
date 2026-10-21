@@ -481,7 +481,8 @@ def raycast(geo: GeoData, origin: np.ndarray, direction: np.ndarray) -> Optional
     q = np.cross(s, edge1)
     v = (q * direction).sum(axis=1) * inverse
     t = (edge2 * q).sum(axis=1) * inverse
-    hit = valid & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-9)
+    # A small tolerance: a ray through a vertex or along an edge hits (rounding would miss every triangle around it)
+    hit = valid & (u >= -1e-7) & (v >= -1e-7) & (u + v <= 1 + 1e-7) & (t > 1e-9)
     if not hit.any():
         return None
     nearest = np.argmin(np.where(hit, t, np.inf))

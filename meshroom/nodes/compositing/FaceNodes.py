@@ -7,7 +7,7 @@ import numpy as np
 
 from meshroom.core import desc
 from meshroom.live import scene3d
-from meshroom.live.params import imageInput, maskParams
+from meshroom.live.params import imageInput, maskParams, trackRangeParams
 
 _COLOR = "#6E9E8A"
 
@@ -15,6 +15,8 @@ _COLOR = "#6E9E8A"
 class FaceTracker(desc.ImageOpNode):
     category = "Comp 3D"
     color = _COLOR
+    # The tracks edited in the viewer (and tracked by its Track buttons) are the pins; "tracks" are the landmarks
+    editableTracks = "pins"
     documentation = """
 Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools FaceTracker.
 
@@ -29,7 +31,12 @@ Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools 
 
 Outputs: "Face" (the face mesh at each frame, in the world of the camera), "Head Matrix" (the rigid pose of the head:
 face space to world, e.g. for the "Input Matrix" of a ReadGeo), "Camera" (the plate camera), and the plate with the face
-drawn. The optional "Mask" limits the search to its white part and leaves out the landmarks it masks out (an
+drawn. Pins help where MediaPipe is wrong or lost (occlusions, profile, motion blur), as in GeoTracker: in the viewer, "Add
+pin" and click on the face, then drag the pin onto its place in the plate; track the pins forward / backward like
+tracks. They place the head with the landmarks (weighted more), then, with "Non Rigid", the face around each pin is
+moved until it goes through it (smoothly, over "Pin Radius"): a pin on a lip corner pulls the lip, not the head.
+
+The optional "Mask" limits the search to its white part and leaves out the landmarks it masks out (an
 occluding object: its roto, inverted). Its tracks (the landmarks, named by region: lips_013, leftEye_033...) can drive a Roto, a Stabilize or a
 CornerPin like those of a Tracker: connect it to their "Tracker" input.
 
@@ -60,6 +67,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              description="Find the face at every frame of the plate (MediaPipe Face Landmarker)."),
         desc.PushButtonParam(name="clearFace", label="Clear", semantic="liveAction",
                              description="Remove the tracked face."),
+        *trackRangeParams(),
+        desc.StringParam(name="pins", label="Pins", value="[]", semantic="tracks",
+                         description="Pins as JSON: a tracked image position and its point on the neutral face "
+                                     "(\"point\": [x, y, z]). Edited in the viewer."),
+        desc.FloatParam(name="pinRadius", label="Pin Radius", value=2.5, range=(0.1, 20.0, 0.1),
+                        description="How far around a pin the face is moved to go through it (non rigid), in the "
+                                    "units of the face mesh (centimeters for the canonical face)."),
         desc.FloatParam(name="smoothing", label="Smoothing", value=1.0, range=(0.0, 5.0, 0.1),
                         description="Gaussian smoothing of the landmarks in time, in frames (0: as tracked)."),
         desc.BoolParam(name="deform", label="Non Rigid", value=True,
@@ -110,6 +124,49 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         except ValueError as e:
             raise RuntimeError(str(e)) from e
 
+    @staticmethod
+    def pins(ctx, info=None):
+        """ The enabled pins with a point on the face, in the pixels of the plate. """
+        from meshroom.live import tracking
+        try:
+            tracks = tracking.parseTracks(ctx.value("pins"))
+        except ValueError as e:
+            raise RuntimeError(f"Invalid pins: {e}") from e
+        info = info or ctx.inputInfo("input")
+        if info is not None:
+            tracks = tracking.scaleTracks(tracks, info.width, info.height)
+        return [track for track in tracks if track.get("enabled", True) and len(track.get("point") or []) == 3]
+
+    @staticmethod
+    def pinsAt(pins, frame):
+        """ (points on the neutral face (k, 3), image positions (k, 2)) of the pins counting at a frame: between their
+        first and last keys (a pin with one key holds it). """
+        from meshroom.live import tracking
+        points, positions = [], []
+        for pin in pins:
+            keys = tracking.trackKeys(pin)
+            if not keys or (len(keys) > 1 and not keys[0][0] <= frame <= keys[-1][0]):
+                continue
+            points.append(pin["point"])
+            positions.append(tracking.trackPosition(pin, frame))
+        return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
+
+    def pickPoint(self, ctx, x, y):
+        """ The point of the neutral face under the image position (x, y) (where the fitted face is seen), or None. """
+        from meshroom.live import face
+        info = ctx.inputInfo("input")
+        geo = ctx.ownData("geoOutput", ctx.frame)
+        if info is None or geo is None or geo.isEmpty:
+            raise RuntimeError("Track the face first (Track Face): the pins are put on it.")
+        origin, direction = self.camera(ctx).ray(x, y, info.width, info.height)
+        hit = scene3d.raycast(geo, origin, direction)
+        if hit is None:
+            return None
+        mesh = self.mesh(ctx)
+        triangle, weights = face.surfaceLocation(geo.vertices, geo.triangles(), hit)
+        # The same place on the neutral face
+        return mesh.vertices[mesh.triangles()[triangle]].T @ weights
+
     def solve(self, ctx, frame=None):
         """ (the face GeoData in world space, the head matrix) at a frame; an empty GeoData and the identity before
         tracking. """
@@ -122,9 +179,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         landmarks = face.landmarksAt(faces, frame, ctx.value("smoothing"))
         pixels = face.toPixels(landmarks, info.width, info.height)
         tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
+        pinPoints, pinPositions = self.pinsAt(self.pins(ctx, info), frame)
         geo, head, _, _ = face.solveFace(self.mesh(ctx, frame), pixels, self.camera(ctx, frame), info.width, info.height,
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
-                                         hidden=tracked.get("hidden") or ())
+                                         hidden=tracked.get("hidden") or (),
+                                         pins=(pinPoints, pinPositions) if len(pinPoints) else None,
+                                         pinRadius=ctx.value("pinRadius"))
         return geo, head
 
     def computeData(self, ctx, outputName):
@@ -153,6 +213,17 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 from meshroom.live import gpu
                 geoRender.drawGeometry(rgba, image.bbox, geo, self.camera(ctx), width, height, display,
                                        (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx))
+        # The pins: where the face puts their point, linked to where they are (the error)
+        geo = ctx.ownData("geoOutput", ctx.frame)
+        points, positions = self.pinsAt(self.pins(ctx, image.info), ctx.frame)
+        if len(points) and geo is not None and not geo.isEmpty:
+            mesh = self.mesh(ctx)
+            triangles = mesh.triangles()
+            onFace = np.array([geo.vertices[triangles[t]].T @ w for t, w in face.pinLocations(mesh, points)])
+            xy, _, _ = self.camera(ctx).project(onFace, width, height)
+            scene3d.drawSegments(rgba, image.bbox, xy, positions, (1.0, 0.3, 0.3), 1.0)
+            for dx in range(-3, 4):
+                scene3d.drawSegments(rgba, image.bbox, xy + [dx, -3], xy + [dx, 3], (1.0, 0.85, 0.2), 1.0)
         return image.withRGBA(rgba)
 
     # Actions

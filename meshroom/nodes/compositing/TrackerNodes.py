@@ -13,7 +13,7 @@ import numpy as np
 
 from meshroom.core import desc
 from meshroom.live.gpu import gpuParam
-from meshroom.live.params import imageInput, imageOutput, maskParams, pointTrackerParam
+from meshroom.live.params import imageInput, imageOutput, maskParams, pointTrackerParam, trackRangeParams
 
 
 class Tracker(desc.ImageOpNode):
@@ -40,6 +40,7 @@ class Tracker(desc.ImageOpNode):
                                          "can then be edited), and disconnect it."),
         pointTrackerParam(),
         gpuParam(),
+        *trackRangeParams(),
     ]
     outputs = imageOutput("Input image, or moved with the tracks.")
     valuesOnlyInputs = ("importFrom",)
@@ -410,6 +411,7 @@ its white areas (e.g. a roto of a moving object, inverted): masked out areas are
                                      "features matched by LightGlue (robust to fast motions and changes of look; PyTorch "
                                      "and its weights needed, else patches)."),
         gpuParam(),
+        *trackRangeParams(),
         desc.PushButtonParam(name="autotrack", label="Autotrack", semantic="liveAction",
                              description="Detect and track features through the frame range of the input."),
         desc.FloatParam(name="focalLength", label="Focal Length", description="Focal length of the lens in mm.",
