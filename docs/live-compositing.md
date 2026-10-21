@@ -553,6 +553,24 @@ l'on pose les pins (les points des pins sont en coordonnées monde) et rigide pe
 frame courante) ; suivi en numpy sur CPU (environ 0,1 à 0,3 s par frame à 1K, davantage en 4K avec le flot optique ;
 voir 4.14 pour le GPU) ; lecture Alembic / FBX non testée ici (modules absents).
 
+### 4.13 bis FaceTracker
+
+**FaceTracker** (Comp 3D, `meshroom/nodes/compositing/FaceNodes.py`, `meshroom/live/face.py`) : un visage suivi dans
+la plaque, bouche et yeux compris (non rigide). « Track Face » passe MediaPipe Face Landmarker (Google, Apache-2.0,
+CPU) sur toute la plage : 478 points par frame et 52 coefficients d'expression, gardés dans le nœud (« Face Track »).
+À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
+(front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
+profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le
+temps. Entrée « Face » : n'importe quel maillage de topologie MediaPipe (468 ou 478 sommets dans l'ordre des points),
+par exemple un scan de l'acteur retopologisé dessus, sa forme étant le visage neutre ; sans elle, le visage
+canonique de MediaPipe. Sorties : « Face » (le maillage à chaque frame, dans le monde de la caméra), « Head Matrix »
+(pose rigide de la tête : à brancher dans l'« Input Matrix » d'un ReadGeo), « Camera » (la caméra de la plaque :
+entrée « Camera », sinon 35 mm à l'origine), l'image (maillage ou points dessinés). Ses pistes (« Tracks » :
+features, all ou none ; nommées par région, lips_013, leftEye_033...) pilotent Roto, Stabilize et CornerPin comme
+celles d'un Tracker. Installation : `pip install mediapipe` et
+`python -m meshroom.live.neural.download facelandmarker` (modèle et visage canonique dans MESHROOM_MODELS_PATH).
+Limite : les sommets gardent leur profondeur neutre (le mouvement des lèvres vers l'avant n'est pas suivi).
+
 ### 4.14 GPU et réseaux de neurones
 
 **GPU** (`meshroom/live/gpu.py`, `gpuOps.py`) : les nœuds Blur, Sharpen, Erode, Median, ZDefocus, OpticalFlow,

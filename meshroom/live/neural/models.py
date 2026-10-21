@@ -51,6 +51,16 @@ MODELS = {
                        ["torch/hub/checkpoints"]),
     "megapose": Model("megapose", "MegaPose object pose (RGB)", "megapose", "megapose (megapose6d) or happypose",
                       "Apache-2.0", ["megapose"]),
+    "facelandmarker": Model("facelandmarker", "MediaPipe Face Landmarker (FaceTracker)", "mediapipe", "mediapipe",
+                            "Apache-2.0", ["mediapipe/face_landmarker.task", "mediapipe/canonical_face_model.obj"],
+                            {"mediapipe/face_landmarker.task":
+                             "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/"
+                             "face_landmarker.task",
+                             "mediapipe/canonical_face_model.obj": [
+                                 "https://raw.githubusercontent.com/google-ai-edge/mediapipe/master/mediapipe/modules/"
+                                 "face_geometry/data/canonical_face_model.obj",
+                                 "https://raw.githubusercontent.com/google/mediapipe/master/mediapipe/modules/"
+                                 "face_geometry/data/canonical_face_model.obj"]}),
 }
 
 

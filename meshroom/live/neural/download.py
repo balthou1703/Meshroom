@@ -17,14 +17,29 @@ from . import NeuralUnavailable
 from .models import MODELS, MODELS_PATH_VARIABLE
 
 
-def _downloadFile(url: str, path: str):
-    import torch
+def _downloadFile(urls, path: str):
+    """ Download a file from the first of `urls` (one or several) that answers (without PyTorch: urllib). """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.isfile(path):
         print(f"  {path}: already there")
         return
-    print(f"  {url} -> {path}")
-    torch.hub.download_url_to_file(url, path, progress=True)
+    errors = []
+    for url in ([urls] if isinstance(urls, str) else urls):
+        print(f"  {url} -> {path}")
+        try:
+            try:
+                import torch
+                torch.hub.download_url_to_file(url, path, progress=True)
+            except ImportError:
+                import shutil
+                import urllib.request
+                with urllib.request.urlopen(url) as response, open(path + ".part", "wb") as file:
+                    shutil.copyfileobj(response, file)
+                os.replace(path + ".part", path)
+            return
+        except Exception as e:
+            errors.append(f"{url}: {e}")
+    raise RuntimeError("; ".join(errors))
 
 
 def download(name: str):
