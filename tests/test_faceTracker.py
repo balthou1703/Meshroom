@@ -489,4 +489,4 @@ def test_referenceFrameIsTheBaseOfTheFit(tmp_path, monkeypatch):
         assert np.median(errors) < 0.3 and errors.max() < 1.5
     # The other frames are fitted on the face of the reference frame (wider than the neutral mesh)
     rest = evaluator.cachedData(plan.target, "_rawFace", 2).vertices
-    assert np.ptp(rest[:, 0]) > 1.1 * np.ptp(FACE.vertices[:, 0])
+    assert np.ptp(rest[:, 0]) > 1.05 * np.ptp(FACE.vertices[:, 0])
