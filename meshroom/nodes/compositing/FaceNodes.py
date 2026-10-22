@@ -84,6 +84,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              description="Track the face to the previous frame only (and show it)."),
         desc.PushButtonParam(name="trackFaceStepForward", label="Track Face One Frame Forward", semantic="liveAction",
                              description="Track the face to the next frame only (and show it)."),
+        desc.PushButtonParam(name="refineFace", label="Refine", semantic="liveAction",
+                             description="Track the face again between each pair of keyframes (frames with pins), from "
+                                         "both ends, and blend the two."),
         desc.PushButtonParam(name="trackFace", label="Track Face", semantic="liveAction",
                              description="Find the face at every frame of the plate (MediaPipe Face Landmarker)."),
         desc.PushButtonParam(name="clearFace", label="Clear", semantic="liveAction",
@@ -191,16 +194,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         return {pin["name"]: [float(x), float(y)] for pin, (x, y), front in zip(pins, xy, inFront) if front}
 
     def pinReachColors(self, ctx, info, count):
-        """ The colors of the vertices showing where the pins move the face ("Show Pin Reach"): from the face color to
-        orange at a pin, over "Pin Radius"; None when not shown (rigid, no pin). """
+        """ The colors of the vertices showing where the pins of the frame move the face ("Show Pin Reach"): from the
+        face color to orange at a pin, over "Pin Radius"; None when not shown (rigid, no pin at this frame). """
         from meshroom.live import face
         if not (ctx.value("showPinReach") and ctx.value("deform")):
             return None
-        pins = self.pins(ctx, info)
-        if not pins:
+        # The pins of this frame (a keyframe): the others do not move the face here
+        points, _ = self.pinsAt(self.pins(ctx, info), ctx.frame)
+        if not len(points):
             return None
         mesh = self.mesh(ctx)
-        points = np.array([pin["point"] for pin in pins], dtype=np.float64)
         centers = face._onSurface(mesh.vertices, mesh.triangles(), face.pinLocations(mesh, points))
         radius = max(float(ctx.value("pinRadius")), 1e-6)
         distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
@@ -289,7 +292,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
     # Actions
 
     _TRACK_ACTIONS = ("trackFace", "trackFaceForward", "trackFaceBackward", "trackFaceStepForward",
-                      "trackFaceStepBackward")
+                      "trackFaceStepBackward", "refineFace")
 
     def runAction(self, name, context):
         """
@@ -314,7 +317,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             raise RuntimeError(str(e)) from e
         method = context.value("trackWith")
         frame, frames = context.currentFrame, context.frames
-        if name != "trackFace" or method != "mediapipe":
+        if name != "refineFace" and (name != "trackFace" or method != "mediapipe"):
             if frame not in frames:
                 raise RuntimeError("The current frame is outside the track range (Limit Track Range).")
         lastPublish = [0.0]
@@ -340,42 +343,49 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 detector = face.landmarker(context.value("minConfidence"))
             except face.FaceUnavailable as e:
                 raise RuntimeError(f"Track Face: {e}") from e
+        keyframes = self.keyframes(context)
+        flowMethod = "raft" if context.value("flowMethod") == "raft" else "lucasKanade"
+        useGpu = bool(context.value("useGpu")) if "useGpu" in context.values else True
+
+        def startAt(f):
+            """ The landmarks the flow starts from at a frame: its fitted face (pins included). """
+            if f not in faces:
+                # Nothing to start from at this frame: MediaPipe finds the face there first
+                if detector is None:
+                    raise RuntimeError(f"No face at frame {f} to follow: track it with MediaPipe first.")
+                face.trackFaces(context.render, [f], detector, maskAt=maskAt, onFrame=onFrame)
+                if f not in faces:
+                    raise RuntimeError(f"No face found at frame {f} to follow (lower 'Min Confidence', or start from "
+                                       f"a frame where the face is found).")
+            return self.fittedLandmarks(context.nodeContext(f), faces, f)
+
+        def propagate(start, sequence, callback):
+            found, reason = face.propagateFaces(
+                context.render, sequence, start, detector if method == "mediapipe+flow" else None, flowMethod=flowMethod,
+                useGpu=useGpu, cancel=context.checkCancelled, onFrame=callback, maskAt=maskAt,
+                progress=lambda done, count: context.progress(done / float(count), "Track Face"))
+            if reason and reason != "cancelled":
+                raise RuntimeError(f"Stopped: {reason}.")
+            return found
         last = frame
         try:
-            if method == "mediapipe":
-                if name == "trackFace":
-                    sequence = frames
-                else:
-                    sequence = self._sequence(name, frame, frames)
+            if name == "refineFace":
+                self._refine(context, faces, keyframes, startAt, propagate, onFrame)
+            elif method == "mediapipe":
+                sequence = frames if name == "trackFace" else self._sequence(name, frame, frames, keyframes)
                 face.trackFaces(context.render, sequence, detector, cancel=context.checkCancelled,
                                 progress=lambda done, count: context.progress(done / float(count), "Track Face"),
                                 onFrame=onFrame, maskAt=maskAt)
                 last = sequence[-1]
             else:
-                if frame not in faces:
-                    # Nothing to start from at this frame: MediaPipe finds the face there first
-                    if detector is None:
-                        raise RuntimeError("No face at this frame to follow: track it with MediaPipe first.")
-                    face.trackFaces(context.render, [frame], detector, maskAt=maskAt, onFrame=onFrame)
-                    if frame not in faces:
-                        raise RuntimeError("No face found at this frame to follow (lower 'Min Confidence', or start "
-                                           "from a frame where the face is found).")
-                start = self.fittedLandmarks(context.nodeContext(frame), faces, frame)
+                start = startAt(frame)
                 directions = ["trackFaceForward", "trackFaceBackward"] if name == "trackFace" else [name]
                 for direction in directions:
-                    sequence = self._sequence(direction, frame, frames)
+                    sequence = self._sequence(direction, frame, frames, keyframes)
                     if len(sequence) < 2:
                         continue
-                    _, reason = face.propagateFaces(
-                        context.render, sequence, start, detector if method == "mediapipe+flow" else None,
-                        flowMethod="raft" if context.value("flowMethod") == "raft" else "lucasKanade",
-                        useGpu=bool(context.value("useGpu")) if "useGpu" in context.values else True,
-                        cancel=context.checkCancelled, onFrame=onFrame, maskAt=maskAt,
-                        progress=lambda done, count: context.progress(done / float(count), "Track Face"))
-                    last = sequence[-1] if not reason else max((f for f in faces if f in sequence), key=sequence.index,
-                                                                default=frame)
-                    if reason and reason != "cancelled":
-                        raise RuntimeError(f"Stopped: {reason}.")
+                    found = propagate(start, sequence, onFrame)
+                    last = max(found, key=sequence.index) if found else frame
         finally:
             if detector is not None:
                 detector.close()
@@ -391,11 +401,51 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         return result
 
     @staticmethod
-    def _sequence(name, frame, frames):
-        """ The frames tracked by an action from `frame`: to the end of the range (forward / backward) or one frame. """
+    def _sequence(name, frame, frames, keyframes=()):
+        """ The frames tracked by an action from `frame`: to the next keyframe (excluded, as in FaceTracker: it has its
+        own fit) or the end of the range, forward / backward; or one frame. """
         forward = name in ("trackFaceForward", "trackFaceStepForward")
         sequence = [f for f in frames if f >= frame] if forward else [f for f in frames if f <= frame][::-1]
-        return sequence[:2] if "Step" in name else sequence
+        if "Step" in name:
+            return sequence[:2]
+        for index, f in enumerate(sequence[1:], start=1):
+            if f in keyframes:
+                return sequence[:index]
+        return sequence
+
+    @staticmethod
+    def keyframes(context):
+        """ The keyframes of the face: the frames where pins were placed (they have a key there). """
+        from meshroom.live import tracking
+        try:
+            pins = tracking.parseTracks(context.value("pins"))
+        except ValueError:
+            return []
+        return sorted({int(f) for pin in pins if pin.get("enabled", True) for f in (pin.get("keys") or {})})
+
+    def _refine(self, context, faces, keyframes, startAt, propagate, onFrame):
+        """ "Refine": between each pair of keyframes in the track range, the face followed from both ends and the two
+        blended, weighted toward the nearest keyframe (its drift is the smallest), as Refine in FaceTracker. """
+        inRange = set(context.frames)
+        spans = [(a, b) for a, b in zip(keyframes, keyframes[1:]) if b - a > 1 and a in inRange and b in inRange]
+        if not spans:
+            raise RuntimeError("Refine needs two keyframes (frames with pins) with frames between them.")
+        for a, b in spans:
+            forward = propagate(startAt(a), list(range(a, b)), None)
+            backward = propagate(startAt(b), list(range(b, a, -1)), None)
+            for f in range(a + 1, b):
+                one, other = forward.get(f), backward.get(f)
+                if one is None and other is None:
+                    continue
+                if one is None or other is None:
+                    onFrame(f, one or other)
+                    continue
+                weight = (f - a) / float(b - a)
+                count = min(len(one["landmarks"]), len(other["landmarks"]))
+                blended = one["landmarks"][:count] * (1.0 - weight) + other["landmarks"][:count] * weight
+                nearest = one if weight < 0.5 else other
+                onFrame(f, {"landmarks": blended, "blendshapes": nearest["blendshapes"], "hidden": nearest["hidden"],
+                            "source": "refined"})
 
     def fittedLandmarks(self, ctx, faces, frame):
         """ The landmarks (normalized) of the face fitted at a frame (pins and non rigid included): what the flow

@@ -371,3 +371,31 @@ def test_mediapipeTakenWhereItAgreesWithTheFlow():
         finally:
             face._cropAround = original
         assert faces[1]["source"] == expected
+
+
+def test_faceTrackingStopsAtKeyframesAndRefines(tmp_path, monkeypatch):
+    from meshroom.nodes.compositing.FaceNodes import FaceTracker
+    frames = list(range(1000, 1011))
+    assert FaceTracker._sequence("trackFaceForward", 1002, frames, [1002, 1006]) == [1002, 1003, 1004, 1005]
+    assert FaceTracker._sequence("trackFaceBackward", 1006, frames, [1002, 1006]) == [1006, 1005, 1004, 1003]
+    assert FaceTracker._sequence("trackFaceStepForward", 1005, frames, [1002, 1006]) == [1005, 1006]
+    assert FaceTracker._sequence("trackFaceForward", 1007, frames, [1002, 1006]) == list(range(1007, 1011))
+
+
+def test_refineBlendsBothDirections():
+    from meshroom.nodes.compositing.FaceNodes import FaceTracker
+
+    class Context:
+        frames = list(range(0, 11))
+    starts = {0: np.zeros((3, 3)), 4: np.ones((3, 3))}
+
+    def propagate(start, sequence, callback):
+        # Forward from 0 keeps 0, backward from 4 keeps 1
+        return {f: {"landmarks": start.copy(), "blendshapes": {}, "hidden": [], "source": "flow"} for f in sequence[1:]}
+    result = {}
+    FaceTracker()._refine(Context(), {}, [0, 4], lambda f: starts[f], propagate, lambda f, found: result.__setitem__(f, found))
+    assert sorted(result) == [1, 2, 3]
+    np.testing.assert_allclose(result[1]["landmarks"], 0.25)
+    np.testing.assert_allclose(result[3]["landmarks"], 0.75)
+    with pytest.raises(RuntimeError):
+        FaceTracker()._refine(Context(), {}, [0, 1], lambda f: starts[0], propagate, lambda f, found: None)

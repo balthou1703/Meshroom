@@ -146,8 +146,13 @@ Item {
     function hasKey(track, frame) { return !!track.keys && track.keys[String(frame)] !== undefined }
 
     function position(track, frame) {
-        if (pinMode && frame === root.frame && !hasKey(track, frame) && pinProjections[track.name])
-            return pinProjections[track.name]
+        if (pinMode && frame === root.frame && !hasKey(track, frame)) {
+            // FaceTracker (as in KeenTools FaceTracker): the pins belong to their keyframes, hidden elsewhere
+            if (faceMode)
+                return null
+            if (pinProjections[track.name])
+                return pinProjections[track.name]
+        }
         var keys = sortedKeys(track)
         if (keys.length === 0)
             return null
@@ -220,7 +225,8 @@ Item {
                 ctx.fillStyle = color
                 // Path (colored by the match scores with "Error")
                 var keys = root.sortedKeys(track)
-                if (keys.length > 1) {
+                // The pins of a FaceTracker belong to their keyframes: no path between them
+                if (keys.length > 1 && !root.faceMode) {
                     ctx.globalAlpha = root.showError ? 0.9 : 0.5
                     ctx.lineWidth = root.showError ? 2 : 1
                     var scores = track.scores || {}
@@ -564,6 +570,7 @@ Item {
                 text: MaterialIcons.fast_rewind
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
+                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
                 onClicked: root.live.track(root.node, -1, root.selectedNames)
                 ToolTip.text: "Track backward from the current frame (selected " + root.itemName + "s, or all)"
             }
@@ -572,6 +579,7 @@ Item {
                 text: MaterialIcons.chevron_left
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
+                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
                 onClicked: root.live.trackStep(root.node, -1, root.selectedNames)
                 ToolTip.text: "Track one frame backward (selected " + root.itemName + "s, or all)"
             }
@@ -587,6 +595,7 @@ Item {
                 text: MaterialIcons.chevron_right
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
+                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
                 onClicked: root.live.trackStep(root.node, 1, root.selectedNames)
                 ToolTip.text: "Track one frame forward (selected " + root.itemName + "s, or all)"
             }
@@ -595,6 +604,7 @@ Item {
                 text: MaterialIcons.fast_forward
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
+                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
                 onClicked: root.live.track(root.node, 1, root.selectedNames)
                 ToolTip.text: "Track forward from the current frame (selected " + root.itemName + "s, or all)"
             }
@@ -669,10 +679,11 @@ Item {
             Rectangle { visible: root.faceMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
             Label { visible: root.faceMode; text: MaterialIcons.face; font.family: MaterialIcons.fontFamily; font.pointSize: 14 }
             Repeater {
-                model: root.faceMode ? [["trackFaceBackward", MaterialIcons.skip_previous, "Track the face backward, to the start of the track range"],
+                model: root.faceMode ? [["trackFaceBackward", MaterialIcons.skip_previous, "Track the face backward, to the previous keyframe or the start of the track range"],
                                         ["trackFaceStepBackward", MaterialIcons.navigate_before, "Track the face one frame backward"],
                                         ["trackFaceStepForward", MaterialIcons.navigate_next, "Track the face one frame forward"],
-                                        ["trackFaceForward", MaterialIcons.skip_next, "Track the face forward, to the end of the track range"]] : []
+                                        ["trackFaceForward", MaterialIcons.skip_next, "Track the face forward, to the next keyframe or the end of the track range"],
+                                        ["refineFace", MaterialIcons.auto_fix_high, "Refine: track the face again between each pair of keyframes, from both ends, and blend"]] : []
                 delegate: MaterialToolButton {
                     font.pointSize: 16
                     text: modelData[1]
