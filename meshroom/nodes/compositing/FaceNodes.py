@@ -105,8 +105,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.FloatParam(name="pinRadius", label="Pin Radius", value=2.5, range=(0.1, 20.0, 0.1),
                         description="How far around a pin the face is moved to go through it (non rigid), in the "
                                     "units of the face mesh (centimeters for the canonical face)."),
-        desc.FloatParam(name="smoothing", label="Smoothing", value=1.0, range=(0.0, 5.0, 0.1),
+        desc.FloatParam(name="smoothing", label="Landmark Smoothing", value=1.0, range=(0.0, 5.0, 0.1),
                         description="Gaussian smoothing of the landmarks in time, in frames (0: as tracked)."),
+        desc.FloatParam(name="temporalSmoothing", label="Temporal Smoothing", value=1.5, range=(0.0, 6.0, 0.1),
+                        description="Gaussian smoothing in time (frames) of the fitted face: its head pose and its shape "
+                                    "in face space (the expression), so that it moves as a face does: no jitter, no part "
+                                    "turning back and forth in depth. The keyframes keep their own fit. 0: each frame on "
+                                    "its own."),
         desc.BoolParam(name="deform", label="Non Rigid", value=True,
                        description="The face follows the expressions (mouth, eyes); off: only the rigid head pose."),
         desc.ChoiceParam(name="display", label="Display", value="wireframe",
@@ -233,25 +238,81 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         # The same place on the neutral face
         return mesh.vertices[mesh.triangles()[triangle]].T @ weights
 
-    def solve(self, ctx, frame=None):
-        """ (the face GeoData in world space, the head matrix) at a frame; an empty GeoData and the identity before
-        tracking. """
+    def rawSolve(self, ctx, frame):
+        """
+        The face fitted at a frame on its own (no temporal smoothing): (its vertices in face space (n, 3), the head
+        matrix), cached; None before tracking. Starts from the head pose of a neighbor frame already solved (continuity:
+        no flip of the pose between frames).
+        """
         from meshroom.live import face
-        frame = ctx.frame if frame is None else frame
+        evaluator, uid = ctx.evaluator, ctx.planNode.uid
+        cached = evaluator.cachedData(uid, "_rawFace", frame)
+        if cached is not None:
+            return cached.vertices, evaluator.cachedData(uid, "_rawHead", frame)
         faces = self.faces(ctx)
         info = ctx.inputInfo("input")
         if not faces or info is None:
-            return scene3d.GeoData(), np.eye(4)
+            return None
         landmarks = face.landmarksAt(faces, frame, ctx.value("smoothing"))
         pixels = face.toPixels(landmarks, info.width, info.height)
         tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
         pinPoints, pinPositions = self.pinsAt(self.pins(ctx, info), frame)
-        geo, head, _, _ = face.solveFace(self.mesh(ctx, frame), pixels, self.camera(ctx, frame), info.width, info.height,
-                                         rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
+        camera = self.camera(ctx, frame)
+        initial = None
+        for neighbor in (frame - 1, frame + 1):
+            head = evaluator.cachedData(uid, "_rawHead", neighbor)
+            if head is not None:
+                # camera-to-face = inverse(head) @ camera
+                initial = np.linalg.inv(head) @ camera.matrix
+                break
+        geo, head, _, _ = face.solveFace(self.mesh(ctx, frame), pixels, camera, info.width, info.height,
+                                         initial=initial, rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (),
                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"))
-        return geo, head
+        inverse = np.linalg.inv(head)
+        local = geo.vertices @ inverse[:3, :3].T + inverse[:3, 3]
+        evaluator.storeData(uid, "_rawHead", frame, head)
+        evaluator.storeData(uid, "_rawFace", frame, scene3d.GeoData(local))
+        return local, head
+
+    def solve(self, ctx, frame=None):
+        """
+        (the face GeoData in world space, the head matrix) at a frame; an empty GeoData and the identity before
+        tracking. With "Temporal Smoothing", the head pose and the shape of the face (in face space: its expression)
+        are averaged over the neighbor frames (gaussian): no jitter of the pose, no part of the face turning back and
+        forth in depth from one frame to the next. The keyframes (frames with pins) keep their own fit.
+        """
+        from scipy.spatial.transform import Rotation
+        frame = ctx.frame if frame is None else frame
+        raw = self.rawSolve(ctx, frame)
+        if raw is None:
+            return scene3d.GeoData(), np.eye(4)
+        sigma = float(ctx.value("temporalSmoothing"))
+        info = ctx.inputInfo("input")
+        keyed = len(self.pinsAt(self.pins(ctx, info), frame)[0]) > 0
+        local, head = raw
+        if sigma > 0 and not keyed:
+            faces = self.faces(ctx)
+            first, last = min(faces), max(faces)
+            radius = int(np.ceil(2.0 * sigma))
+            neighbors = [f for f in range(frame - radius, frame + radius + 1) if first <= f <= last]
+            samples = [(f, self.rawSolve(ctx, f)) for f in neighbors]
+            samples = [(f, value) for f, value in samples if value is not None and len(value[0]) == len(local)]
+            if len(samples) > 1:
+                weights = np.array([np.exp(-0.5 * ((f - frame) / sigma) ** 2) for f, _ in samples])
+                weights /= weights.sum()
+                local = np.einsum("k,knd->nd", weights, np.stack([value[0] for _, value in samples]))
+                heads = np.stack([value[1] for _, value in samples])
+                head = np.eye(4)
+                # The rotations averaged (quaternions), the translations too; the scale of the head kept
+                scales = np.linalg.norm(heads[:, :3, :3], axis=1)
+                rotation = Rotation.from_matrix(heads[:, :3, :3] / scales[:, None, :]).mean(weights).as_matrix()
+                head[:3, :3] = rotation * np.einsum("k,kd->d", weights, scales)[None, :]
+                head[:3, 3] = np.einsum("k,kd->d", weights, heads[:, :3, 3])
+        world = local @ head[:3, :3].T + head[:3, 3]
+        mesh = self.mesh(ctx, frame)
+        return scene3d.GeoData(world, name="face", topology=mesh.topology), head
 
     def computeData(self, ctx, outputName):
         if outputName == "cameraOutput":

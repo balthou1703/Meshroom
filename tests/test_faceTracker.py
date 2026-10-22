@@ -434,3 +434,27 @@ def test_flowFollowsTheRegularizedFace():
         return fitted
     faces, _ = face.propagateFaces(_movingPlate, [0, 1, 2], start, regularize=regularize)
     assert calls == [1, 2] and np.ptp(faces[2]["landmarks"][:, 0]) < 1e-9
+
+
+def test_temporalSmoothingSteadiesTheFace(tmp_path, monkeypatch):
+    monkeypatch.setattr(face, "RIGID_LANDMARKS", tuple(RIGID))
+    graph, plate, tracker = faceGraph(tmp_path)
+    rng = np.random.default_rng(3)
+    # The landmarks of a steady head, with 1.5 pixels of noise at each frame
+    truth = landmarksAt(0)
+    faces = {f: {"landmarks": truth + np.c_[rng.normal(0, 1.5 / W, (468, 2)), np.zeros(468)], "blendshapes": {}}
+             for f in range(1, 16)}
+    tracker.faceTrack.value = face.dumpFaces(faces, (W, H))
+    tracker.smoothing.value = 0.0
+    jitter = {}
+    for sigma in (0.0, 2.0):
+        tracker.temporalSmoothing.value = sigma
+        graph.update()
+        plan = buildPlan(tracker)
+        evaluator = Evaluator()
+        heads = [evaluator.data(plan, plan.target, "headMatrix", f) for f in range(5, 12)]
+        geos = [evaluator.data(plan, plan.target, "geoOutput", f).vertices for f in range(5, 12)]
+        # How much the head and the face move from frame to frame (they should not: the head is still)
+        jitter[sigma] = (max(np.abs(b[:3, 3] - a[:3, 3]).max() for a, b in zip(heads, heads[1:])),
+                         max(np.abs(b - a).max() for a, b in zip(geos, geos[1:])))
+    assert jitter[2.0][0] < 0.5 * jitter[0.0][0] and jitter[2.0][1] < 0.5 * jitter[0.0][1]

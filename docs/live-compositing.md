@@ -603,6 +603,12 @@ mais comme une surface lisse passant par eux (moindres carrés pondérés + lapl
 repondérés de façon robuste) : un point faux (dérive, détection ratée) est ignoré, les points masqués suivent leurs
 voisins, le maillage ne se replie pas ; 0 : chaque sommet exactement sur son point. Pendant le suivi par le flot, le
 visage ainsi ajusté est ce qui est suivi d'une frame à l'autre (il reste un visage).
+« Temporal Smoothing » (frames, 1.5 par défaut) : le visage ajusté à chaque frame seule (`rawSolve`, en cache, la
+pose partant de celle d'une frame voisine déjà résolue) est lissé dans le temps : la pose de la tête (rotations
+moyennées en quaternions, translations) et la forme dans l'espace du visage (l'expression) sont moyennées sur les
+frames voisines (gaussienne) ; plus de tremblement de la pose ni de partie du visage qui bascule en profondeur
+d'une frame à l'autre. Les keyframes (frames avec pins) gardent leur propre ajustement. « Landmark Smoothing » lisse
+les points 2D avant l'ajustement.
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le
