@@ -683,7 +683,8 @@ Item {
                                         ["trackFaceStepBackward", MaterialIcons.navigate_before, "Track the face one frame backward"],
                                         ["trackFaceStepForward", MaterialIcons.navigate_next, "Track the face one frame forward"],
                                         ["trackFaceForward", MaterialIcons.skip_next, "Track the face forward, to the next keyframe or the end of the track range"],
-                                        ["refineFace", MaterialIcons.auto_fix_high, "Refine: track the face again between each pair of keyframes, from both ends, and blend"]] : []
+                                        ["refineFace", MaterialIcons.auto_fix_high, "Refine: track the face again between each pair of keyframes, from both ends, and blend"],
+                                        ["setReference", MaterialIcons.star, "Reference frame: the current frame (where the face is seen at its best) becomes the base of the fit of the other frames"]] : []
                 delegate: MaterialToolButton {
                     font.pointSize: 16
                     text: modelData[1]

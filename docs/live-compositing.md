@@ -609,6 +609,11 @@ moyennées en quaternions, translations) et la forme dans l'espace du visage (l'
 frames voisines (gaussienne) ; plus de tremblement de la pose ni de partie du visage qui bascule en profondeur
 d'une frame à l'autre. Les keyframes (frames avec pins) gardent leur propre ajustement. « Landmark Smoothing » lisse
 les points 2D avant l'ajustement.
+Frame de référence (« Use Reference Frame », « Reference Frame », bouton « Set Reference Frame » / étoile du
+viewer) : la frame où le visage se voit le mieux (calée avec des pins) est ajustée sur le visage neutre, et son visage
+ajusté devient la forme de l'acteur sur laquelle les autres frames sont ajustées (elles n'en changent que
+l'expression) ; elles sont résolues de la référence vers l'extérieur, chacune depuis la pose de la précédente (pose
+continue, résultat qui ne dépend pas de l'ordre d'affichage). La référence garde son ajustement (pas de lissage).
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le

@@ -107,6 +107,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                     "units of the face mesh (centimeters for the canonical face)."),
         desc.FloatParam(name="smoothing", label="Landmark Smoothing", value=1.0, range=(0.0, 5.0, 0.1),
                         description="Gaussian smoothing of the landmarks in time, in frames (0: as tracked)."),
+        desc.BoolParam(name="useReference", label="Use Reference Frame", value=False,
+                       description="Fit the face from the reference frame (where it is seen at its best, placed with "
+                                   "pins): its fitted face becomes the shape of the actor that the other frames only "
+                                   "change the expression of, and they are fitted from it outward, each from the "
+                                   "previous one (a steady pose)."),
+        desc.IntParam(name="referenceFrame", label="Reference Frame", value=1001, range=(0, 10000, 1),
+                      enabled=lambda node: node.useReference.value,
+                      description="The reference frame ('Set Reference Frame': the current frame)."),
+        desc.PushButtonParam(name="setReference", label="Set Reference Frame", semantic="liveAction",
+                             description="The current frame becomes the reference frame."),
         desc.FloatParam(name="temporalSmoothing", label="Temporal Smoothing", value=1.5, range=(0.0, 6.0, 0.1),
                         description="Gaussian smoothing in time (frames) of the fitted face: its head pose and its shape "
                                     "in face space (the expression), so that it moves as a face does: no jitter, no part "
@@ -238,17 +248,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         # The same place on the neutral face
         return mesh.vertices[mesh.triangles()[triangle]].T @ weights
 
-    def rawSolve(self, ctx, frame):
-        """
-        The face fitted at a frame on its own (no temporal smoothing): (its vertices in face space (n, 3), the head
-        matrix), cached; None before tracking. Starts from the head pose of a neighbor frame already solved (continuity:
-        no flip of the pose between frames).
-        """
+    def reference(self, ctx):
+        """ The reference frame ("Use Reference Frame"), or None. """
+        return int(ctx.value("referenceFrame")) if ctx.value("useReference") else None
+
+    def _fit(self, ctx, frame, rest, initial):
+        """ The face fitted at a frame on the `rest` shape (the neutral face, or the face of the reference frame):
+        (vertices in face space, head matrix); None before tracking. """
         from meshroom.live import face
-        evaluator, uid = ctx.evaluator, ctx.planNode.uid
-        cached = evaluator.cachedData(uid, "_rawFace", frame)
-        if cached is not None:
-            return cached.vertices, evaluator.cachedData(uid, "_rawHead", frame)
         faces = self.faces(ctx)
         info = ctx.inputInfo("input")
         if not faces or info is None:
@@ -257,24 +264,72 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         pixels = face.toPixels(landmarks, info.width, info.height)
         tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
         pinPoints, pinPositions = self.pinsAt(self.pins(ctx, info), frame)
+        neutral = self.mesh(ctx, frame)
+        if len(pinPoints) and rest is not neutral:
+            # The pins are points of the neutral face: the same places on the rest shape
+            pinPoints = face._onSurface(rest.vertices, rest.triangles(), face.pinLocations(neutral, pinPoints))
         camera = self.camera(ctx, frame)
-        initial = None
-        for neighbor in (frame - 1, frame + 1):
-            head = evaluator.cachedData(uid, "_rawHead", neighbor)
-            if head is not None:
-                # camera-to-face = inverse(head) @ camera
-                initial = np.linalg.inv(head) @ camera.matrix
-                break
-        geo, head, _, _ = face.solveFace(self.mesh(ctx, frame), pixels, camera, info.width, info.height,
-                                         initial=initial, rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
+        geo, head, _, _ = face.solveFace(rest, pixels, camera, info.width, info.height, initial=initial,
+                                         rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (),
                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"))
         inverse = np.linalg.inv(head)
-        local = geo.vertices @ inverse[:3, :3].T + inverse[:3, 3]
-        evaluator.storeData(uid, "_rawHead", frame, head)
-        evaluator.storeData(uid, "_rawFace", frame, scene3d.GeoData(local))
-        return local, head
+        return geo.vertices @ inverse[:3, :3].T + inverse[:3, 3], head
+
+    def rawSolve(self, ctx, frame):
+        """
+        The face fitted at a frame on its own (no temporal smoothing): (its vertices in face space (n, 3), the head
+        matrix), cached; None before tracking. Each fit starts from the head pose of a neighbor frame (continuity: no
+        flip of the pose between frames). With a reference frame: the frames are fitted from it outward, each from the
+        previous one, on the face of the reference frame (the shape of the actor seen at its best) instead of the
+        neutral face: the other frames only change its expression.
+        """
+        evaluator, uid = ctx.evaluator, ctx.planNode.uid
+        cached = evaluator.cachedData(uid, "_rawFace", frame)
+        if cached is not None:
+            return cached.vertices, evaluator.cachedData(uid, "_rawHead", frame)
+        faces = self.faces(ctx)
+        if not faces or ctx.inputInfo("input") is None:
+            return None
+        reference = self.reference(ctx)
+
+        def store(f, result):
+            evaluator.storeData(uid, "_rawHead", f, result[1])
+            evaluator.storeData(uid, "_rawFace", f, scene3d.GeoData(result[0]))
+            return result
+        if reference is None:
+            camera = self.camera(ctx, frame)
+            initial = None
+            for neighbor in (frame - 1, frame + 1):
+                head = evaluator.cachedData(uid, "_rawHead", neighbor)
+                if head is not None:
+                    # camera-to-face = inverse(head) @ camera
+                    initial = np.linalg.inv(head) @ camera.matrix
+                    break
+            return store(frame, self._fit(ctx, frame, self.mesh(ctx, frame), initial))
+        # The reference frame on the neutral face, then frame after frame toward `frame` on the reference face
+        neutral = self.mesh(ctx, frame)
+        referenceFit = evaluator.cachedData(uid, "_rawFace", reference)
+        if referenceFit is None:
+            store(reference, self._fit(ctx, reference, neutral, None))
+        if frame == reference:
+            return self.rawSolve(ctx, frame)
+        rest = scene3d.GeoData(evaluator.cachedData(uid, "_rawFace", reference).vertices, topology=neutral.topology)
+        step = 1 if frame > reference else -1
+        previous = reference
+        result = None
+        for f in range(reference + step, frame + step, step):
+            ctx.checkCancelled()
+            cached = evaluator.cachedData(uid, "_rawFace", f)
+            if cached is not None and f != frame:
+                previous = f
+                continue
+            head = evaluator.cachedData(uid, "_rawHead", previous)
+            initial = np.linalg.inv(head) @ self.camera(ctx, f).matrix if head is not None else None
+            result = store(f, self._fit(ctx, f, rest, initial))
+            previous = f
+        return result
 
     def solve(self, ctx, frame=None):
         """
@@ -290,7 +345,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return scene3d.GeoData(), np.eye(4)
         sigma = float(ctx.value("temporalSmoothing"))
         info = ctx.inputInfo("input")
-        keyed = len(self.pinsAt(self.pins(ctx, info), frame)[0]) > 0
+        keyed = len(self.pinsAt(self.pins(ctx, info), frame)[0]) > 0 or frame == self.reference(ctx)
         local, head = raw
         if sigma > 0 and not keyed:
             faces = self.faces(ctx)
@@ -371,6 +426,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         from meshroom.live import face
         if name == "clearFace":
             return {"faceTrack": "", "tracks": "[]"}
+        if name == "setReference":
+            return {"referenceFrame": int(context.currentFrame), "useReference": True}
         if name not in self._TRACK_ACTIONS:
             raise RuntimeError(f"Unknown action: {name}")
         if context.info is None:

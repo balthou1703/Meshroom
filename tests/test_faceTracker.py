@@ -458,3 +458,35 @@ def test_temporalSmoothingSteadiesTheFace(tmp_path, monkeypatch):
         jitter[sigma] = (max(np.abs(b[:3, 3] - a[:3, 3]).max() for a, b in zip(heads, heads[1:])),
                          max(np.abs(b - a).max() for a, b in zip(geos, geos[1:])))
     assert jitter[2.0][0] < 0.5 * jitter[0.0][0] and jitter[2.0][1] < 0.5 * jitter[0.0][1]
+
+
+def test_referenceFrameIsTheBaseOfTheFit(tmp_path, monkeypatch):
+    monkeypatch.setattr(face, "RIGID_LANDMARKS", tuple(RIGID))
+    graph, plate, tracker = faceGraph(tmp_path)
+    # The actor's face is wider than the mesh (a shape the landmarks show at every frame); the mouth opens over time
+    faces = {}
+    for f in range(1, 8):
+        world = scene3d.transformPoints(headAt(f), deformedAt(f) * [1.15, 1.0, 1.0])
+        xy, _, _ = CAMERA.project(world, W, H)
+        faces[f] = {"landmarks": np.c_[xy[:, 0] / W, (H - xy[:, 1]) / H, np.zeros(len(xy))], "blendshapes": {}}
+    tracker.faceTrack.value = face.dumpFaces(faces, (W, H))
+    tracker.smoothing.value = 0.0
+    tracker.temporalSmoothing.value = 0.0
+    # Supple (the mouth of the synthetic grid is a block moved down: a stiff face rounds its edges)
+    tracker.stiffness.value = 0.02
+    values = {attr.name: _snapshotValue(attr) for attr in tracker.attributes
+              if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+    context = ActionContext(values, Evaluator(), buildPlan(plate), 2, nodePlan=buildPlan(tracker))
+    assert tracker.nodeDesc.runAction("setReference", context) == {"referenceFrame": 2, "useReference": True}
+    tracker.referenceFrame.value, tracker.useReference.value = 2, True
+    graph.update()
+    plan = buildPlan(tracker)
+    evaluator = Evaluator()
+    for f in (2, 5, 7, 1):
+        geo = evaluator.data(plan, plan.target, "geoOutput", f)
+        xy, _, _ = CAMERA.project(geo.vertices, W, H)
+        errors = np.hypot(*(xy - face.toPixels(faces[f]["landmarks"], W, H)).T)
+        assert np.median(errors) < 0.3 and errors.max() < 1.5
+    # The other frames are fitted on the face of the reference frame (wider than the neutral mesh)
+    rest = evaluator.cachedData(plan.target, "_rawFace", 2).vertices
+    assert np.ptp(rest[:, 0]) > 1.1 * np.ptp(FACE.vertices[:, 0])
