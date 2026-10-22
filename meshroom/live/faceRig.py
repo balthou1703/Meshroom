@@ -44,6 +44,12 @@ CONTROLS = (
 )
 # The jaw: opening, sideways (radians)
 JAW_PARAMS = 2
+# Soft limits of the parameters: a translation of a control beyond 2 units (a fifth of the face width), the jaw beyond
+# these angles (radians), cost a lot (a face cannot do more)
+TRANSLATION_LIMIT = 2.0
+JAW_LIMITS = ((-0.15, 0.6), (-0.25, 0.25))
+# The moves of the controls toward / away from the camera are poorly seen: they cost more
+DEPTH_COST = 3.0
 
 
 def _smoothstep(x):
@@ -131,6 +137,15 @@ def rigOf(rest: np.ndarray) -> FaceRig:
     return rig
 
 
+def _vertexNormals(vertices: np.ndarray, triangles: np.ndarray) -> np.ndarray:
+    a, b, c = (vertices[triangles[:, i]] for i in range(3))
+    faceNormals = np.cross(b - a, c - a)
+    normals = np.zeros_like(vertices)
+    for i in range(3):
+        np.add.at(normals, triangles[:, i], faceNormals)
+    return normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+
+
 def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, height: int, focal: float,
            cameraToFace: np.ndarray, pins: Optional[Tuple[list, np.ndarray]] = None, triangles=None,
            prior: Optional[np.ndarray] = None, stiffness: float = 0.3, priorWeight: float = 0.0,
@@ -140,7 +155,9 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
     (n,): 0 for a hidden landmark) seen by the camera, and on the pins ((locations (triangle, barycentric weights) on the
     mesh, their positions (k, 2)), counted `pinWeight` times). Regularized toward the rest shape (`stiffness`) and the
     `prior` parameters (`priorWeight`, e.g. the previous frame). Robust (Cauchy weights of the landmarks, again and
-    again). Levenberg-Marquardt, from `cameraToFace` (the rigid pose).
+    again); the landmarks on the side of the face turned away from the camera (a profile: MediaPipe guesses them) are
+    not used; the controls stay within what a face can do (soft limits), their moves in depth (poorly seen) cost more.
+    Levenberg-Marquardt, from `cameraToFace` (the rigid pose).
 
     Returns:
         (camera-to-face matrix, rig parameters, the face vertices (n, 3) in face space).
@@ -157,6 +174,12 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
 
     controls = rig.controlCount
     regularization = np.sqrt(stiffness) * 10.0
+    # The cost of each parameter (the translations along the forward axis of the face cost more)
+    forward = np.abs(rig.axes[2])
+    costs = np.r_[np.tile(1.0 + (DEPTH_COST - 1.0) * forward, controls), np.ones(JAW_PARAMS)]
+    low = np.r_[np.full(3 * controls, -TRANSLATION_LIMIT), [limit[0] for limit in JAW_LIMITS]]
+    high = np.r_[np.full(3 * controls, TRANSLATION_LIMIT), [limit[1] for limit in JAW_LIMITS]]
+    normals = _vertexNormals(rig.rest, triangles) if triangles is not None else None
     priorScale = np.sqrt(priorWeight) * 10.0 if priorWeight > 0 else 0.0
 
     def evaluate(rotation, x, landmarkWeights, withJacobian):
@@ -174,7 +197,10 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         if len(pinLocations):
             onFace = np.array([projected[triangles[t]].T @ w for t, w in pinLocations])
             parts.append(((onFace - pinTargets) * np.sqrt(pinWeight)).ravel())
-        parts.append(regularization * params)
+        parts.append(regularization * costs * params)
+        # Soft limits: 100 pixels per unit beyond them
+        beyond = np.minimum(params - low, 0.0) + np.maximum(params - high, 0.0)
+        parts.append(100.0 * beyond)
         if priorScale:
             parts.append(priorScale * (params - prior))
         residual = np.concatenate(parts)
@@ -207,7 +233,9 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
             rows.append((pinRows * np.sqrt(pinWeight)).reshape(-1, k))
         identity = np.zeros((len(params), k))
         identity[:, 6:] = np.eye(len(params))
-        rows.append(regularization * identity)
+        rows.append(regularization * costs[:, None] * identity)
+        outside = ((params < low) | (params > high)).astype(np.float64)
+        rows.append(100.0 * outside[:, None] * identity)
         if priorScale:
             rows.append(priorScale * identity)
         return residual, projected, np.concatenate(rows)
@@ -243,6 +271,12 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         measured = base > 0
         scale = max(2.0, 1.4826 * float(np.median(errors[measured]))) if measured.any() else 2.0
         landmarkWeights = base / (1.0 + (errors / (3.0 * scale)) ** 2)
+        if normals is not None:
+            # The side of the face turned away from the camera: its landmarks are guesses
+            rotation = rodrigues(x[:3]) @ rotation0
+            points = rig.deform(x[6:]) @ rotation.T + translation0 + x[3:6]
+            facing = -np.einsum("ij,ij->i", (normals @ rotation.T), points / np.linalg.norm(points, axis=1, keepdims=True))
+            landmarkWeights = landmarkWeights * np.clip((facing[:count] + 0.05) / 0.2, 0.0, 1.0)
     rotation = rodrigues(x[:3]) @ rotation0
     matrix = scene3d.cameraMatrixFromCvPose(rotation, translation0 + x[3:6])
     return matrix, x[6:], rig.deform(x[6:])

@@ -536,3 +536,20 @@ def test_rigPins():
     assert np.hypot(*(xy[corner] - target)) < 3.0
     still = (rig.weights.sum(axis=1) + rig.jawWeight) < 0.01
     assert still.sum() > 20 and np.abs(xy[still] - before[still]).max() < 1.5
+
+
+def test_rigStaysWithinWhatAFaceCanDo():
+    from meshroom.live import faceRig
+    rng = np.random.default_rng(2)
+    pixels = face.toPixels(landmarksAt(2), W, H)
+    # Wild landmarks on one side (a profile: MediaPipe guesses the hidden side)
+    side = FACE.vertices[:, 0] > 2.0
+    pixels[side] += rng.normal(0, 30, (int(side.sum()), 2)) + [60.0, -40.0]
+    report = {}
+    geo, head, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3, report=report)
+    params = report["rigParams"]
+    assert np.abs(params[:-2]).max() < faceRig.TRANSLATION_LIMIT + 0.3
+    assert faceRig.JAW_LIMITS[0][0] - 0.1 < params[-2] < faceRig.JAW_LIMITS[0][1] + 0.1
+    local = scene3d.transformPoints(np.linalg.inv(head), geo.vertices)
+    width = np.linalg.norm(FACE.vertices[faceRig.LANDMARK["sideR"]] - FACE.vertices[faceRig.LANDMARK["sideL"]])
+    assert np.linalg.norm(local - FACE.vertices, axis=1).max() < 0.35 * width

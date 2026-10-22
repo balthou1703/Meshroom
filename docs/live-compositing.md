@@ -612,6 +612,9 @@ gaussienne). Front, crâne, arête du nez, tempes restent rigides. L'ajustement 
 la tête et les ~44 paramètres (Levenberg-Marquardt, jacobien analytique, poids de Cauchy des points), régularisé vers
 le repos (« Stiffness ») ; les pins déplacent les contrôles, pas les sommets (comptés 5 fois), et « Show Pin Reach »
 montre les zones des contrôles sous chaque pin (rien pour un pin sur une partie rigide : il ne règle que la pose).
+Garde-fous : les points du côté du visage tourné à l'opposé de la caméra (profil : MediaPipe les devine) ne sont pas
+utilisés ; les contrôles ont des limites douces (translation : un cinquième de la largeur du visage ; mâchoire :
+-0.15 à 0.6 rad d'ouverture, ±0.25 latéral) ; leurs mouvements en profondeur (mal vus) coûtent trois fois plus.
 surface : chaque sommet libre (surface lisse, ci-dessus).
 « Temporal Smoothing » (frames, 1.5 par défaut) : le visage ajusté à chaque frame seule (`rawSolve`, en cache, la
 pose partant de celle d'une frame voisine déjà résolue) est lissé dans le temps : la pose de la tête (rotations
