@@ -598,6 +598,11 @@ ont une clé est une keyframe (le visage y est calé avec ses pins) ; ailleurs i
 visage qui est tracké, de la keyframe courante jusqu'à la suivante (exclue) ou le bout de la plage. « Refine »
 retracke entre chaque paire de keyframes depuis les deux bouts et mélange les deux suivis, pondérés vers la keyframe
 la plus proche.
+« Stiffness » (non rigide, `face.regularizedShifts`) : le visage n'est pas amené sommet par sommet sur ses points
+mais comme une surface lisse passant par eux (moindres carrés pondérés + laplacien des déplacements sur le maillage,
+repondérés de façon robuste) : un point faux (dérive, détection ratée) est ignoré, les points masqués suivent leurs
+voisins, le maillage ne se replie pas ; 0 : chaque sommet exactement sur son point. Pendant le suivi par le flot, le
+visage ainsi ajusté est ce qui est suivi d'une frame à l'autre (il reste un visage).
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le

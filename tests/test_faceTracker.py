@@ -144,6 +144,8 @@ def test_faceTrackerNode(tmp_path, monkeypatch):
     assert len(json.loads(result["tracks"])) == 468
     tracker.faceTrack.value = result["faceTrack"]
     tracker.smoothing.value = 0.0
+    # Each vertex exactly on its landmark
+    tracker.stiffness.value = 0.0
     graph.update()
     plan = buildPlan(tracker)
     evaluator = Evaluator()
@@ -399,3 +401,36 @@ def test_refineBlendsBothDirections():
     np.testing.assert_allclose(result[3]["landmarks"], 0.75)
     with pytest.raises(RuntimeError):
         FaceTracker()._refine(Context(), {}, [0, 1], lambda f: starts[0], propagate, lambda f, found: None)
+
+
+def test_stiffFaceIgnoresWrongLandmarks():
+    frame = 3
+    truth = face.toPixels(landmarksAt(frame), W, H)
+    pixels = truth.copy()
+    # A landmark drifted far away, and hidden ones given wrong positions
+    wrong, hidden = MOUTH[3], [i for i in range(468) if 10 <= i // 18 <= 11 and 6 <= i % 18 <= 9]
+    pixels[wrong] += [45.0, -30.0]
+    pixels[hidden] += 25.0
+    errors = {}
+    for stiffness in (0.0, 0.3):
+        geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True, hidden=hidden,
+                                      stiffness=stiffness)
+        xy, _, _ = CAMERA.project(geo.vertices, W, H)
+        errors[stiffness] = np.hypot(*(xy - truth).T)
+    # Exact: the wrong landmark folds the mesh; stiff: it is ignored, the others still followed (the mouth opens)
+    assert errors[0.0][wrong] > 40.0 and errors[0.3][wrong] < 4.0
+    assert np.median(errors[0.3]) < 0.5 and errors[0.3][MOUTH].max() < 3.5 and errors[0.3][hidden].max() < 3.5
+
+
+def test_flowFollowsTheRegularizedFace():
+    t = np.linspace(0.3, 0.7, face.LANDMARKS)
+    start = np.c_[t, 1.0 - t, np.zeros_like(t)]
+    calls = []
+
+    def regularize(frame, landmarks, hidden):
+        calls.append(frame)
+        fitted = landmarks.copy()
+        fitted[:, 0] = landmarks[:, 0].mean()  # A "model" putting every point on one column
+        return fitted
+    faces, _ = face.propagateFaces(_movingPlate, [0, 1, 2], start, regularize=regularize)
+    assert calls == [1, 2] and np.ptp(faces[2]["landmarks"][:, 0]) < 1e-9

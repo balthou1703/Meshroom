@@ -319,14 +319,16 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
                    useGpu: bool = True, agreement: float = 0.06, cancel=None,
                    progress: Optional[Callable[[int, int], None]] = None,
                    onFrame: Optional[Callable[[int, dict], None]] = None,
-                   maskAt: Optional[Callable[[int], np.ndarray]] = None) -> Tuple[Dict[int, dict], str]:
+                   maskAt: Optional[Callable[[int], np.ndarray]] = None,
+                   regularize: Optional[Callable[[int, np.ndarray, list], np.ndarray]] = None) -> Tuple[Dict[int, dict], str]:
     """
     The face followed from its landmarks `start` (n, 3) normalized at frames[0] through `frames` (consecutive, forward or
     backward) by the optical flow of the plate (`flowMethod`: "lucasKanade" or "raft"): each landmark moves with the
     flow. With a `detector` (MediaPipe, see trackFaces), the face it finds around the flowed landmarks is taken when it
     agrees with them (its landmarks within `agreement` x the size of the face, in median): MediaPipe does not drift,
     the flow keeps the face where MediaPipe is lost or wrong (occlusions, profile, blur). Masked out landmarks are
-    "hidden" (as in trackFaces).
+    "hidden" (as in trackFaces). `regularize(frame, landmarks, hidden)`: the landmarks of the face model fitted on the
+    flowed ones (e.g. a stiff face through them): what is followed stays a face (no drifting point breaks it).
 
     Returns:
         ({frame: {"landmarks", "blendshapes", "hidden", "source": "flow" or "mediapipe"}} of frames[1:], why it
@@ -362,8 +364,10 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
         # The flow is in Nuke pixels (y up): rows go down
         flowed[:, 0] = (x + motion[:, 0]) / width
         flowed[:, 1] = (y - motion[:, 1]) / height
-        landmarks, blendshapes, source = flowed, {}, "flow"
         mask = np.clip(np.asarray(maskAt(frame), dtype=np.float32), 0.0, 1.0) if maskAt else None
+        if regularize is not None:
+            flowed = regularize(frame, flowed, hiddenLandmarks(flowed, mask) if mask is not None else [])
+        landmarks, blendshapes, source = flowed, {}, "flow"
         if detector is not None:
             rgb = displayRGB(imageB, BBox.fromFormat(width, height))
             if mask is not None:
@@ -553,7 +557,7 @@ def _onSurface(vertices: np.ndarray, triangles: np.ndarray, locations) -> np.nda
 
 def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraData, width: int, height: int,
               initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=(),
-              pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5):
+              pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5, stiffness: float = 0.0):
     """
     The face seen in the image: the pose of the head from the `rigid` landmarks, then each vertex moved at its depth
     onto the ray of its landmark (`deform`). The `hidden` landmarks (masked out) are not used: the head is placed
@@ -561,6 +565,9 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     `pins`: (points (k, 3) on the neutral face, their image positions (k, 2), Nuke pixels): they place the head with
     the rigid landmarks (counted three times), then, non rigid, the face is moved around each of them (a smooth
     interpolation of their remaining errors, over `pinRadius` units of the mesh) so that it goes through them.
+    `stiffness` > 0: the face is not moved vertex by vertex onto its landmarks but as a smooth surface (the moves of
+    neighboring vertices kept alike, `regularizedShifts`): a wrong landmark (drift, occlusion) is ignored, the hidden
+    ones follow their neighbors, the mesh does not fold; 0: each vertex exactly on its landmark.
 
     Args:
         mesh: the face (vertex i: landmark i), its shape the neutral face, in its own space.
@@ -596,16 +603,77 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     if deform:
         # Each vertex at its depth, on the ray of its landmark (the camera looks along -Z)
         depth = -inCamera[:count, 2]
-        rays = np.c_[(pixels[:count, 0] - width / 2.0) / focal, (pixels[:count, 1] - height / 2.0) / focal,
-                     -np.ones(count)]
         moved = np.ones(count, dtype=bool)
         moved[[i for i in hidden if i < count]] = False
+        targets = pixels[:count].astype(np.float64)
+        if stiffness > 0:
+            # A smooth surface through the landmarks: the shifts from the rigid face regularized over the mesh
+            safe = np.where(depth > 1e-9, depth, 1e-9)
+            rigidPixels = np.c_[width / 2.0 + focal * inCamera[:count, 0] / safe,
+                                height / 2.0 + focal * inCamera[:count, 1] / safe]
+            shifts = regularizedShifts(mesh, targets - rigidPixels, moved.astype(np.float64), stiffness)
+            targets = rigidPixels + shifts
+            moved[:] = True
+        rays = np.c_[(targets[:, 0] - width / 2.0) / focal, (targets[:, 1] - height / 2.0) / focal, -np.ones(count)]
         inCamera = inCamera.copy()
         inCamera[:count][moved] = (rays * depth[:, None])[moved]
         if locations:
             inCamera = _followPins(inCamera, mesh, locations, pinPixels, width, height, focal, pinRadius)
     world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
     return scene3d.GeoData(world, name="face", topology=mesh.topology), head, cameraToFace, error
+
+
+_LAPLACIANS = {}
+
+
+def _laplacian(mesh: scene3d.GeoData, count: int):
+    """ The graph Laplacian (count, count, sparse, normalized: I - D^-1 A) of the first `count` vertices of a mesh. """
+    from scipy import sparse
+    key = (id(mesh.topology), count)
+    cached = _LAPLACIANS.get(key)
+    if cached is not None and cached[0] is mesh.topology:
+        return cached[1]
+    edges = mesh.edges()
+    edges = edges[(edges[:, 0] < count) & (edges[:, 1] < count)]
+    adjacency = sparse.coo_matrix((np.ones(2 * len(edges)), (np.r_[edges[:, 0], edges[:, 1]], np.r_[edges[:, 1], edges[:, 0]])),
+                                  shape=(count, count)).tocsr()
+    adjacency.data[:] = 1.0
+    degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    inverse = sparse.diags(np.where(degree > 0, 1.0 / np.maximum(degree, 1e-12), 0.0))
+    laplacian = (sparse.identity(count) - inverse @ adjacency).tocsr()
+    if len(_LAPLACIANS) > 16:
+        _LAPLACIANS.clear()
+    _LAPLACIANS[key] = (mesh.topology, laplacian)
+    return laplacian
+
+
+def regularizedShifts(mesh: scene3d.GeoData, shifts: np.ndarray, weights: np.ndarray, stiffness: float,
+                      rounds: int = 4) -> np.ndarray:
+    """
+    The shifts (n, 2) of the vertices of a face (pixels, from the rigid face) closest to the measured ones (weighted:
+    0 for a hidden landmark) while staying smooth over the mesh (the Laplacian of the shifts, times `stiffness`):
+    min sum w |s - shift|^2 + stiffness |L s|^2. Robust: a landmark far from the smooth surface of the others (drift,
+    wrong detection) is weighted down, again and again.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+    count = len(shifts)
+    laplacian = _laplacian(mesh, count)
+    regularization = float(stiffness) * (laplacian.T @ laplacian) + 1e-6 * sparse.identity(count)
+    base = np.clip(np.asarray(weights, dtype=np.float64), 0.0, None)
+    if base.sum() < 3:
+        return np.zeros_like(shifts)
+    current = base.copy()
+    result = np.zeros_like(shifts)
+    for _ in range(rounds):
+        system = (sparse.diags(current) + regularization).tocsc()
+        result = np.c_[spsolve(system, current * shifts[:, 0]), spsolve(system, current * shifts[:, 1])]
+        residuals = np.hypot(*(result - shifts).T)
+        measured = base > 0
+        scale = max(1.0, 1.4826 * float(np.median(residuals[measured])))
+        # Cauchy weights: within 3 typical errors, nearly 1
+        current = base / (1.0 + (residuals / (3.0 * scale)) ** 2)
+    return result
 
 
 def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixels: np.ndarray, width: int, height: int,

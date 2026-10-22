@@ -95,6 +95,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.StringParam(name="pins", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position and its point on the neutral face "
                                      "(\"point\": [x, y, z]). Edited in the viewer."),
+        desc.FloatParam(name="stiffness", label="Stiffness", value=0.3, range=(0.0, 5.0, 0.05),
+                        description="With 'Non Rigid': how much the face keeps a smooth shape. 0: each vertex exactly "
+                                    "on its landmark (a wrong landmark folds the mesh); higher: a smooth surface through "
+                                    "the landmarks, wrong or hidden ones following their neighbors."),
         desc.BoolParam(name="showPinReach", label="Show Pin Reach", value=True,
                        description="With 'Non Rigid': the face is tinted where the pins move it (orange at a pin, "
                                    "fading over 'Pin Radius')."),
@@ -246,7 +250,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (),
                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
-                                         pinRadius=ctx.value("pinRadius"))
+                                         pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"))
         return geo, head
 
     def computeData(self, ctx, outputName):
@@ -359,10 +363,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                        f"a frame where the face is found).")
             return self.fittedLandmarks(context.nodeContext(f), faces, f)
 
+        regularize = self.regularizer(context.nodeContext(frame), width, height)
+
         def propagate(start, sequence, callback):
             found, reason = face.propagateFaces(
                 context.render, sequence, start, detector if method == "mediapipe+flow" else None, flowMethod=flowMethod,
-                useGpu=useGpu, cancel=context.checkCancelled, onFrame=callback, maskAt=maskAt,
+                useGpu=useGpu, cancel=context.checkCancelled, onFrame=callback, maskAt=maskAt, regularize=regularize,
                 progress=lambda done, count: context.progress(done / float(count), "Track Face"))
             if reason and reason != "cancelled":
                 raise RuntimeError(f"Stopped: {reason}.")
@@ -446,6 +452,30 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 nearest = one if weight < 0.5 else other
                 onFrame(f, {"landmarks": blended, "blendshapes": nearest["blendshapes"], "hidden": nearest["hidden"],
                             "source": "refined"})
+
+    def regularizer(self, ctx, width, height):
+        """ function(frame, landmarks, hidden): the landmarks of the face fitted on flowed ones (rigid pose, stiff non
+        rigid face, pins of the frame): what the flow follows stays a face (a drifting point does not break it). """
+        from meshroom.live import face
+        mesh = self.mesh(ctx)
+        deform, stiffness = ctx.value("deform"), max(float(ctx.value("stiffness")), 0.05)
+        pins = self.pins(ctx)
+
+        def regularize(frame, landmarks, hidden):
+            camera = self.camera(ctx, frame)
+            pixels = face.toPixels(landmarks, width, height)
+            pinPoints, pinPositions = self.pinsAt(pins, frame)
+            geo, _, _, _ = face.solveFace(mesh, pixels, camera, width, height, rigid=face.RIGID_LANDMARKS,
+                                          deform=deform, hidden=hidden, stiffness=stiffness,
+                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
+                                          pinRadius=ctx.value("pinRadius"))
+            xy, _, _ = camera.project(geo.vertices, width, height)
+            count = min(len(xy), len(landmarks))
+            fitted = landmarks.copy()
+            fitted[:count, 0] = xy[:count, 0] / width
+            fitted[:count, 1] = (height - xy[:count, 1]) / height
+            return fitted
+        return regularize
 
     def fittedLandmarks(self, ctx, faces, frame):
         """ The landmarks (normalized) of the face fitted at a frame (pins and non rigid included): what the flow
