@@ -533,7 +533,8 @@ def test_rigPins():
                                   pins=(FACE.vertices[[corner]], target[None]))
     before, _, _ = CAMERA.project(rest.vertices, W, H)
     xy, _, _ = CAMERA.project(geo.vertices, W, H)
-    assert np.hypot(*(xy[corner] - target)) < 3.0
+    # Exact at the pin (the rig, then a local warp for what it cannot do)
+    assert np.hypot(*(xy[corner] - target)) < 0.5
     still = (rig.weights.sum(axis=1) + rig.jawWeight) < 0.01
     assert still.sum() > 20 and np.abs(xy[still] - before[still]).max() < 1.5
 
@@ -553,3 +554,18 @@ def test_rigStaysWithinWhatAFaceCanDo():
     local = scene3d.transformPoints(np.linalg.inv(head), geo.vertices)
     width = np.linalg.norm(FACE.vertices[faceRig.LANDMARK["sideR"]] - FACE.vertices[faceRig.LANDMARK["sideL"]])
     assert np.linalg.norm(local - FACE.vertices, axis=1).max() < 0.35 * width
+
+
+def test_rigPinOnAPartWithoutControlIsReached():
+    from meshroom.live import faceRig
+    rig = faceRig.FaceRig(FACE.vertices)
+    pixels = face.toPixels(landmarksAt(2), W, H)
+    # A pin on a rigid part dragged: the head barely turns (the landmarks hold it), a local warp reaches the pin
+    rigid = int(np.argmin(rig.weights.sum(axis=1) + rig.jawWeight))
+    target = pixels[rigid] + [10.0, 6.0]
+    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3,
+                                  pins=(FACE.vertices[[rigid]], target[None]), pinRadius=2.0)
+    xy, _, _ = CAMERA.project(geo.vertices, W, H)
+    assert np.hypot(*(xy[rigid] - target)) < 0.5
+    far = np.linalg.norm(FACE.vertices - FACE.vertices[rigid], axis=1) > 8.0
+    assert np.median(np.hypot(*(xy[far] - pixels[far]).T)) < 1.5

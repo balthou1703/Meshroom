@@ -607,11 +607,13 @@ visage ainsi ajusté est ce qui est suivi d'une frame à l'autre (il reste un vi
 FaceTracker, le visage est déformé par un rig construit sur la topologie MediaPipe (axes tirés du visage : menton →
 front, un côté à l'autre) : la mâchoire (rotation ouverture / latérale de la partie sous la ligne des lèvres autour
 d'une charnière près des oreilles), sourcils intérieur / extérieur, paupières haute / basse (la haute ne bouge pas
-la basse), coins de la bouche, lèvre haute / basse, joues : une translation 3D chacun, de sa zone (chute
+la basse), coins de la bouche, lèvre haute / basse, joues, bout du nez et ailes du nez : une translation 3D chacun, de sa zone (chute
 gaussienne). Front, crâne, arête du nez, tempes restent rigides. L'ajustement (`fitRig`) résout ensemble la pose de
-la tête et les ~44 paramètres (Levenberg-Marquardt, jacobien analytique, poids de Cauchy des points), régularisé vers
-le repos (« Stiffness ») ; les pins déplacent les contrôles, pas les sommets (comptés 5 fois), et « Show Pin Reach »
-montre les zones des contrôles sous chaque pin (rien pour un pin sur une partie rigide : il ne règle que la pose).
+la tête et les ~53 paramètres (Levenberg-Marquardt, jacobien analytique, poids de Cauchy des points), régularisé vers
+le repos (« Stiffness ») ; les pins déplacent d'abord les contrôles (comptés 20 fois), puis ce que le rig ne peut
+pas faire est fait par une déformation locale autour de chaque pin (exacte au pin, sur « Pin Radius ») : les pins
+sont atteints, comme dans KeenTools ; « Show Pin Reach » montre les zones des contrôles sous chaque pin et la
+déformation locale.
 Garde-fous : les points du côté du visage tourné à l'opposé de la caméra (profil : MediaPipe les devine) ne sont pas
 utilisés ; les contrôles ont des limites douces (translation : un cinquième de la largeur du visage ; mâchoire :
 -0.15 à 0.6 rad d'ouverture, ±0.25 latéral) ; leurs mouvements en profondeur (mal vus) coûtent trois fois plus.

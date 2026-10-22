@@ -28,7 +28,7 @@ LANDMARK = {
     "lidUpR": 159, "lidLowR": 145, "lidUpL": 386, "lidLowL": 374,
     "browInR": 107, "browOutR": 70, "browInL": 336, "browOutL": 300,
     "mouthR": 61, "mouthL": 291, "lipUp": 0, "lipLow": 17, "lipUpIn": 13, "lipLowIn": 14,
-    "cheekR": 50, "cheekL": 280,
+    "cheekR": 50, "cheekL": 280, "noseTip": 1, "nostrilR": 129, "nostrilL": 358,
 }
 
 # The translation controls: (name, center landmark, radius in face widths, area: None, "upperLip", "lowerLip",
@@ -41,6 +41,7 @@ CONTROLS = (
     ("mouthR", "mouthR", 0.09, None), ("mouthL", "mouthL", 0.09, None),
     ("lipUp", "lipUp", 0.07, "upperLip"), ("lipLow", "lipLow", 0.07, "lowerLip"),
     ("cheekR", "cheekR", 0.11, None), ("cheekL", "cheekL", 0.11, None),
+    ("noseTip", "noseTip", 0.06, None), ("nostrilR", "nostrilR", 0.05, None), ("nostrilL", "nostrilL", 0.05, None),
 )
 # The jaw: opening, sideways (radians)
 JAW_PARAMS = 2
@@ -149,7 +150,7 @@ def _vertexNormals(vertices: np.ndarray, triangles: np.ndarray) -> np.ndarray:
 def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, height: int, focal: float,
            cameraToFace: np.ndarray, pins: Optional[Tuple[list, np.ndarray]] = None, triangles=None,
            prior: Optional[np.ndarray] = None, stiffness: float = 0.3, priorWeight: float = 0.0,
-           pinWeight: float = 5.0, rounds: int = 3, iterations: int = 12):
+           pinWeight: float = 20.0, rounds: int = 3, iterations: int = 12):
     """
     The head pose and the rig parameters putting the face on the landmarks (`pixels` (n, 2), Nuke pixels, `weights`
     (n,): 0 for a hidden landmark) seen by the camera, and on the pins ((locations (triangle, barycentric weights) on the

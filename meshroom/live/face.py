@@ -571,7 +571,8 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     neighboring vertices kept alike, `regularizedShifts`): a wrong landmark (drift, occlusion) is ignored, the hidden
     ones follow their neighbors, the mesh does not fold; 0: each vertex exactly on its landmark.
     `model` "rig": the face moved by its rig instead (faceRig.py: jaw, brows, lids, lips, cheeks; the rigid parts stay
-    rigid), the head pose refined with it; the pins move the controls (not the vertices); `stiffness` keeps the
+    rigid), the head pose refined with it; the pins move the controls, then what the rig cannot do is done by a local
+    warp around them (exact at the pins, over `pinRadius`); `stiffness` keeps the
     controls near the rest shape, `prior` / `priorWeight` near other parameters (e.g. the previous frame). `report`
     (a dict) receives the "rigParams".
 
@@ -615,7 +616,15 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         if report is not None:
             report["rigParams"] = params
         head = camera.matrix @ np.linalg.inv(cameraToFace)
-        world = local @ head[:3, :3].T + head[:3, 3]
+        if locations:
+            # What the rig cannot do to reach the pins (a feature it has no control for, a stronger move): a local
+            # smooth warp around each pin, exact at the pins (as the pins of KeenTools)
+            view = np.linalg.inv(cameraToFace)
+            inCamera = _followPins(local @ view[:3, :3].T + view[:3, 3], mesh, locations, pinPixels, width, height,
+                                   focal, pinRadius)
+            world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
+        else:
+            world = local @ head[:3, :3].T + head[:3, 3]
         return scene3d.GeoData(world, name="face", topology=mesh.topology), head, cameraToFace, error
     head = camera.matrix @ np.linalg.inv(cameraToFace)
     view = np.linalg.inv(cameraToFace)
