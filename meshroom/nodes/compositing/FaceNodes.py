@@ -282,7 +282,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 share = w @ areas[triangles[t]]
                 reach = np.maximum(reach, np.clip(areas @ share / max(float(share @ share), 1e-6), 0.0, 1.0)
                                    * (share.max() > 0.05))
-            reach = reach[:count, None]
+            # And the local warp around each pin (what the rig cannot do)
+            centers = face._onSurface(mesh.vertices, triangles, locations)
+            radius = max(float(ctx.value("pinRadius")), 1e-6)
+            distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
+            reach = np.maximum(reach, np.exp(-(distances.min(axis=1) / radius) ** 2))[:count, None]
         else:
             centers = face._onSurface(mesh.vertices, triangles, locations)
             radius = max(float(ctx.value("pinRadius")), 1e-6)
