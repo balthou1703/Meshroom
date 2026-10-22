@@ -145,6 +145,7 @@ def test_faceTrackerNode(tmp_path, monkeypatch):
     tracker.faceTrack.value = result["faceTrack"]
     tracker.smoothing.value = 0.0
     # Each vertex exactly on its landmark
+    tracker.deformModel.value = "surface"
     tracker.stiffness.value = 0.0
     graph.update()
     plan = buildPlan(tracker)
@@ -303,6 +304,8 @@ def test_faceTrackerPins(tmp_path, monkeypatch):
     context = ActionContext(values, Evaluator(), buildPlan(plate), 1, nodePlan=buildPlan(tracker))
     tracker.faceTrack.value = tracker.nodeDesc.runAction("trackFace", context)["faceTrack"]
     tracker.smoothing.value = 0.0
+    # The pins pull the vertices around them (the rig model of a MediaPipe mesh: see test_rigPins)
+    tracker.deformModel.value = "surface"
     graph.update()
     plan = buildPlan(tracker)
     evaluator = Evaluator()
@@ -474,6 +477,7 @@ def test_referenceFrameIsTheBaseOfTheFit(tmp_path, monkeypatch):
     tracker.temporalSmoothing.value = 0.0
     # Supple (the mouth of the synthetic grid is a block moved down: a stiff face rounds its edges)
     tracker.stiffness.value = 0.02
+    tracker.deformModel.value = "surface"
     values = {attr.name: _snapshotValue(attr) for attr in tracker.attributes
               if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
     context = ActionContext(values, Evaluator(), buildPlan(plate), 2, nodePlan=buildPlan(tracker))
@@ -490,3 +494,45 @@ def test_referenceFrameIsTheBaseOfTheFit(tmp_path, monkeypatch):
     # The other frames are fitted on the face of the reference frame (wider than the neutral mesh)
     rest = evaluator.cachedData(plan.target, "_rawFace", 2).vertices
     assert np.ptp(rest[:, 0]) > 1.05 * np.ptp(FACE.vertices[:, 0])
+
+
+def test_rigFitsExpressionsAndKeepsRigidPartsRigid():
+    from meshroom.live import faceRig
+    rig = faceRig.FaceRig(FACE.vertices)
+    rng = np.random.default_rng(5)
+    params = rng.normal(0, 0.3, rig.paramCount)
+    params[-2:] = [0.12, 0.03]  # The jaw open, a little sideways
+    expression = rig.deform(params)
+    world = scene3d.transformPoints(headAt(2), expression)
+    truth, _, _ = CAMERA.project(world, W, H)
+    pixels = truth.copy()
+    # A landmark far from every control (a rigid part) given a wrong position
+    rigid = int(np.argmin(rig.weights.sum(axis=1) + rig.jawWeight))
+    pixels[rigid] += [35.0, 20.0]
+    report = {}
+    geo, head, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True, model="rig",
+                                     stiffness=0.01, report=report)
+    xy, _, _ = CAMERA.project(geo.vertices, W, H)
+    errors = np.hypot(*(xy - truth).T)
+    assert np.median(errors) < 0.3 and errors.max() < 1.5 and errors[rigid] < 1.5
+    assert len(report["rigParams"]) == rig.paramCount
+    # The rigid parts never move with the rig (only the head does)
+    moved = np.linalg.norm(rig.deform(rng.normal(0, 1.0, rig.paramCount)) - FACE.vertices, axis=1)
+    assert moved[rigid] < 0.05 * np.linalg.norm(FACE.vertices[faceRig.LANDMARK["sideR"]] - FACE.vertices[faceRig.LANDMARK["sideL"]])
+
+
+def test_rigPins():
+    from meshroom.live import faceRig
+    rig = faceRig.FaceRig(FACE.vertices)
+    pixels = face.toPixels(landmarksAt(2), W, H)
+    # A pin on the mouth corner control, dragged: the control follows it (its area moves), the rigid parts do not
+    corner = faceRig.LANDMARK["mouthR"]
+    target = pixels[corner] + [0.0, -12.0]
+    rest, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3)
+    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3,
+                                  pins=(FACE.vertices[[corner]], target[None]))
+    before, _, _ = CAMERA.project(rest.vertices, W, H)
+    xy, _, _ = CAMERA.project(geo.vertices, W, H)
+    assert np.hypot(*(xy[corner] - target)) < 3.0
+    still = (rig.weights.sum(axis=1) + rig.jawWeight) < 0.01
+    assert still.sum() > 20 and np.abs(xy[still] - before[still]).max() < 1.5

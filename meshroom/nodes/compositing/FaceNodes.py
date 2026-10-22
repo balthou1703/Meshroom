@@ -95,10 +95,17 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.StringParam(name="pins", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position and its point on the neutral face "
                                      "(\"point\": [x, y, z]). Edited in the viewer."),
+        desc.ChoiceParam(name="deformModel", label="Non Rigid Model", value="rig", values=["rig", "surface"],
+                         description="rig: the face moved by a rig (jaw, brows, eyelids, lips, mouth corners, cheeks), "
+                                     "as the head model of KeenTools FaceTracker: the rigid parts (forehead, skull, nose "
+                                     "bridge, temples) stay rigid, the pins move the controls. surface: every vertex "
+                                     "free, a smooth surface through the landmarks (finer, less plausible)."),
         desc.FloatParam(name="stiffness", label="Stiffness", value=0.3, range=(0.0, 5.0, 0.05),
-                        description="With 'Non Rigid': how much the face keeps a smooth shape. 0: each vertex exactly "
-                                    "on its landmark (a wrong landmark folds the mesh); higher: a smooth surface through "
-                                    "the landmarks, wrong or hidden ones following their neighbors."),
+                        description="With 'Non Rigid': rig: how much the controls stay at rest (less: stronger "
+                                    "expressions, more noise). surface: how much the face keeps a smooth shape (0: "
+                                    "each vertex exactly on its landmark, a wrong landmark folds the mesh; higher: a "
+                                    "smooth surface through the landmarks, wrong or hidden ones following their "
+                                    "neighbors)."),
         desc.BoolParam(name="showPinReach", label="Show Pin Reach", value=True,
                        description="With 'Non Rigid': the face is tinted where the pins move it (orange at a pin, "
                                    "fading over 'Pin Radius')."),
@@ -223,10 +230,27 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if not len(points):
             return None
         mesh = self.mesh(ctx)
-        centers = face._onSurface(mesh.vertices, mesh.triangles(), face.pinLocations(mesh, points))
-        radius = max(float(ctx.value("pinRadius")), 1e-6)
-        distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
-        reach = np.exp(-(distances.min(axis=1) / radius) ** 2)[:count, None]
+        locations = face.pinLocations(mesh, points)
+        triangles = mesh.triangles()
+        if ctx.value("deformModel") == "rig":
+            # The areas of the controls under each pin (what the pin moves; a pin on a rigid part moves none)
+            from meshroom.live import faceRig
+            try:
+                rig = faceRig.rigOf(mesh.vertices)
+            except ValueError:
+                return None
+            areas = np.c_[rig.weights, rig.jawWeight]
+            reach = np.zeros(len(mesh.vertices))
+            for t, w in locations:
+                share = w @ areas[triangles[t]]
+                reach = np.maximum(reach, np.clip(areas @ share / max(float(share @ share), 1e-6), 0.0, 1.0)
+                                   * (share.max() > 0.05))
+            reach = reach[:count, None]
+        else:
+            centers = face._onSurface(mesh.vertices, triangles, locations)
+            radius = max(float(ctx.value("pinRadius")), 1e-6)
+            distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
+            reach = np.exp(-(distances.min(axis=1) / radius) ** 2)[:count, None]
         colors = np.array([0.35, 0.8, 1.0]) * (1.0 - reach) + np.array([1.0, 0.5, 0.1]) * reach
         if len(colors) < count:
             colors = np.r_[colors, np.tile([0.35, 0.8, 1.0], (count - len(colors), 1))]
@@ -273,7 +297,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (),
                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
-                                         pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"))
+                                         pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
+                                         model=ctx.value("deformModel"))
         inverse = np.linalg.inv(head)
         return geo.vertices @ inverse[:3, :3].T + inverse[:3, 3], head
 
@@ -586,7 +611,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             geo, _, _, _ = face.solveFace(mesh, pixels, camera, width, height, rigid=face.RIGID_LANDMARKS,
                                           deform=deform, hidden=hidden, stiffness=stiffness,
                                           pins=(pinPoints, pinPositions) if len(pinPoints) else None,
-                                          pinRadius=ctx.value("pinRadius"))
+                                          pinRadius=ctx.value("pinRadius"), model=ctx.value("deformModel"))
             xy, _, _ = camera.project(geo.vertices, width, height)
             count = min(len(xy), len(landmarks))
             fitted = landmarks.copy()

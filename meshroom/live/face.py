@@ -557,7 +557,9 @@ def _onSurface(vertices: np.ndarray, triangles: np.ndarray, locations) -> np.nda
 
 def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraData, width: int, height: int,
               initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=(),
-              pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5, stiffness: float = 0.0):
+              pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5, stiffness: float = 0.0,
+              model: str = "surface", prior: Optional[np.ndarray] = None, priorWeight: float = 0.0,
+              report: Optional[dict] = None):
     """
     The face seen in the image: the pose of the head from the `rigid` landmarks, then each vertex moved at its depth
     onto the ray of its landmark (`deform`). The `hidden` landmarks (masked out) are not used: the head is placed
@@ -568,6 +570,10 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     `stiffness` > 0: the face is not moved vertex by vertex onto its landmarks but as a smooth surface (the moves of
     neighboring vertices kept alike, `regularizedShifts`): a wrong landmark (drift, occlusion) is ignored, the hidden
     ones follow their neighbors, the mesh does not fold; 0: each vertex exactly on its landmark.
+    `model` "rig": the face moved by its rig instead (faceRig.py: jaw, brows, lids, lips, cheeks; the rigid parts stay
+    rigid), the head pose refined with it; the pins move the controls (not the vertices); `stiffness` keeps the
+    controls near the rest shape, `prior` / `priorWeight` near other parameters (e.g. the previous frame). `report`
+    (a dict) receives the "rigParams".
 
     Args:
         mesh: the face (vertex i: landmark i), its shape the neutral face, in its own space.
@@ -597,6 +603,20 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         fitPoints = np.r_[fitPoints, np.repeat(pinPoints, 3, axis=0)]
         fitPixels = np.r_[fitPixels, np.repeat(pinPixels, 3, axis=0)]
     cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
+    if deform and model == "rig":
+        from . import faceRig
+        weights = np.ones(count)
+        weights[[i for i in hidden if i < count]] = 0.0
+        rig = faceRig.rigOf(mesh.vertices)
+        cameraToFace, params, local = faceRig.fitRig(
+            rig, pixels, weights, width, height, focal, cameraToFace,
+            pins=(locations, pinPixels) if locations else None, triangles=mesh.triangles(), prior=prior,
+            stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight)
+        if report is not None:
+            report["rigParams"] = params
+        head = camera.matrix @ np.linalg.inv(cameraToFace)
+        world = local @ head[:3, :3].T + head[:3, 3]
+        return scene3d.GeoData(world, name="face", topology=mesh.topology), head, cameraToFace, error
     head = camera.matrix @ np.linalg.inv(cameraToFace)
     view = np.linalg.inv(cameraToFace)
     inCamera = mesh.vertices @ view[:3, :3].T + view[:3, 3]

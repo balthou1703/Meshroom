@@ -603,6 +603,16 @@ mais comme une surface lisse passant par eux (moindres carrés pondérés + lapl
 repondérés de façon robuste) : un point faux (dérive, détection ratée) est ignoré, les points masqués suivent leurs
 voisins, le maillage ne se replie pas ; 0 : chaque sommet exactement sur son point. Pendant le suivi par le flot, le
 visage ainsi ajusté est ce qui est suivi d'une frame à l'autre (il reste un visage).
+« Non Rigid Model » : rig (par défaut, `meshroom/live/faceRig.py`) : comme le modèle de tête de KeenTools
+FaceTracker, le visage est déformé par un rig construit sur la topologie MediaPipe (axes tirés du visage : menton →
+front, un côté à l'autre) : la mâchoire (rotation ouverture / latérale de la partie sous la ligne des lèvres autour
+d'une charnière près des oreilles), sourcils intérieur / extérieur, paupières haute / basse (la haute ne bouge pas
+la basse), coins de la bouche, lèvre haute / basse, joues : une translation 3D chacun, de sa zone (chute
+gaussienne). Front, crâne, arête du nez, tempes restent rigides. L'ajustement (`fitRig`) résout ensemble la pose de
+la tête et les ~44 paramètres (Levenberg-Marquardt, jacobien analytique, poids de Cauchy des points), régularisé vers
+le repos (« Stiffness ») ; les pins déplacent les contrôles, pas les sommets (comptés 5 fois), et « Show Pin Reach »
+montre les zones des contrôles sous chaque pin (rien pour un pin sur une partie rigide : il ne règle que la pose).
+surface : chaque sommet libre (surface lisse, ci-dessus).
 « Temporal Smoothing » (frames, 1.5 par défaut) : le visage ajusté à chaque frame seule (`rawSolve`, en cache, la
 pose partant de celle d'une frame voisine déjà résolue) est lissé dans le temps : la pose de la tête (rotations
 moyennées en quaternions, translations) et la forme dans l'espace du visage (l'expression) sont moyennées sur les
