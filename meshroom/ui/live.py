@@ -672,7 +672,12 @@ class LiveController(QObject):
     # Tracking
 
     @Slot(QObject, int, "QVariantList")
-    def track(self, node, direction, names):
+    def trackStep(self, node, direction, names):
+        """ Track one frame only (forward: 1, backward: -1), the selected tracks or all of them; see track. """
+        self.track(node, direction, names, 1)
+
+    @Slot(QObject, int, "QVariantList")
+    def track(self, node, direction, names, count=0):
         """
         Track the tracks `names` (all the enabled ones if empty) of a Tracker node (or the pins of a Resection) from
         the current frame, forward (1) or backward (-1), to the end of the frame range of its input, in a worker
@@ -706,6 +711,9 @@ class LiveController(QObject):
         else:
             end = start + 100 * step
         frames = list(range(start, end + step, step))
+        if count:
+            # Image by image: only the next `count` frames
+            frames = frames[:count + 1]
         # Within the track range of the node ("Limit Track Range")
         from meshroom.live.params import trackRange
         values = {name: node.attribute(name).value for name in ("limitTrackRange", "trackFirst", "trackLast")
@@ -1125,6 +1133,8 @@ class LiveController(QObject):
             self._actionProgress, self._actionText = -1.0, ""
             self.actionProgressChanged.emit()
         result = dict(result) if result else {}
+        # The frame the viewer goes to (e.g. after a step of one frame)
+        goTo = result.pop("_frame", None)
         # What was published live is kept (also when the action is stopped or fails)
         self._endActionEdits(node, generation, result)
         if not self._isCurrentNode(node, generation):
@@ -1132,6 +1142,8 @@ class LiveController(QObject):
         if error:
             self._setError(f"{label}: {error}", node.name)
             return
+        if goTo is not None:
+            self._setCurrentFrame(int(goTo))
         if not result:
             return
         disconnect = result.pop("_disconnect", [])

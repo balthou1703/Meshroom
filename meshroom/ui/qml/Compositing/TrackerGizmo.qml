@@ -38,6 +38,8 @@ Item {
     readonly property bool pinMode: !!node && (node.nodeType === "Resection" || node.nodeType === "FaceTracker")
     // Resection only: the geometry track (Track Geometry, Align, Refine)
     readonly property bool geoMode: !!node && node.nodeType === "Resection"
+    // FaceTracker only: the face tracked by MediaPipe / the optical flow
+    readonly property bool faceMode: !!node && node.nodeType === "FaceTracker"
     readonly property string itemName: pinMode ? "pin" : "track"
     property bool adding: false
     property var selectedNames: []
@@ -563,7 +565,15 @@ Item {
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
                 onClicked: root.live.track(root.node, -1, root.selectedNames)
-                ToolTip.text: "Track backward from the current frame (selected tracks, or all)"
+                ToolTip.text: "Track backward from the current frame (selected " + root.itemName + "s, or all)"
+            }
+            MaterialToolButton {
+                font.pointSize: 16
+                text: MaterialIcons.chevron_left
+                enabled: !root.tracking && root.tracks.length > 0
+                         && !(root.live && root.live.actionProgress >= 0)
+                onClicked: root.live.trackStep(root.node, -1, root.selectedNames)
+                ToolTip.text: "Track one frame backward (selected " + root.itemName + "s, or all)"
             }
             MaterialToolButton {
                 font.pointSize: 16
@@ -574,11 +584,19 @@ Item {
             }
             MaterialToolButton {
                 font.pointSize: 16
+                text: MaterialIcons.chevron_right
+                enabled: !root.tracking && root.tracks.length > 0
+                         && !(root.live && root.live.actionProgress >= 0)
+                onClicked: root.live.trackStep(root.node, 1, root.selectedNames)
+                ToolTip.text: "Track one frame forward (selected " + root.itemName + "s, or all)"
+            }
+            MaterialToolButton {
+                font.pointSize: 16
                 text: MaterialIcons.fast_forward
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
                 onClicked: root.live.track(root.node, 1, root.selectedNames)
-                ToolTip.text: "Track forward from the current frame (selected tracks, or all)"
+                ToolTip.text: "Track forward from the current frame (selected " + root.itemName + "s, or all)"
             }
             ProgressBar {
                 Layout.preferredWidth: 60
@@ -646,6 +664,22 @@ Item {
                 onClicked: _currentScene.setAttribute(attribute, !attribute.value)
                 ToolTip.text: "Center Geometry: step the starting camera back along its view axis until the whole geometry " +
                               "is centered in the view (large geometry around the camera)"
+            }
+            // FaceTracker: the face itself (Track With: MediaPipe, flow, or both), backward / forward, image by image
+            Rectangle { visible: root.faceMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
+            Label { visible: root.faceMode; text: MaterialIcons.face; font.family: MaterialIcons.fontFamily; font.pointSize: 14 }
+            Repeater {
+                model: root.faceMode ? [["trackFaceBackward", MaterialIcons.skip_previous, "Track the face backward, to the start of the track range"],
+                                        ["trackFaceStepBackward", MaterialIcons.navigate_before, "Track the face one frame backward"],
+                                        ["trackFaceStepForward", MaterialIcons.navigate_next, "Track the face one frame forward"],
+                                        ["trackFaceForward", MaterialIcons.skip_next, "Track the face forward, to the end of the track range"]] : []
+                delegate: MaterialToolButton {
+                    font.pointSize: 16
+                    text: modelData[1]
+                    enabled: !root.tracking && !!root.live && root.live.actionProgress < 0
+                    onClicked: root.live.runAction(root.node, modelData[0])
+                    ToolTip.text: modelData[2] + " (Track With: " + root.node.attribute("trackWith").value + ")"
+                }
             }
             // Resection: the geometry itself tracked by many points of its surface (optical flow / patches)
             Rectangle { visible: root.geoMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }

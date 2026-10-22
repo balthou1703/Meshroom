@@ -315,6 +315,77 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
     return faces
 
 
+def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, detector=None, flowMethod: str = "lucasKanade",
+                   useGpu: bool = True, agreement: float = 0.06, cancel=None,
+                   progress: Optional[Callable[[int, int], None]] = None,
+                   onFrame: Optional[Callable[[int, dict], None]] = None,
+                   maskAt: Optional[Callable[[int], np.ndarray]] = None) -> Tuple[Dict[int, dict], str]:
+    """
+    The face followed from its landmarks `start` (n, 3) normalized at frames[0] through `frames` (consecutive, forward or
+    backward) by the optical flow of the plate (`flowMethod`: "lucasKanade" or "raft"): each landmark moves with the
+    flow. With a `detector` (MediaPipe, see trackFaces), the face it finds around the flowed landmarks is taken when it
+    agrees with them (its landmarks within `agreement` x the size of the face, in median): MediaPipe does not drift,
+    the flow keeps the face where MediaPipe is lost or wrong (occlusions, profile, blur). Masked out landmarks are
+    "hidden" (as in trackFaces).
+
+    Returns:
+        ({frame: {"landmarks", "blendshapes", "hidden", "source": "flow" or "mediapipe"}} of frames[1:], why it
+        stopped ("" at the end)).
+    """
+    from .evaluator import EvaluationCancelled, EvaluationError
+    from .flow import computeFlow, sampleRows
+    from .imageBuffer import BBox
+    from .neural import displayRGB
+    faces = {}
+    current = np.asarray(start, dtype=np.float64).copy()
+    try:
+        imageA = imageAt(frames[0])
+    except (EvaluationCancelled, EvaluationError) as e:
+        return faces, getattr(e, "message", "") or "cancelled"
+    width, height = imageA.format
+    for index, frame in enumerate(frames[1:], start=1):
+        try:
+            if cancel:
+                cancel()
+            imageB = imageAt(frame)
+            field = computeFlow(imageA, imageB, cancel=cancel, useGpu=useGpu, method=flowMethod)
+            bbox = imageA.bbox
+            x, y = current[:, 0] * width, current[:, 1] * height  # Pixels from the top left corner
+            # The flow at each landmark (rows of the bbox from its top; Nuke y = height - y)
+            motion = sampleRows(field, (bbox.y1 - (height - y) - 0.5).astype(np.float32),
+                                (x - bbox.x0 - 0.5).astype(np.float32)).astype(np.float64)
+        except EvaluationCancelled:
+            return faces, "cancelled"
+        except EvaluationError as e:
+            return faces, f"frame {frame}: {e.message}"
+        flowed = current.copy()
+        # The flow is in Nuke pixels (y up): rows go down
+        flowed[:, 0] = (x + motion[:, 0]) / width
+        flowed[:, 1] = (y - motion[:, 1]) / height
+        landmarks, blendshapes, source = flowed, {}, "flow"
+        mask = np.clip(np.asarray(maskAt(frame), dtype=np.float32), 0.0, 1.0) if maskAt else None
+        if detector is not None:
+            rgb = displayRGB(imageB, BBox.fromFormat(width, height))
+            if mask is not None:
+                rgb = rgb * mask[:, :, None]
+            found, foundShapes = _detectIn(detector, rgb, _cropAround(flowed, width, height),
+                                           int(round(index * 1000.0 / 24.0)))
+            if found is not None:
+                count = min(len(found), len(flowed))
+                size = max(np.ptp(flowed[:count, 0]) * width, np.ptp(flowed[:count, 1]) * height, 1.0)
+                distance = np.hypot((found[:count, 0] - flowed[:count, 0]) * width, (found[:count, 1] - flowed[:count, 1]) * height)
+                if float(np.median(distance)) <= agreement * size:
+                    landmarks, blendshapes, source = found, foundShapes, "mediapipe"
+        faces[frame] = {"landmarks": landmarks, "blendshapes": blendshapes, "source": source,
+                        "hidden": hiddenLandmarks(landmarks, mask) if mask is not None else []}
+        if onFrame:
+            onFrame(frame, faces[frame])
+        if progress:
+            progress(index, len(frames) - 1)
+        current, imageA = landmarks, imageB
+    return faces, ""
+
+
 # Storage (the "faceTrack" parameter): {"format": [w, h], "frames": {"1001": {"l": [x, y, z, ...], "b": {...},
 # "h": [hidden landmarks] (when there are)}}}
 
@@ -323,6 +394,8 @@ def _dumpFace(face: dict) -> dict:
             "b": {name: round(float(value), 4) for name, value in (face.get("blendshapes") or {}).items()}}
     if face.get("hidden"):
         data["h"] = [int(i) for i in face["hidden"]]
+    if face.get("source"):
+        data["s"] = face["source"]
     return data
 
 
@@ -340,7 +413,8 @@ def parseFaces(text: str) -> Tuple[Dict[int, dict], Optional[Tuple[int, int]]]:
     try:
         data = json.loads(text)
         faces = {int(frame): {"landmarks": np.array(face["l"], dtype=np.float64).reshape(-1, 3),
-                              "blendshapes": dict(face.get("b") or {}), "hidden": [int(i) for i in face.get("h") or []]}
+                              "blendshapes": dict(face.get("b") or {}), "hidden": [int(i) for i in face.get("h") or []],
+                              "source": face.get("s", "")}
                  for frame, face in (data.get("frames") or {}).items()}
         imageFormat = tuple(data["format"]) if data.get("format") else None
     except (TypeError, ValueError, KeyError, AttributeError) as e:

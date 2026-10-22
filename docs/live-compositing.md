@@ -584,7 +584,14 @@ Pins (« Pins », comme GeoTracker, `face.solveFace(pins=...)`) : dans le viewer
 les boutons Track suivent les pins comme des pistes. Ils placent la tête avec les points rigides (comptés trois fois),
 puis, avec « Non Rigid », le visage est déplacé autour de chacun (gaussiennes sur le visage neutre de rayon « Pin
 Radius », résolues pour que chaque pin passe exactement par sa position) : un pin au coin des lèvres tire la lèvre,
-pas la tête. Le viewer les dessine reliés au point du visage (l'erreur).
+pas la tête. Le viewer les dessine reliés au point du visage (l'erreur) ; « Show Pin Reach » teinte le maillage en
+orange là où les pins le déplacent (le rayon d'impact). « Track With » : mediapipe (MediaPipe seul à chaque frame),
+flow (le visage ajusté de la frame courante, pins compris, suit le flot optique de la plaque : Lucas-Kanade ou RAFT,
+« Optical Flow »), mediapipe+flow (le flot, et MediaPipe cherché autour du visage suivi, pris là où il s'accorde
+avec lui : pas de dérive, et le flot là où MediaPipe se perd ; `face.propagateFaces`). Avec le flot, partir d'une
+frame bien placée : boutons du viewer (et du nœud) en arrière / avant jusqu'au bout de la plage de tracking, ou une
+frame à la fois (le viewer passe à la frame trackée) ; les autres frames gardent leurs points. Les pistes ont aussi
+des boutons d'une frame (avant / arrière) dans la barre du viewer (Tracker, Resection, FaceTracker).
 À chaque frame, un maillage de visage est calé dessus : la pose de la tête avec les points qui bougent peu
 (front, arête du nez, coins des yeux, tempes ; robuste), puis, avec « Non Rigid », chaque sommet est amené à sa
 profondeur sur le rayon de son point (les lèvres et les paupières suivent). « Smoothing » lisse les points dans le

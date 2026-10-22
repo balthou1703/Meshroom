@@ -7,6 +7,7 @@ import numpy as np
 
 from meshroom.core import desc
 from meshroom.live import scene3d
+from meshroom.live.gpu import gpuParam
 from meshroom.live.params import imageInput, maskParams, trackRangeParams
 
 _COLOR = "#6E9E8A"
@@ -63,6 +64,26 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                          invalidate=False,
                          description="Landmarks given as tracks by 'Track Face': the features (lips, eyes, eyebrows, "
                                      "irises, nose, face oval), all 478, or none."),
+        desc.ChoiceParam(name="trackWith", label="Track With", value="mediapipe+flow",
+                         values=["mediapipe", "flow", "mediapipe+flow"], invalidate=False,
+                         description="mediapipe: MediaPipe finds the face at each frame on its own. flow: the face of the "
+                                     "current frame (fitted, pins included) follows the optical flow of the plate. "
+                                     "mediapipe+flow: followed by the flow, MediaPipe taken where it agrees with it (no "
+                                     "drift, and the flow where MediaPipe is lost or wrong: occlusions, profile, blur). "
+                                     "With flow, start from a well placed frame."),
+        desc.ChoiceParam(name="flowMethod", label="Optical Flow", value="lucasKanade", values=["lucasKanade", "raft"],
+                         invalidate=False,
+                         description="The optical flow followed: Lucas-Kanade, or the RAFT network (large motions, "
+                                     "sharp edges; PyTorch and its weights needed, else Lucas-Kanade)."),
+        gpuParam(),
+        desc.PushButtonParam(name="trackFaceBackward", label="Track Face Backward", semantic="liveAction",
+                             description="Track the face from the current frame back to the start of the track range."),
+        desc.PushButtonParam(name="trackFaceForward", label="Track Face Forward", semantic="liveAction",
+                             description="Track the face from the current frame to the end of the track range."),
+        desc.PushButtonParam(name="trackFaceStepBackward", label="Track Face One Frame Backward", semantic="liveAction",
+                             description="Track the face to the previous frame only (and show it)."),
+        desc.PushButtonParam(name="trackFaceStepForward", label="Track Face One Frame Forward", semantic="liveAction",
+                             description="Track the face to the next frame only (and show it)."),
         desc.PushButtonParam(name="trackFace", label="Track Face", semantic="liveAction",
                              description="Find the face at every frame of the plate (MediaPipe Face Landmarker)."),
         desc.PushButtonParam(name="clearFace", label="Clear", semantic="liveAction",
@@ -71,6 +92,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.StringParam(name="pins", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position and its point on the neutral face "
                                      "(\"point\": [x, y, z]). Edited in the viewer."),
+        desc.BoolParam(name="showPinReach", label="Show Pin Reach", value=True,
+                       description="With 'Non Rigid': the face is tinted where the pins move it (orange at a pin, "
+                                   "fading over 'Pin Radius')."),
         desc.FloatParam(name="pinRadius", label="Pin Radius", value=2.5, range=(0.1, 20.0, 0.1),
                         description="How far around a pin the face is moved to go through it (non rigid), in the "
                                     "units of the face mesh (centimeters for the canonical face)."),
@@ -166,6 +190,26 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         xy, _, inFront = self.camera(ctx).project(onFace, info.width, info.height)
         return {pin["name"]: [float(x), float(y)] for pin, (x, y), front in zip(pins, xy, inFront) if front}
 
+    def pinReachColors(self, ctx, info, count):
+        """ The colors of the vertices showing where the pins move the face ("Show Pin Reach"): from the face color to
+        orange at a pin, over "Pin Radius"; None when not shown (rigid, no pin). """
+        from meshroom.live import face
+        if not (ctx.value("showPinReach") and ctx.value("deform")):
+            return None
+        pins = self.pins(ctx, info)
+        if not pins:
+            return None
+        mesh = self.mesh(ctx)
+        points = np.array([pin["point"] for pin in pins], dtype=np.float64)
+        centers = face._onSurface(mesh.vertices, mesh.triangles(), face.pinLocations(mesh, points))
+        radius = max(float(ctx.value("pinRadius")), 1e-6)
+        distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
+        reach = np.exp(-(distances.min(axis=1) / radius) ** 2)[:count, None]
+        colors = np.array([0.35, 0.8, 1.0]) * (1.0 - reach) + np.array([1.0, 0.5, 0.1]) * reach
+        if len(colors) < count:
+            colors = np.r_[colors, np.tile([0.35, 0.8, 1.0], (count - len(colors), 1))]
+        return colors
+
     def pickPoint(self, ctx, x, y):
         """ The point of the neutral face under the image position (x, y) (where the fitted face is seen), or None. """
         from meshroom.live import face
@@ -227,7 +271,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             if geo is not None and not geo.isEmpty:
                 from meshroom.live import gpu
                 geoRender.drawGeometry(rgba, image.bbox, geo, self.camera(ctx), width, height, display,
-                                       (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx))
+                                       (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
+                                       vertexColors=self.pinReachColors(ctx, image.info, len(geo.vertices)))
         # The pins: where the face puts their point, linked to where they are (the error)
         geo = ctx.ownData("geoOutput", ctx.frame)
         points, positions = self.pinsAt(self.pins(ctx, image.info), ctx.frame)
@@ -243,49 +288,127 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
 
     # Actions
 
+    _TRACK_ACTIONS = ("trackFace", "trackFaceForward", "trackFaceBackward", "trackFaceStepForward",
+                      "trackFaceStepBackward")
+
     def runAction(self, name, context):
-        """ "Track Face" (the landmarks of every frame, and their tracks) or "Clear". """
+        """
+        "Track Face" (every frame of the track range), forward / backward from the current frame, one frame forward /
+        backward, or "Clear". With "Track With" mediapipe, MediaPipe finds the face at each frame on its own; with flow
+        or mediapipe+flow, the face is followed from the current frame (its fitted face, pins included) by the optical
+        flow, MediaPipe taken where it agrees (mediapipe+flow). The landmarks of the other frames are kept.
+        """
         import json
         import time
         from meshroom.live import face
         if name == "clearFace":
             return {"faceTrack": "", "tracks": "[]"}
-        if name != "trackFace":
+        if name not in self._TRACK_ACTIONS:
             raise RuntimeError(f"Unknown action: {name}")
         if context.info is None:
             raise RuntimeError("Connect the plate to the input.")
-        try:
-            detector = face.landmarker(context.value("minConfidence"))
-        except face.FaceUnavailable as e:
-            raise RuntimeError(f"Track Face: {e}") from e
         width, height = context.info.width, context.info.height
-        faces = {}
+        try:
+            faces, _ = face.parseFaces(context.value("faceTrack"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        method = context.value("trackWith")
+        frame, frames = context.currentFrame, context.frames
+        if name != "trackFace" or method != "mediapipe":
+            if frame not in frames:
+                raise RuntimeError("The current frame is outside the track range (Limit Track Range).")
         lastPublish = [0.0]
 
-        def onFrame(frame, found):
-            faces[frame] = found
+        def onFrame(f, found):
+            faces[f] = found
             now = time.monotonic()
             if now - lastPublish[0] >= 0.5:
                 lastPublish[0] = now
-                context.publish({"faceTrack": face.dumpFaces(faces, (width, height))}, frame)
+                context.publish({"faceTrack": face.dumpFaces(faces, (width, height))}, f)
         maskAt = None
         if context.hasInput("mask"):
             from meshroom.live import ops
             from meshroom.live.imageBuffer import BBox
             channel, invert = context.value("maskChannel"), context.value("invertMask")
 
-            def maskAt(frame):
-                return ops.maskValues(context.renderInput("mask", frame), channel, invert,
+            def maskAt(f):
+                return ops.maskValues(context.renderInput("mask", f), channel, invert,
                                       BBox.fromFormat(width, height))[:, :, 0]
+        detector = None
+        if method != "flow" or not faces:
+            try:
+                detector = face.landmarker(context.value("minConfidence"))
+            except face.FaceUnavailable as e:
+                raise RuntimeError(f"Track Face: {e}") from e
+        last = frame
         try:
-            face.trackFaces(context.render, context.frames, detector, cancel=context.checkCancelled,
-                            progress=lambda done, count: context.progress(done / float(count), "Track Face"),
-                            onFrame=onFrame, maskAt=maskAt)
+            if method == "mediapipe":
+                if name == "trackFace":
+                    sequence = frames
+                else:
+                    sequence = self._sequence(name, frame, frames)
+                face.trackFaces(context.render, sequence, detector, cancel=context.checkCancelled,
+                                progress=lambda done, count: context.progress(done / float(count), "Track Face"),
+                                onFrame=onFrame, maskAt=maskAt)
+                last = sequence[-1]
+            else:
+                if frame not in faces:
+                    # Nothing to start from at this frame: MediaPipe finds the face there first
+                    if detector is None:
+                        raise RuntimeError("No face at this frame to follow: track it with MediaPipe first.")
+                    face.trackFaces(context.render, [frame], detector, maskAt=maskAt, onFrame=onFrame)
+                    if frame not in faces:
+                        raise RuntimeError("No face found at this frame to follow (lower 'Min Confidence', or start "
+                                           "from a frame where the face is found).")
+                start = self.fittedLandmarks(context.nodeContext(frame), faces, frame)
+                directions = ["trackFaceForward", "trackFaceBackward"] if name == "trackFace" else [name]
+                for direction in directions:
+                    sequence = self._sequence(direction, frame, frames)
+                    if len(sequence) < 2:
+                        continue
+                    _, reason = face.propagateFaces(
+                        context.render, sequence, start, detector if method == "mediapipe+flow" else None,
+                        flowMethod="raft" if context.value("flowMethod") == "raft" else "lucasKanade",
+                        useGpu=bool(context.value("useGpu")) if "useGpu" in context.values else True,
+                        cancel=context.checkCancelled, onFrame=onFrame, maskAt=maskAt,
+                        progress=lambda done, count: context.progress(done / float(count), "Track Face"))
+                    last = sequence[-1] if not reason else max((f for f in faces if f in sequence), key=sequence.index,
+                                                                default=frame)
+                    if reason and reason != "cancelled":
+                        raise RuntimeError(f"Stopped: {reason}.")
         finally:
-            detector.close()
+            if detector is not None:
+                detector.close()
         if not faces:
             raise RuntimeError("No face found in the plate (lower 'Min Confidence'?).")
         export = context.value("exportTracks")
         indices = None if export == "all" else face.featureIndices()
         tracks = [] if export == "none" else face.landmarkTracks(faces, width, height, indices)
-        return {"faceTrack": face.dumpFaces(faces, (width, height)), "tracks": json.dumps(tracks)}
+        result = {"faceTrack": face.dumpFaces(faces, (width, height)), "tracks": json.dumps(tracks)}
+        if name in ("trackFaceStepForward", "trackFaceStepBackward"):
+            # The viewer shows the frame tracked
+            result["_frame"] = last
+        return result
+
+    @staticmethod
+    def _sequence(name, frame, frames):
+        """ The frames tracked by an action from `frame`: to the end of the range (forward / backward) or one frame. """
+        forward = name in ("trackFaceForward", "trackFaceStepForward")
+        sequence = [f for f in frames if f >= frame] if forward else [f for f in frames if f <= frame][::-1]
+        return sequence[:2] if "Step" in name else sequence
+
+    def fittedLandmarks(self, ctx, faces, frame):
+        """ The landmarks (normalized) of the face fitted at a frame (pins and non rigid included): what the flow
+        follows. The irises (not in a 468 vertex mesh) are kept from the tracked landmarks. """
+        from meshroom.live import face
+        info = ctx.inputInfo("input")
+        geo, _ = self.solve(ctx, frame)
+        tracked = faces[frame]["landmarks"]
+        if geo.isEmpty:
+            return tracked
+        xy, _, _ = self.camera(ctx, frame).project(geo.vertices, info.width, info.height)
+        count = min(len(xy), face.LANDMARKS)
+        landmarks = tracked.copy() if len(tracked) >= count else np.zeros((count, 3))
+        landmarks[:count, 0] = xy[:count, 0] / info.width
+        landmarks[:count, 1] = (info.height - xy[:count, 1]) / info.height
+        return landmarks

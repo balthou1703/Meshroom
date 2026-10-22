@@ -319,3 +319,55 @@ def test_faceTrackerPins(tmp_path, monkeypatch):
     geo = Evaluator().data(plan, plan.target, "geoOutput", 1)
     xy, _, _ = CAMERA.project(geo.vertices[[pinned]], W, H)
     np.testing.assert_allclose(xy[0], [x, y + 12.0], atol=0.5)
+
+
+def _movingPlate(frame, width=320, height=240):
+    """ A textured plate moving 2 pixels right and 1 down per frame. """
+    from meshroom.live import ImageBuffer
+    rows, columns = np.mgrid[0:height, 0:width]
+    x, y = columns + 0.5 - 2.0 * frame, rows + 0.5 - 1.0 * frame
+    lum = (0.5 + 0.12 * (np.sin(0.21 * x + 0.13 * y) + np.sin(0.17 * y - 0.09 * x) + np.sin(0.31 * x) * np.sin(0.27 * y)))
+    lum = lum.astype(np.float32)
+    return ImageBuffer.fromRGBA(np.stack([lum, lum, lum, np.ones_like(lum)], -1), (width, height))
+
+
+def test_faceFollowsTheFlow():
+    width, height = 320, 240
+    t = np.linspace(0.3, 0.7, face.LANDMARKS)
+    start = np.c_[t, 1.0 - t, np.zeros_like(t)]
+    faces, reason = face.propagateFaces(_movingPlate, [0, 1, 2, 3, 4], start)
+    assert reason == "" and sorted(faces) == [1, 2, 3, 4]
+    moved = faces[4]["landmarks"]
+    inside = (start[:, 0] * width > 30) & (start[:, 0] * width < width - 30)
+    np.testing.assert_allclose((moved[inside, 0] - start[inside, 0]) * width, 8.0, atol=0.5)
+    np.testing.assert_allclose((moved[inside, 1] - start[inside, 1]) * height, 4.0, atol=0.5)
+    assert faces[4]["source"] == "flow"
+    # Backward: the other way
+    back, _ = face.propagateFaces(_movingPlate, [4, 3, 2], moved)
+    np.testing.assert_allclose((back[2]["landmarks"][inside, 0] - moved[inside, 0]) * width, -4.0, atol=0.5)
+
+
+def test_mediapipeTakenWhereItAgreesWithTheFlow():
+    t = np.linspace(0.3, 0.7, face.LANDMARKS)
+    start = np.c_[t, 1.0 - t, np.zeros_like(t)]
+
+    class Finder:
+        def __init__(self, shift):
+            self.shift = shift
+
+        def detect(self, rgb, timestampMs):
+            # The landmarks "found" in the crop: the flowed ones shifted (normalized to the crop: whole frame here)
+            return self.landmarks, {"jawOpen": 0.2}
+    flowed, _ = face.propagateFaces(_movingPlate, [0, 1], start)
+    for shift, expected in ((0.5, "mediapipe"), (40.0, "flow")):
+        finder = Finder(shift)
+        landmarks = flowed[1]["landmarks"].copy()
+        landmarks[:, 0] += shift / 320.0
+        finder.landmarks = landmarks
+        original = face._cropAround
+        face._cropAround = lambda l, w, h: (0, 0, w, h)
+        try:
+            faces, _ = face.propagateFaces(_movingPlate, [0, 1], start, detector=finder)
+        finally:
+            face._cropAround = original
+        assert faces[1]["source"] == expected

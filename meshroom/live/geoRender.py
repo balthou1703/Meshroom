@@ -198,8 +198,9 @@ def featureEdges(geo, cameraPosition: np.ndarray, creaseDegrees: float = 40.0,
     return edges[open_ | crease | silhouette]
 
 
-def _segmentSamples(u, v, z, edges: np.ndarray, shape, maxSamples: int):
-    """ Samples every pixel along edges (both ends in front of the camera): (u, v, depth). """
+def _segmentSamples(u, v, z, edges: np.ndarray, shape, maxSamples: int, vertexValues: Optional[np.ndarray] = None):
+    """ Samples every pixel along edges (both ends in front of the camera): (u, v, depth), and with `vertexValues`
+    (n, c), the values interpolated at the samples (k, c). """
     h, w = shape
     a, b = edges[:, 0], edges[:, 1]
     du, dv = u[b] - u[a], v[b] - v[a]
@@ -218,8 +219,12 @@ def _segmentSamples(u, v, z, edges: np.ndarray, shape, maxSamples: int):
     segment = np.repeat(np.arange(len(a)), lengths)
     firsts = np.r_[0, np.cumsum(lengths)[:-1]]
     t = (np.arange(len(segment)) - firsts[segment]) / np.maximum(lengths[segment] - 1, 1)
-    return (u[a][segment] + du[segment] * t, v[a][segment] + dv[segment] * t,
-            z[a][segment] + (z[b] - z[a])[segment] * t)
+    samples = (u[a][segment] + du[segment] * t, v[a][segment] + dv[segment] * t,
+               z[a][segment] + (z[b] - z[a])[segment] * t)
+    if vertexValues is None:
+        return samples
+    values = vertexValues[a][segment] * (1 - t)[:, None] + vertexValues[b][segment] * t[:, None]
+    return samples + (values,)
 
 
 def _splat(coverage: np.ndarray, su: np.ndarray, sv: np.ndarray, weight=1.0):
@@ -243,13 +248,26 @@ def _composite(rgba: np.ndarray, coverage: np.ndarray, color, alpha: float):
     rgba[:, :, 3:4] = np.maximum(rgba[:, :, 3:4], amount)
 
 
+def _coloredCoverage(shape, su, sv, colors):
+    """ (coverage (h, w), color (h, w, 3)) of antialiased samples of their own colors (k, 3). """
+    coverage = np.zeros(shape, np.float32)
+    _splat(coverage, su, sv)
+    image = np.zeros(shape + (3,), np.float32)
+    for channel in range(3):
+        _splat(image[:, :, channel], su, sv, colors[:, channel])
+    return coverage, image / np.maximum(coverage, 1e-6)[:, :, None]
+
+
 def drawLines(rgba: np.ndarray, u, v, z, edges: np.ndarray, color, alpha: float, zbuffer: Optional[np.ndarray] = None,
-              maxSamples: int = 20_000_000, tolerance: float = 0.004):
-    """ Draw edges (vertex index pairs) antialiased; with a depth buffer, the parts behind the surface are hidden. """
+              maxSamples: int = 20_000_000, tolerance: float = 0.004, vertexColors: Optional[np.ndarray] = None):
+    """ Draw edges (vertex index pairs) antialiased; with a depth buffer, the parts behind the surface are hidden.
+    `vertexColors` (n, 3): each edge colored from its ends (instead of `color`). """
     if not len(edges):
         return
     shape = rgba.shape[:2]
-    su, sv, sz = _segmentSamples(u, v, z, edges, shape, maxSamples)
+    samples = _segmentSamples(u, v, z, edges, shape, maxSamples, vertexColors)
+    su, sv, sz = samples[:3]
+    colors = samples[3] if vertexColors is not None else None
     if zbuffer is not None and len(su):
         h, w = shape
         columns = np.clip(np.floor(su).astype(np.int64), 0, w - 1)
@@ -257,6 +275,11 @@ def drawLines(rgba: np.ndarray, u, v, z, edges: np.ndarray, color, alpha: float,
         # On the surface (the same depth within the tolerance) or in front of it
         visible = sz <= zbuffer[rows, columns] * (1.0 + tolerance) + 1e-9
         su, sv = su[visible], sv[visible]
+        colors = colors[visible] if colors is not None else None
+    if colors is not None:
+        coverage, image = _coloredCoverage(shape, su, sv, colors)
+        _composite(rgba, coverage, image, alpha)
+        return
     coverage = np.zeros(shape, np.float32)
     _splat(coverage, su, sv)
     _composite(rgba, coverage, color, alpha)
@@ -264,7 +287,8 @@ def drawLines(rgba: np.ndarray, u, v, z, edges: np.ndarray, color, alpha: float,
 
 def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, mode: str = "shaded",
                  color=(0.35, 1.0, 0.45), alpha: float = 0.6, creaseDegrees: float = 40.0, hiddenLines: bool = True,
-                 maxEdges: int = 2_000_000, pointSize: int = 2, useGpu: bool = False) -> np.ndarray:
+                 maxEdges: int = 2_000_000, pointSize: int = 2, useGpu: bool = False,
+                 vertexColors: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Draw a geometry over an RGBA array covering `bbox`, in place (see MODES):
         shaded: its surface lit from the camera, and its feature edges;
@@ -272,7 +296,8 @@ def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, m
         wireframe: all the edges of its faces;
         points: its vertices.
     `hiddenLines`: the edges (and points) behind the surface are not drawn. `useGpu`: the depth buffer is computed on
-    the GPU when there is one (meshroom/live/gpu.py).
+    the GPU when there is one (meshroom/live/gpu.py). `vertexColors` (n, 3): a color per vertex instead of `color`
+    (e.g. the reach of the pins of a FaceTracker).
     """
     from . import gpu
 
@@ -285,6 +310,10 @@ def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, m
     u, v, z, inFront = screenPositions(geo, camera, width, height, bbox)
     hasFaces = len(geo.faceCounts) > 0
     color = np.asarray(color, np.float32)
+    if vertexColors is not None:
+        vertexColors = np.asarray(vertexColors, np.float32).reshape(-1, 3)
+        if len(vertexColors) != len(geo.vertices):
+            vertexColors = None
     if mode == "points" or not hasFaces:
         if mode == "points" and hasFaces and hiddenLines:
             zbuffer, _ = depthBuffer(u, v, z, geo.triangles(), shape)
@@ -292,10 +321,16 @@ def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, m
             columns = np.clip(np.floor(u).astype(np.int64), 0, w - 1)
             rows = np.clip(np.floor(v).astype(np.int64), 0, h - 1)
             inFront = inFront & (z <= zbuffer[rows, columns] * 1.004 + 1e-9)
+        offsets = [(dx, dy) for dx in range(-(pointSize // 2), pointSize - pointSize // 2)
+                   for dy in range(-(pointSize // 2), pointSize - pointSize // 2)]
+        su = np.concatenate([u[inFront] + dx for dx, _ in offsets])
+        sv = np.concatenate([v[inFront] + dy for _, dy in offsets])
+        if vertexColors is not None:
+            coverage, image = _coloredCoverage(shape, su, sv, np.tile(vertexColors[inFront], (len(offsets), 1)))
+            _composite(rgba, coverage, image, alpha)
+            return rgba
         coverage = np.zeros(shape, np.float32)
-        for dx in range(-(pointSize // 2), pointSize - pointSize // 2):
-            for dy in range(-(pointSize // 2), pointSize - pointSize // 2):
-                _splat(coverage, u[inFront] + dx, v[inFront] + dy)
+        _splat(coverage, su, sv)
         _composite(rgba, coverage, color, alpha)
         return rgba
     needDepth = mode == "shaded" or hiddenLines
@@ -310,15 +345,22 @@ def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, m
         light = 0.35 + 0.65 * np.abs(_dot(normals, toCamera))
         seen = ids >= 0
         shade = np.where(seen, light[np.maximum(ids, 0)], 0.0)
-        _composite(rgba, seen.astype(np.float32), color[None, None, :3] * shade[:, :, None].astype(np.float32), alpha)
+        if vertexColors is not None:
+            # Flat: each triangle the mean color of its corners
+            triangleColors = vertexColors[triangles].mean(axis=1)
+            surface = triangleColors[np.maximum(ids, 0)] * shade[:, :, None].astype(np.float32)
+        else:
+            surface = color[None, None, :3] * shade[:, :, None].astype(np.float32)
+        _composite(rgba, seen.astype(np.float32), surface, alpha)
         edges = featureEdges(geo, camera.position, creaseDegrees, normals)
         drawLines(rgba, u, v, z, _inFrontEdges(edges, inFront, maxEdges), np.minimum(color * 1.25, 1.0), min(1.0, alpha * 1.4),
-                  zbuffer)
+                  zbuffer, vertexColors=np.minimum(vertexColors * 1.25, 1.0) if vertexColors is not None else None)
     elif mode == "edges":
         edges = featureEdges(geo, camera.position, creaseDegrees)
-        drawLines(rgba, u, v, z, _inFrontEdges(edges, inFront, maxEdges), color, alpha, zbuffer)
+        drawLines(rgba, u, v, z, _inFrontEdges(edges, inFront, maxEdges), color, alpha, zbuffer, vertexColors=vertexColors)
     else:
-        drawLines(rgba, u, v, z, _inFrontEdges(geo.edges(), inFront, maxEdges), color, alpha, zbuffer)
+        drawLines(rgba, u, v, z, _inFrontEdges(geo.edges(), inFront, maxEdges), color, alpha, zbuffer,
+                  vertexColors=vertexColors)
     return rgba
 
 
