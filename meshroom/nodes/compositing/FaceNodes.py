@@ -124,6 +124,17 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                       description="The reference frame ('Set Reference Frame': the current frame)."),
         desc.PushButtonParam(name="setReference", label="Set Reference Frame", semantic="liveAction",
                              description="The current frame becomes the reference frame."),
+        desc.PushButtonParam(name="fitShape", label="Fit Shape", semantic="liveAction",
+                             description="Find the shape of the actor's face from the tracked frames of the track range "
+                                         "(seen from several angles; the keyframes with pins count more): one rest face "
+                                         "for the whole shot, the rig then only changes its expression (as the head "
+                                         "of KeenTools FaceBuilder). Track the face first; fit again after new "
+                                         "keyframes."),
+        desc.PushButtonParam(name="clearShape", label="Clear Shape", semantic="liveAction",
+                             description="Back to the face mesh as it is (no fitted shape)."),
+        desc.StringParam(name="faceShape", label="Face Shape", value="", semantic="faceShape", advanced=True,
+                         description="The shape of the actor found by 'Fit Shape': offsets of the vertices of the face "
+                                     "mesh (JSON)."),
         desc.FloatParam(name="temporalSmoothing", label="Temporal Smoothing", value=1.5, range=(0.0, 6.0, 0.1),
                         description="Gaussian smoothing in time (frames) of the fitted face: its head pose and its shape "
                                     "in face space (the expression), so that it moves as a face does: no jitter, no part "
@@ -146,6 +157,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.Geo(name="geoOutput", label="Face", description="The face mesh at each frame, in the world of the camera."),
         desc.Matrix(name="headMatrix", label="Head Matrix", description="The pose of the head: face space to world."),
         desc.Camera(name="cameraOutput", label="Camera", description="The plate camera (the input camera, or the default one)."),
+        desc.Geo(name="shapeOutput", label="Shape",
+                 description="The rest face (face space): the face mesh with the shape of the actor found by 'Fit "
+                             "Shape' (e.g. to write it, and connect it to 'Face' of other FaceTrackers)."),
         desc.Image(name="output", label="Output", description="The plate, with the face drawn over it."),
     ]
 
@@ -159,7 +173,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         camera = ctx.inputData("camera", frame)
         return camera if camera is not None else scene3d.CameraData(np.eye(4), 35.0, 36.0, 24.0)
 
-    def mesh(self, ctx, frame=None):
+    def baseMesh(self, ctx, frame=None):
         """ The face mesh (MediaPipe topology): the "face" input, or the canonical face. """
         from meshroom.live import face
         mesh = ctx.inputData("face", frame)
@@ -169,6 +183,29 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         except face.FaceUnavailable as e:
             raise RuntimeError(str(e)) from e
         return mesh
+
+    _SHAPED = {}
+
+    def mesh(self, ctx, frame=None):
+        """ The rest face: the base mesh with the shape of the actor ("Fit Shape") when it was fitted. """
+        from meshroom.live import face
+        base = self.baseMesh(ctx, frame)
+        text = ctx.value("faceShape")
+        if not text:
+            return base
+        key = (id(base.topology), hash(base.vertices.tobytes()), hash(text))
+        shaped = self._SHAPED.get(key)
+        if shaped is None:
+            try:
+                offsets = face.parseShape(text)
+            except ValueError as e:
+                raise RuntimeError(str(e)) from e
+            if offsets is None or len(offsets) != len(base.vertices):
+                return base  # Fitted on another mesh
+            if len(self._SHAPED) > 8:
+                self._SHAPED.clear()
+            shaped = self._SHAPED[key] = scene3d.GeoData(base.vertices + offsets, name=base.name, topology=base.topology)
+        return shaped
 
     def faces(self, ctx):
         from meshroom.live import face
@@ -214,7 +251,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return {}
         mesh = self.mesh(ctx)
         triangles = mesh.triangles()
-        locations = face.pinLocations(mesh, np.array([pin["point"] for pin in pins], dtype=np.float64))
+        locations = face.pinLocations(self.baseMesh(ctx), np.array([pin["point"] for pin in pins], dtype=np.float64))
         onFace = np.array([geo.vertices[triangles[t]].T @ w for t, w in locations])
         xy, _, inFront = self.camera(ctx).project(onFace, info.width, info.height)
         return {pin["name"]: [float(x), float(y)] for pin, (x, y), front in zip(pins, xy, inFront) if front}
@@ -230,7 +267,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if not len(points):
             return None
         mesh = self.mesh(ctx)
-        locations = face.pinLocations(mesh, points)
+        locations = face.pinLocations(self.baseMesh(ctx), points)
         triangles = mesh.triangles()
         if ctx.value("deformModel") == "rig":
             # The areas of the controls under each pin (what the pin moves; a pin on a rigid part moves none)
@@ -267,9 +304,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         hit = scene3d.raycast(geo, origin, direction)
         if hit is None:
             return None
-        mesh = self.mesh(ctx)
+        mesh = self.baseMesh(ctx)
         triangle, weights = face.surfaceLocation(geo.vertices, geo.triangles(), hit)
-        # The same place on the neutral face
+        # The same place on the base face mesh (the pins stay valid when the shape is fitted again)
         return mesh.vertices[mesh.triangles()[triangle]].T @ weights
 
     def reference(self, ctx):
@@ -288,9 +325,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         pixels = face.toPixels(landmarks, info.width, info.height)
         tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
         pinPoints, pinPositions = self.pinsAt(self.pins(ctx, info), frame)
-        neutral = self.mesh(ctx, frame)
+        neutral = self.baseMesh(ctx, frame)
         if len(pinPoints) and rest is not neutral:
-            # The pins are points of the neutral face: the same places on the rest shape
+            # The pins are points of the base face mesh: the same places on the rest shape
             pinPoints = face._onSurface(rest.vertices, rest.triangles(), face.pinLocations(neutral, pinPoints))
         camera = self.camera(ctx, frame)
         geo, head, _, _ = face.solveFace(rest, pixels, camera, info.width, info.height, initial=initial,
@@ -401,6 +438,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return self.solve(ctx)[0]
         if outputName in ("headMatrix", "matrix"):
             return self.solve(ctx)[1]
+        if outputName == "shapeOutput":
+            return self.mesh(ctx)
         return super().computeData(ctx, outputName)
 
     def render(self, ctx, inputs):
@@ -427,7 +466,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if len(points) and geo is not None and not geo.isEmpty:
             mesh = self.mesh(ctx)
             triangles = mesh.triangles()
-            onFace = np.array([geo.vertices[triangles[t]].T @ w for t, w in face.pinLocations(mesh, points)])
+            onFace = np.array([geo.vertices[triangles[t]].T @ w for t, w in face.pinLocations(self.baseMesh(ctx), points)])
             xy, _, _ = self.camera(ctx).project(onFace, width, height)
             scene3d.drawSegments(rgba, image.bbox, xy, positions, (1.0, 0.3, 0.3), 1.0)
             for dx in range(-3, 4):
@@ -453,6 +492,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return {"faceTrack": "", "tracks": "[]"}
         if name == "setReference":
             return {"referenceFrame": int(context.currentFrame), "useReference": True}
+        if name == "clearShape":
+            return {"faceShape": ""}
+        if name == "fitShape":
+            return self.fitShape(context)
         if name not in self._TRACK_ACTIONS:
             raise RuntimeError(f"Unknown action: {name}")
         if context.info is None:
@@ -548,6 +591,43 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             # The viewer shows the frame tracked
             result["_frame"] = last
         return result
+
+    def fitShape(self, context, maxFrames: int = 40):
+        """
+        "Fit Shape": the shape of the actor from the tracked frames of the track range (up to `maxFrames`, spread, all
+        the keyframes included and weighted 3 times): one rest face for the shot, fitted with the head pose and the
+        expression of each frame (face.fitShape).
+        """
+        from meshroom.live import face
+        if context.info is None:
+            raise RuntimeError("Connect the plate to the input.")
+        width, height = context.info.width, context.info.height
+        try:
+            faces, _ = face.parseFaces(context.value("faceTrack"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        inRange = set(context.frames)
+        tracked = sorted(f for f in faces if f in inRange)
+        if len(tracked) < 2:
+            raise RuntimeError("Fit Shape needs the face tracked on several frames (Track Face first).")
+        keyframes = [f for f in self.keyframes(context) if f in faces]
+        others = [f for f in tracked if f not in keyframes]
+        count = max(0, maxFrames - len(keyframes))
+        chosen = sorted(set(keyframes) | {others[int(i)] for i in np.linspace(0, len(others) - 1, min(count, len(others)))}
+                        if others else set(keyframes))
+        ctx = context.nodeContext()
+        base = self.baseMesh(ctx)
+        pins = self.pins(ctx, context.info)
+        observations = []
+        for f in chosen:
+            pinPoints, pinPositions = self.pinsAt(pins, f)
+            observations.append({"pixels": face.toPixels(faces[f]["landmarks"], width, height),
+                                 "hidden": faces[f].get("hidden") or [], "camera": self.camera(ctx, f),
+                                 "weight": 3.0 if f in keyframes else 1.0,
+                                 "pins": (pinPoints, pinPositions) if len(pinPoints) else None})
+        offsets = face.fitShape(base, observations, width, height, cancel=context.checkCancelled,
+                                progress=lambda done: context.progress(done, "Fit Shape"))
+        return {"faceShape": face.dumpShape(offsets)}
 
     @staticmethod
     def _sequence(name, frame, frames, keyframes=()):

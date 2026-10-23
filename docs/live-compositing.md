@@ -616,6 +616,17 @@ Garde-fous : les points du côté du visage tourné à l'opposé de la caméra (
 utilisés ; les contrôles ont des limites douces (translation : un cinquième de la largeur du visage ; mâchoire :
 -0.15 à 0.6 rad d'ouverture, ±0.25 latéral) ; leurs mouvements en profondeur (mal vus) coûtent trois fois plus.
 surface : chaque sommet libre (surface lisse, ci-dessus).
+« Fit Shape » (bouton du nœud et du viewer, `face.fitShape`) : la forme du visage de l'acteur, comme la tête de
+KeenTools FaceBuilder, trouvée sur les frames trackées de la plage (40 au plus, réparties, toutes les keyframes
+comprises et comptées 3 fois) : une seule forme de repos pour le plan, ajustée avec la pose et l'expression (le rig,
+raide) de chaque frame ; les frames vues sous plusieurs angles donnent la profondeur. Elle reste lisse (laplacien),
+symétrique (sommets miroirs) et proche du maillage de départ ; alternance : les frames ajustées sur la forme
+courante, puis la forme corrigée de leurs erreurs (linéarisé, un système creux). Gardée dans « Face Shape » (décalages
+des sommets) ; le rig et les pins travaillent ensuite dessus (les pins restent posés sur le maillage de départ :
+« Fit Shape » peut être relancé après de nouvelles keyframes) ; sortie « Shape » : la forme de repos, à écrire et
+rebrancher dans « Face » d'autres FaceTrackers. « Clear Shape » la retire. Avec un visage branché en « Face » (un scan
+de l'acteur de topologie MediaPipe), c'est lui la forme de repos : les points de MediaPipe ne donnent que la pose et
+l'expression (le rig) ; en modèle « surface », chaque sommet est en revanche tiré vers son point.
 « Temporal Smoothing » (frames, 1.5 par défaut) : le visage ajusté à chaque frame seule (`rawSolve`, en cache, la
 pose partant de celle d'une frame voisine déjà résolue) est lissé dans le temps : la pose de la tête (rotations
 moyennées en quaternions, translations) et la forme dans l'espace du visage (l'expression) sont moyennées sur les

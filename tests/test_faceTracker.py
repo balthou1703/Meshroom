@@ -553,3 +553,55 @@ def test_rigStaysWithinWhatAFaceCanDo():
     local = scene3d.transformPoints(np.linalg.inv(head), geo.vertices)
     width = np.linalg.norm(FACE.vertices[faceRig.LANDMARK["sideR"]] - FACE.vertices[faceRig.LANDMARK["sideL"]])
     assert np.linalg.norm(local - FACE.vertices, axis=1).max() < 0.35 * width
+
+
+def _procrustes(a, b):
+    """ RMS distance between two point sets after the best similarity (rotation, translation, scale). """
+    a0, b0 = a - a.mean(0), b - b.mean(0)
+    u, sv, vt = np.linalg.svd(a0.T @ b0)
+    rotation = u @ vt
+    scale = sv.sum() / (a0 ** 2).sum()
+    return float(np.sqrt(np.mean(np.sum((scale * a0 @ rotation - b0) ** 2, axis=1))))
+
+
+def test_fitShapeFindsTheActorsFace():
+    # The actor: wider jaw, longer nose than the mesh (a smooth, symmetric difference), seen turning the head
+    actor = FACE.vertices.copy()
+    actor[:, 0] *= 1.0 + 0.12 * np.clip(-actor[:, 1] / 10.0, 0.0, 1.0)
+    actor[:, 2] += 1.5 * np.exp(-(actor[:, 0] ** 2 + actor[:, 1] ** 2) / 8.0)
+    observations = []
+    for f, yaw in enumerate((-25, -12, 0, 12, 25, 35)):
+        head = scene3d.composeTRS((1.0 * f - 2.0, -1.0, -60.0), (5.0, yaw, 3.0))
+        xy, _, _ = CAMERA.project(scene3d.transformPoints(head, actor), W, H)
+        observations.append({"pixels": xy, "hidden": [], "camera": CAMERA, "weight": 1.0})
+    offsets = face.fitShape(FACE, observations, W, H)
+    before = _procrustes(FACE.vertices, actor)
+    after = _procrustes(FACE.vertices + offsets, actor)
+    assert after < 0.5 * before
+    # Stored
+    np.testing.assert_allclose(face.parseShape(face.dumpShape(offsets)), offsets, atol=1e-5)
+
+
+def test_fitShapeAction(tmp_path, monkeypatch):
+    monkeypatch.setattr(face, "RIGID_LANDMARKS", tuple(RIGID))
+    graph, plate, tracker = faceGraph(tmp_path)
+    actor = FACE.vertices.copy()
+    actor[:, 0] *= 1.12
+    faces = {}
+    for f, yaw in enumerate((-20, -8, 4, 16, 28), start=1):
+        head = scene3d.composeTRS((0.5 * f, -1.0, -60.0), (4.0, yaw, 2.0))
+        xy, _, _ = CAMERA.project(scene3d.transformPoints(head, actor), W, H)
+        faces[f] = {"landmarks": np.c_[xy[:, 0] / W, (H - xy[:, 1]) / H, np.zeros(len(xy))], "blendshapes": {}}
+    tracker.faceTrack.value = face.dumpFaces(faces, (W, H))
+    graph.update()
+    values = {attr.name: _snapshotValue(attr) for attr in tracker.attributes
+              if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+    context = ActionContext(values, Evaluator(), buildPlan(plate), 1, nodePlan=buildPlan(tracker))
+    monkeypatch.setattr(ActionContext, "frames", property(lambda self: [1, 2, 3, 4, 5]))
+    result = tracker.nodeDesc.runAction("fitShape", context)
+    tracker.faceShape.value = result["faceShape"]
+    graph.update()
+    plan = buildPlan(tracker)
+    shape = Evaluator().data(plan, plan.target, "shapeOutput", 1)
+    assert _procrustes(shape.vertices, actor) < 0.6 * _procrustes(FACE.vertices, actor)
+    assert tracker.nodeDesc.runAction("clearShape", context) == {"faceShape": ""}

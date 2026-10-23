@@ -727,3 +727,132 @@ def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixel
         xy = xy + shift[:n]
         moved[:n] = np.c_[(xy[:, 0] - width / 2.0) / focal, (xy[:, 1] - height / 2.0) / focal, -np.ones(n)] * depth[:, None]
     return moved
+
+
+# The shape of the actor ("Fit Shape"): one rest face for the whole shot, its expressions left to the rig
+
+def mirrorPairs(vertices: np.ndarray, right: np.ndarray, tolerance: float) -> np.ndarray:
+    """ For each vertex, its mirror across the middle plane of the face (normal `right`), -1 when none is near. """
+    from scipy.spatial import cKDTree
+    right = right / max(np.linalg.norm(right), 1e-12)
+    center = vertices.mean(axis=0)
+    mirrored = vertices - 2.0 * np.outer((vertices - center) @ right, right)
+    distances, indices = cKDTree(vertices).query(mirrored)
+    return np.where(distances <= tolerance, indices, -1)
+
+
+def fitShape(mesh: scene3d.GeoData, observations: List[dict], width: int, height: int, rounds: int = 4,
+             smoothness: float = 3.0, symmetry: float = 1.0, closeness: float = 0.05, cancel=None,
+             progress: Optional[Callable[[float], None]] = None) -> np.ndarray:
+    """
+    The shape of the actor's face seen in several frames: offsets (n, 3) of the vertices of `mesh` (face space) shared
+    by all the frames, so that with its own head pose and expression (the rig, stiff) each frame fits its landmarks.
+    The frames seen from different angles give the depth one frame does not. The offsets stay smooth (Laplacian,
+    `smoothness`), symmetric (`symmetry`, the mirror vertices moved alike) and small (`closeness`); the costs are in
+    pixels per mesh unit seen at the distance of the face, times the number of frames. Alternated: the frames fitted on
+    the current shape, then the shape updated from their errors (linearized, one sparse solve).
+
+    Args:
+        observations: per frame, {"pixels": (n, 2) Nuke pixels, "hidden": [landmarks], "camera": CameraData,
+            "weight": float (e.g. more for a keyframe), "pins": (points (k, 3) on `mesh`, positions (k, 2)) or None}.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+    from . import faceRig
+    rest = np.asarray(mesh.vertices, dtype=np.float64)
+    n = len(rest)
+    offsets = np.zeros((n, 3))
+    if not observations:
+        return offsets
+    rig0 = faceRig.FaceRig(rest)
+    right = rig0.axes[0]
+    pairs = mirrorPairs(rest, right, 0.03 * rig0.width)
+    flip = np.eye(3) - 2.0 * np.outer(right, right)
+    # Symmetry: D_i - flip D_mirror(i)
+    rows, columns, values = [], [], []
+    for i in range(n):
+        if pairs[i] < 0 or pairs[i] == i:
+            continue
+        for a in range(3):
+            rows.append(3 * i + a)
+            columns.append(3 * i + a)
+            values.append(1.0)
+            for b in range(3):
+                rows.append(3 * i + a)
+                columns.append(3 * pairs[i] + b)
+                values.append(-flip[a, b])
+    symmetric = sparse.coo_matrix((values, (rows, columns)), shape=(3 * n, 3 * n)).tocsr()
+    laplacian = sparse.kron(_laplacian(mesh, n), sparse.identity(3)).tocsr()
+    total = sum(float(o.get("weight", 1.0)) for o in observations)
+    for round_ in range(rounds):
+        shape = scene3d.GeoData(rest + offsets, topology=mesh.topology)
+        blocks = np.zeros((n, 3, 3))
+        rhs = np.zeros((n, 3))
+        scales = []
+        for index, observation in enumerate(observations):
+            if cancel:
+                cancel()
+            camera = observation["camera"]
+            pixels = np.asarray(observation["pixels"], dtype=np.float64)
+            count = min(n, len(pixels))
+            report = {}
+            pins = observation.get("pins")
+            if pins is not None and len(pins[0]):
+                # The pins are points of the base mesh: the same places on the current shape
+                pins = (_onSurface(shape.vertices, shape.triangles(), pinLocations(mesh, pins[0])), pins[1])
+            _, _, cameraToFace, _ = solveFace(shape, pixels, camera, width, height, rigid=RIGID_LANDMARKS, deform=True,
+                                              hidden=observation.get("hidden") or (), model="rig", stiffness=1.0,
+                                              pins=pins, report=report)
+            local = faceRig.rigOf(shape.vertices).deform(report["rigParams"])
+            rotation, translation = scene3d.cvPose(cameraToFace)
+            points = local @ rotation.T + translation
+            z = np.maximum(points[:, 2], 1e-9)
+            focal = camera.focalPixels(width)
+            projected = np.c_[width / 2.0 + focal * points[:, 0] / z, height / 2.0 - focal * points[:, 1] / z]
+            residual = pixels[:count] - projected[:count]
+            # d (Nuke pixels) / d (camera point): y up in Nuke, down in the camera (cv)
+            dProjection = np.zeros((count, 2, 3))
+            dProjection[:, 0, 0] = focal / z[:count]
+            dProjection[:, 0, 2] = -focal * points[:count, 0] / z[:count] ** 2
+            dProjection[:, 1, 1] = -focal / z[:count]
+            dProjection[:, 1, 2] = focal * points[:count, 1] / z[:count] ** 2
+            jacobian = dProjection @ rotation  # d pixels / d face point (count, 2, 3)
+            # Weights: hidden, turned away from the camera, far from the fit of the others
+            weight = np.full(count, float(observation.get("weight", 1.0)))
+            weight[[i for i in (observation.get("hidden") or ()) if i < count]] = 0.0
+            normals = faceRig._vertexNormals(local, shape.triangles()) @ rotation.T
+            facing = -np.einsum("ij,ij->i", normals[:count], points[:count] / np.linalg.norm(points[:count], axis=1)[:, None])
+            weight *= np.clip((facing + 0.05) / 0.2, 0.0, 1.0)
+            errors = np.hypot(*residual.T)
+            scale = max(2.0, 1.4826 * float(np.median(errors[weight > 0]))) if (weight > 0).any() else 2.0
+            weight /= 1.0 + (errors / (3.0 * scale)) ** 2
+            blocks[:count] += weight[:, None, None] * np.einsum("nki,nkj->nij", jacobian, jacobian)
+            rhs[:count] += weight[:, None] * np.einsum("nki,nk->ni", jacobian, residual)
+            scales.append(float(np.median(focal / z[:count])))
+            if progress:
+                progress((round_ + (index + 1) / float(len(observations))) / rounds)
+        pixelsPerUnit = float(np.median(scales))
+        data = sparse.bsr_matrix((blocks, np.arange(n), np.arange(n + 1)), shape=(3 * n, 3 * n)).tocsr()
+        strength = (pixelsPerUnit ** 2) * total
+        regularization = strength * (smoothness ** 2 * (laplacian.T @ laplacian) + symmetry ** 2 * (symmetric.T @ symmetric)
+                                     + closeness ** 2 * sparse.identity(3 * n))
+        current = offsets.ravel()
+        delta = spsolve((data + regularization).tocsc(), rhs.ravel() - regularization @ current)
+        offsets = (current + delta).reshape(n, 3)
+    return offsets
+
+
+def dumpShape(offsets: np.ndarray) -> str:
+    if offsets is None or not len(offsets):
+        return ""
+    return json.dumps([round(float(v), 5) for v in np.asarray(offsets).ravel()])
+
+
+def parseShape(text: str) -> Optional[np.ndarray]:
+    """ The offsets (n, 3) of a fitted shape ("faceShape"), None when there is none. """
+    if not text or not text.strip():
+        return None
+    try:
+        return np.array(json.loads(text), dtype=np.float64).reshape(-1, 3)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid face shape: {e}") from e
