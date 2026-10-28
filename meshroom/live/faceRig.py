@@ -101,6 +101,8 @@ class FaceRig:
             weights.append(weight)
         # (n, controls): the share of each control in the move of each vertex
         self.weights = np.stack(weights, axis=1)
+        # How much each vertex is moved by the rig (0: a rigid part), for the local warp of the pins
+        self.mobility = np.clip(np.maximum(self.weights.max(axis=1), self.jawWeight), 0.0, 1.0)
         self.controlCount = len(CONTROLS)
         # A parameter of 1 moves its area by a tenth of the face width (the parameters have similar scales)
         self.unit = 0.1 * self.width

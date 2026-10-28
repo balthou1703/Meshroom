@@ -684,7 +684,16 @@ ne le fournit pas. Seul le visage est ajusté ; le reste de la tête le suit (`H
 affine ajustée sur le haut du visage (au-dessus du bout du nez : pas la mâchoire) déplace toute la tête, les sommets
 du bord restent sur leur arête de l'ovale, et ce que le visage fait de plus (mâchoire plus large, bouche ouverte)
 s'estompe harmoniquement sur 5 cm. Une tête (sortie du FaceBuilder) peut être branchée en « Face » : son visage est
-ajusté, ses oreilles et son crâne suivent ; les pins ne se posent que sur le visage.
+ajusté, ses oreilles et son crâne suivent ; les pins ne se posent que sur le visage. D'une frame à l'autre (une
+expression), la tête suit le haut du visage rigidement (rotation et translation : le crâne garde sa forme) ; la
+transformation affine ne sert qu'au changement de forme (la tête de l'acteur).
+
+Pins en modèle `rig` : ensemble, ils pèsent autant que les points de MediaPipe (pose initiale et ajustement du rig) :
+quelques pins suffisent à orienter la tête là où MediaPipe se trompe (profil, occultation). « Exact Pins » (activé
+par défaut) : après le rig, un warp local rend chaque pin exact, mais seulement sur ce que le rig déplace
+(`FaceRig.mobility` : bouche, mâchoire, paupières, sourcils, joues, bout du nez) ; un pin sur une partie rigide
+(front, arête du nez, tempes, côtés de la tête) oriente la tête sans rien déformer. Désactivé : les pins orientent la
+tête et bougent les contrôles du rig, rien d'autre.
 
 **FaceBuilder** (Comp 3D, `FaceNodes.py`, `face.buildShape`) : la tête d'un acteur à partir de photos, comme KeenTools
 FaceBuilder. Entrées « View 1 » à « View 4 » : chacune une photo ou une séquence (chaque frame une vue, « Max

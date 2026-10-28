@@ -116,6 +116,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.BoolParam(name="showPinReach", label="Show Pin Reach", value=True,
                        description="With 'Non Rigid': the face is tinted where the pins move it (orange at a pin, "
                                    "fading over 'Pin Radius')."),
+        desc.BoolParam(name="exactPins", label="Exact Pins", value=True,
+                       description="With 'Non Rigid' rig: after the rig, the face is warped locally (over 'Pin Radius') "
+                                   "so that each pin is exactly on its position, on the parts the rig moves only "
+                                   "(mouth, jaw, eyelids, brows, cheeks, nose tip): a pin on a rigid part (forehead, "
+                                   "nose bridge, temples, the sides of the head) only orients the head. Off: the pins "
+                                   "orient the head and move the rig controls, nothing else."),
         desc.FloatParam(name="pinRadius", label="Pin Radius", value=2.5, range=(0.1, 20.0, 0.1),
                         description="How far around a pin the face is moved to go through it (non rigid), in the "
                                     "units of the face mesh (centimeters for the canonical face)."),
@@ -217,7 +223,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         rest = self.headRest(ctx, frame)
         if rest is None:
             return local, self.mesh(ctx, frame).topology
-        return face.HeadFollow.of(rest.vertices).follow(local), rest.topology
+        # An expression: the skull follows the face rigidly (its shape is that of the rest head)
+        return face.HeadFollow.of(rest.vertices).follow(local, rigid=True), rest.topology
 
     _SHAPED = {}
 
@@ -317,11 +324,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 share = w @ areas[triangles[t]]
                 reach = np.maximum(reach, np.clip(areas @ share / max(float(share @ share), 1e-6), 0.0, 1.0)
                                    * (share.max() > 0.05))
-            # And the local warp around each pin (what the rig cannot do)
-            centers = face._onSurface(mesh.vertices, triangles, locations)
-            radius = max(float(ctx.value("pinRadius")), 1e-6)
-            distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
-            reach = np.maximum(reach, np.exp(-(distances.min(axis=1) / radius) ** 2))[:count, None]
+            # And the local warp around each pin ("Exact Pins": what the rig cannot do), on what the rig moves only
+            movable = [(t, w) for t, w in locations if float(w @ rig.mobility[triangles[t]]) >= 0.2]
+            if ctx.value("exactPins") and movable:
+                centers = face._onSurface(mesh.vertices, triangles, movable)
+                radius = max(float(ctx.value("pinRadius")), 1e-6)
+                distances = np.linalg.norm(mesh.vertices[:, None, :] - centers[None, :, :], axis=2)
+                reach = np.maximum(reach, np.exp(-(distances.min(axis=1) / radius) ** 2) * rig.mobility)
+            reach = reach[:count, None]
         else:
             centers = face._onSurface(mesh.vertices, triangles, locations)
             radius = max(float(ctx.value("pinRadius")), 1e-6)
@@ -378,7 +388,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          hidden=tracked.get("hidden") or (),
                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
-                                         model=ctx.value("deformModel"))
+                                         model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"))
         inverse = np.linalg.inv(head)
         return geo.vertices @ inverse[:3, :3].T + inverse[:3, 3], head
 
@@ -734,7 +744,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             geo, _, _, _ = face.solveFace(mesh, pixels, camera, width, height, rigid=face.RIGID_LANDMARKS,
                                           deform=deform, hidden=hidden, stiffness=stiffness,
                                           pins=(pinPoints, pinPositions) if len(pinPoints) else None,
-                                          pinRadius=ctx.value("pinRadius"), model=ctx.value("deformModel"))
+                                          pinRadius=ctx.value("pinRadius"), model=ctx.value("deformModel"),
+                                          exactPins=ctx.value("exactPins"))
             xy, _, _ = camera.project(geo.vertices, width, height)
             count = min(len(xy), len(landmarks))
             fitted = landmarks.copy()

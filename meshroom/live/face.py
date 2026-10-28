@@ -699,11 +699,21 @@ class HeadFollow:
             follow = cls._CACHE[key] = cls(rest)
         return follow
 
-    def follow(self, face: np.ndarray) -> np.ndarray:
-        """ The head (all its vertices) of a face (468 vertices, in the space of the rest head). """
+    def follow(self, face: np.ndarray, rigid: bool = False) -> np.ndarray:
+        """ The head (all its vertices) of a face (468 vertices, in the space of the rest head). `rigid`: the head
+        moved by a rotation and a translation of the upper face instead of an affine transform (an expression: the
+        skull keeps its shape; the affine one is for a change of shape, e.g. a wider face). """
         face = np.asarray(face, dtype=np.float64)[:MESH_VERTICES]
         source = np.c_[self.restFace[self.upper], np.ones(len(self.upper))]
-        affine, *_ = np.linalg.lstsq(source, face[self.upper], rcond=None)
+        if rigid:
+            a, b = self.restFace[self.upper], face[self.upper]
+            aMean, bMean = a.mean(0), b.mean(0)
+            u, _, vt = np.linalg.svd((b - bMean).T @ (a - aMean))
+            d = np.diag([1.0, 1.0, np.sign(np.linalg.det(u @ vt))])
+            rotation = u @ d @ vt
+            affine = np.r_[rotation.T, [bMean - rotation @ aMean]]
+        else:
+            affine, *_ = np.linalg.lstsq(source, face[self.upper], rcond=None)
         extra = np.c_[self.rest[MESH_VERTICES:], np.ones(len(self.rest) - MESH_VERTICES)] @ affine
         # The oval: where each hole vertex is now (on its oval edge); what the face and the oval do beyond the affine
         # transform fades out over the head
@@ -765,7 +775,7 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
               initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=(),
               pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5, stiffness: float = 0.0,
               model: str = "surface", prior: Optional[np.ndarray] = None, priorWeight: float = 0.0,
-              report: Optional[dict] = None):
+              report: Optional[dict] = None, exactPins: bool = True):
     """
     The face seen in the image: the pose of the head from the `rigid` landmarks, then each vertex moved at its depth
     onto the ray of its landmark (`deform`). The `hidden` landmarks (masked out) are not used: the head is placed
@@ -777,8 +787,10 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     neighboring vertices kept alike, `regularizedShifts`): a wrong landmark (drift, occlusion) is ignored, the hidden
     ones follow their neighbors, the mesh does not fold; 0: each vertex exactly on its landmark.
     `model` "rig": the face moved by its rig instead (faceRig.py: jaw, brows, lids, lips, cheeks; the rigid parts stay
-    rigid), the head pose refined with it; the pins move the controls, then what the rig cannot do is done by a local
-    warp around them (exact at the pins, over `pinRadius`); `stiffness` keeps the
+    rigid), the head pose refined with it; the pins orient the head (together they weigh as much as the landmarks)
+    and move the controls, then, with `exactPins`, what the rig cannot do is done by a local warp around them (exact
+    at the pins, over `pinRadius`) on the parts the rig moves only: a pin on a rigid part (forehead, nose bridge,
+    temples, the sides of the head) orients the head and deforms nothing; `stiffness` keeps the
     controls near the rest shape, `prior` / `priorWeight` near other parameters (e.g. the previous frame). `report`
     (a dict) receives the "rigParams".
 
@@ -806,28 +818,31 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         locations = pinLocations(mesh, pins[0])
         pinPoints = _onSurface(mesh.vertices, mesh.triangles(), locations)
         pinPixels = np.asarray(pins[1], dtype=np.float64).reshape(-1, 2)
-        # Placed by hand: weighted more than a landmark
-        fitPoints = np.r_[fitPoints, np.repeat(pinPoints, 3, axis=0)]
-        fitPixels = np.r_[fitPixels, np.repeat(pinPixels, 3, axis=0)]
+        # Placed by hand: together, as much as the rigid landmarks (they orient the head where MediaPipe is wrong)
+        repeat = max(3, int(np.ceil(len(rigid) / float(len(pinPoints)))))
+        fitPoints = np.r_[fitPoints, np.repeat(pinPoints, repeat, axis=0)]
+        fitPixels = np.r_[fitPixels, np.repeat(pinPixels, repeat, axis=0)]
     cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
     if deform and model == "rig":
         from . import faceRig
         weights = np.ones(count)
         weights[[i for i in hidden if i < count]] = 0.0
         rig = faceRig.rigOf(mesh.vertices)
+        # The pins weigh together as much as the visible landmarks
+        pinWeight = max(20.0, float(weights.sum()) / len(locations)) if locations else 20.0
         cameraToFace, params, local = faceRig.fitRig(
             rig, pixels, weights, width, height, focal, cameraToFace,
             pins=(locations, pinPixels) if locations else None, triangles=mesh.triangles(), prior=prior,
-            stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight)
+            stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight, pinWeight=pinWeight)
         if report is not None:
             report["rigParams"] = params
         head = camera.matrix @ np.linalg.inv(cameraToFace)
-        if locations:
+        if locations and exactPins:
             # What the rig cannot do to reach the pins (a feature it has no control for, a stronger move): a local
-            # smooth warp around each pin, exact at the pins (as the pins of KeenTools)
+            # smooth warp around each pin, exact at the pins (as the pins of KeenTools), on what the rig moves only
             view = np.linalg.inv(cameraToFace)
             inCamera = _followPins(local @ view[:3, :3].T + view[:3, 3], mesh, locations, pinPixels, width, height,
-                                   focal, pinRadius)
+                                   focal, pinRadius, mobility=rig.mobility)
             world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
         else:
             world = local @ head[:3, :3].T + head[:3, 3]
@@ -912,20 +927,32 @@ def regularizedShifts(mesh: scene3d.GeoData, shifts: np.ndarray, weights: np.nda
 
 
 def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixels: np.ndarray, width: int, height: int,
-                focal: float, radius: float) -> np.ndarray:
+                focal: float, radius: float, mobility: Optional[np.ndarray] = None) -> np.ndarray:
     """
     The face (vertices in camera space) moved in the image, each vertex at its depth, so that the pins go through
     their positions: their errors interpolated over the neutral face by gaussians of `radius` (exact at the pins).
+    `mobility` (n,) in [0, 1]: how much each vertex may move (0: a rigid part, not warped); the pins on parts that
+    cannot move (less than 0.2) are left out (they only placed the head).
     """
     def project(points):
         z = np.where(points[:, 2] < -1e-9, -points[:, 2], 1e-9)
         return np.c_[width / 2.0 + focal * points[:, 0] / z, height / 2.0 + focal * points[:, 1] / z], z
     triangles = mesh.triangles()
+    if mobility is not None:
+        mobility = np.clip(np.asarray(mobility, dtype=np.float64), 0.0, 1.0)
+        movable = [i for i, (t, w) in enumerate(locations) if float(w @ mobility[triangles[t]]) >= 0.2]
+        if not movable:
+            return inCamera
+        locations = [locations[i] for i in movable]
+        pinPixels = np.asarray(pinPixels)[movable]
     centers = _onSurface(mesh.vertices, triangles, locations)
     radius = max(float(radius), 1e-6)
     # The shift of each vertex for a unit error of each pin (gaussians around the pins), and what it gives at the pins
     # (interpolated from the vertices of their triangle): solved so that each pin lands on its position
     vertexKernel = np.exp(-((mesh.vertices[:, None, :] - centers[None, :, :]) ** 2).sum(-1) / (radius * radius))
+    if mobility is not None:
+        n = min(len(vertexKernel), len(mobility))
+        vertexKernel[:n] *= mobility[:n, None]
     atPins = np.array([weights @ vertexKernel[triangles[t]] for t, weights in locations])
     count = len(inCamera)
     moved = inCamera.copy()

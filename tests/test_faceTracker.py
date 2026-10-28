@@ -611,16 +611,36 @@ def test_fitShapeAction(tmp_path, monkeypatch):
     assert tracker.nodeDesc.runAction("clearShape", context) == {"faceShape": ""}
 
 
-def test_rigPinOnAPartWithoutControlIsReached():
+def test_rigPinOnARigidPartOrientsTheHead():
     from meshroom.live import faceRig
     rig = faceRig.FaceRig(FACE.vertices)
     pixels = face.toPixels(landmarksAt(2), W, H)
-    # A pin on a rigid part dragged: the head barely turns (the landmarks hold it), a local warp reaches the pin
-    rigid = int(np.argmin(rig.weights.sum(axis=1) + rig.jawWeight))
+    # A pin on a rigid part dragged: the head turns toward it (the pins weigh as much as the landmarks), nothing is
+    # warped there (rig mode: a rigid part stays rigid, "Exact Pins" or not)
+    rigid = int(np.argmin(rig.mobility))
+    assert rig.mobility[rigid] < 0.05
     target = pixels[rigid] + [10.0, 6.0]
-    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3,
-                                  pins=(FACE.vertices[[rigid]], target[None]), pinRadius=2.0)
+    kwargs = dict(rigid=RIGID, model="rig", stiffness=0.3, pins=(FACE.vertices[[rigid]], target[None]), pinRadius=2.0)
+    geo, head, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, **kwargs)
+    unwarped, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, exactPins=False, **kwargs)
+    np.testing.assert_allclose(geo.vertices, unwarped.vertices, atol=1e-9)
+    free, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3)
     xy, _, _ = CAMERA.project(geo.vertices, W, H)
-    assert np.hypot(*(xy[rigid] - target)) < 0.5
-    far = np.linalg.norm(FACE.vertices - FACE.vertices[rigid], axis=1) > 8.0
-    assert np.median(np.hypot(*(xy[far] - pixels[far]).T)) < 1.5
+    xyFree, _, _ = CAMERA.project(free.vertices, W, H)
+    assert np.hypot(*(xy[rigid] - target)) < 0.6 * np.hypot(*(xyFree[rigid] - target))
+    # The face keeps its shape around the pin: the same rigid part, moved as a whole
+    local = scene3d.transformPoints(np.linalg.inv(head), geo.vertices)
+    near = np.linalg.norm(FACE.vertices - FACE.vertices[rigid], axis=1) < 3.0
+    assert np.abs(local[near] - FACE.vertices[near]).max() < 0.2
+
+
+def test_exactPinOnTheMouthIsReached():
+    from meshroom.live import faceRig
+    rig = faceRig.FaceRig(FACE.vertices)
+    pixels = face.toPixels(landmarksAt(2), W, H)
+    mobile = int(np.argmax(rig.mobility * (FACE.vertices[:, 1] < 0)))
+    target = pixels[mobile] + [6.0, -4.0]
+    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, model="rig", stiffness=0.3,
+                                  pins=(FACE.vertices[[mobile]], target[None]), pinRadius=2.0)
+    xy, _, _ = CAMERA.project(geo.vertices, W, H)
+    assert np.hypot(*(xy[mobile] - target)) < 0.5

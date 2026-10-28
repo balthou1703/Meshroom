@@ -161,3 +161,15 @@ def test_faceBuilderNode(monkeypatch):
     shape = Evaluator().data(trackerPlan, trackerPlan.target, "shapeOutput", 1)
     np.testing.assert_allclose(shape.vertices, head.vertices, atol=1e-6)
     assert builder.nodeDesc.runAction("clearHead", context) == {"faceShape": "", "views": ""}
+
+
+def test_rigidHeadFollowKeepsTheSkull():
+    """ An expression (FaceTracker): the skull moves rigidly with the upper face, a skewed face does not shear it. """
+    head = face.canonicalHead()
+    canonical = face.canonicalFace().vertices
+    skewed = canonical.copy()
+    skewed[:, 0] += 0.3 * skewed[:, 1]
+    result = face.HeadFollow.of(head.vertices).follow(skewed, rigid=True)
+    back = head.vertices[:, 2] < -8.0
+    a, b = head.vertices[back], result[back]
+    np.testing.assert_allclose(np.linalg.norm(a - a.mean(0), axis=1), np.linalg.norm(b - b.mean(0), axis=1), atol=1e-6)
