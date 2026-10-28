@@ -238,3 +238,133 @@ def test_darkFaceUnderBrightSkyIsBrightened():
     crop[:10] = 1.0  # A bright sky at the border
     exposed = face._exposed(crop)
     assert 0.8 < exposed[50, 50, 0] <= 0.91
+
+
+def _texture(points):
+    x, y, z = points.T
+    value = np.sin(2.1 * x + 1.3 * y) * np.sin(1.7 * z - 2.1 * x) + np.sin(2.3 * y + 1.9 * z) * np.sin(2.1 * x - 1.2 * z) \
+        + 0.5 * np.sin(4.7 * x - 3.3 * y + 3.1 * z)
+    return (0.5 + 0.2 * value).astype(np.float32)
+
+
+def _renderFace(mesh, cameraToFace, camera, width, height):
+    """ The textured face (its texture fixed on the face) seen by the camera: a z-buffer over its triangles. """
+    from meshroom.live import ImageBuffer, geotrack
+    focal = camera.focalPixels(width)
+    xy, depth = geotrack.projectPoints(cameraToFace, mesh.vertices, width, height, focal)
+    lum = np.full((height, width), 0.05, np.float32)
+    zbuffer = np.full((height, width), np.inf)
+    for a, b, c in mesh.triangles():
+        p = xy[[a, b, c]]
+        x0, x1 = int(max(0, np.floor(p[:, 0].min()))), int(min(width - 1, np.ceil(p[:, 0].max())))
+        y0, y1 = int(max(0, np.floor(p[:, 1].min()))), int(min(height - 1, np.ceil(p[:, 1].max())))
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+        d = (p[1, 1] - p[2, 1]) * (p[0, 0] - p[2, 0]) + (p[2, 0] - p[1, 0]) * (p[0, 1] - p[2, 1])
+        if abs(d) < 1e-12:
+            continue
+        w0 = ((p[1, 1] - p[2, 1]) * (gx - p[2, 0]) + (p[2, 0] - p[1, 0]) * (gy - p[2, 1])) / d
+        w1 = ((p[2, 1] - p[0, 1]) * (gx - p[2, 0]) + (p[0, 0] - p[2, 0]) * (gy - p[2, 1])) / d
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+        if not inside.any():
+            continue
+        z = w0 * depth[a] + w1 * depth[b] + w2 * depth[c]
+        # Nuke y up: row = height - 1 - y
+        rows, columns = (height - 1 - (gy - 0.5)).astype(int)[inside], (gx - 0.5).astype(int)[inside]
+        z = z[inside]
+        point = (w0[inside, None] * mesh.vertices[a] + w1[inside, None] * mesh.vertices[b] + w2[inside, None] * mesh.vertices[c])
+        nearer = z < zbuffer[rows, columns]
+        zbuffer[rows[nearer], columns[nearer]] = z[nearer]
+        lum[rows[nearer], columns[nearer]] = _texture(point[nearer])
+    return ImageBuffer.fromRGBA(np.stack([lum, lum, lum, np.ones_like(lum)], -1), (width, height))
+
+
+def test_headPoseFollowedByTheSurface():
+    """ The head turning: its pose followed by the textured surface of its rigid parts (forehead, nose bridge...). """
+    from meshroom.live import geotrack
+    mesh = face.canonicalFace()
+    width, height = 320, 240
+    camera = scene3d.CameraData(np.eye(4), 50.0, 36.0, 27.0)
+
+    def poseAt(frame):
+        # camera-to-face: the inverse of the head pose (head at 45 cm, turning and nodding)
+        head = scene3d.composeTRS((0.3 * frame, 0.0, -45.0), (1.0 * frame, 2.0 * frame, 0.0))
+        return np.linalg.inv(head)
+    tracker = face.HeadPoseTracker(mesh, camera, width, height, method="flow")
+    images = {f: _renderFace(mesh, poseAt(f), camera, width, height) for f in range(7)}
+    pose = poseAt(0)
+    for f in range(1, 7):
+        pose = tracker.step(images[f - 1], images[f], pose, f - 1, f)
+    focal = camera.focalPixels(width)
+    xy, _ = geotrack.projectPoints(pose, mesh.vertices, width, height, focal)
+    truth, _ = geotrack.projectPoints(poseAt(6), mesh.vertices, width, height, focal)
+    assert np.abs(xy - truth).max() < 1.5
+
+
+def _plateHeadPose(frame):
+    """ camera-to-face of the synthetic plate: the head 45 cm away, turning and nodding. """
+    return np.linalg.inv(scene3d.composeTRS((0.3 * frame, 0.0, -45.0), (1.0 * frame, 2.0 * frame, 0.0)))
+
+
+from meshroom.core import desc as _desc  # noqa: E402
+from meshroom.live import ImageInfo as _ImageInfo  # noqa: E402
+
+
+class SyntheticFacePlate(_desc.ImageOpNode):
+    """ The textured canonical face turning (_plateHeadPose), seen by the default camera of the FaceTracker. """
+    category = "Test"
+    inputs = []
+    outputs = [_desc.Image(name="output", label="Output", description="")]
+
+    def getInfo(self, ctx, inputsInfo):
+        return _ImageInfo(360, 240, 0, 16)
+
+    def render(self, ctx, inputs):
+        camera = scene3d.CameraData(np.eye(4), 35.0, 36.0, 24.0)
+        image = _renderFace(face.canonicalFace(), _plateHeadPose(ctx.frame), camera, 360, 240)
+        # A noisy plate (grain, as in a dark shot)
+        rgba = np.array(image.rgba(), dtype=np.float32)
+        rgba[:, :, :3] += np.random.default_rng(ctx.frame).normal(0, 0.03, rgba[:, :, :3].shape).astype(np.float32)
+        return image.withRGBA(rgba)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("followSurface", [True, False])
+def test_faceTrackerFollowsTheHeadSurface(followSurface):
+    """ Track Face (flow) with "Follow Head Surface": the pose of each frame from the surface, kept with the frame. """
+    from tests.utils import registerNodeDesc, unregisterNodeDesc
+    from meshroom.live import geotrack
+    registerNodeDesc(SyntheticFacePlate)
+    try:
+        width, height = 360, 240
+        camera = scene3d.CameraData(np.eye(4), 35.0, 36.0, 24.0)
+        canonical = face.canonicalFace()
+        graph = Graph("surface")
+        plate = graph.addNewNode("SyntheticFacePlate")
+        tracker = graph.addNewNode("FaceTracker", trackWith="flow", temporalSmoothing=0.0, smoothing=0.0,
+                                   meshType="face", followSurface=followSurface)
+        graph.addEdge(plate.output, tracker.input)
+        xy, _ = geotrack.projectPoints(_plateHeadPose(0), canonical.vertices, width, height,
+                                       camera.focalPixels(width))
+        start = np.c_[xy[:, 0] / width, (height - xy[:, 1]) / height, np.zeros(len(xy))]
+        tracker.faceTrack.value = face.dumpFaces({0: {"landmarks": start, "blendshapes": {}}}, (width, height))
+        graph.update()
+        values = {attr.name: _snapshotValue(attr) for attr in tracker.attributes
+                  if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+        context = ActionContext(values, Evaluator(), buildPlan(plate), 0, nodePlan=buildPlan(tracker))
+        result = tracker.nodeDesc.runAction("trackFaceForward", context)
+        faces, _ = face.parseFaces(result["faceTrack"])
+        assert (faces[14]["pose"] is not None) == followSurface
+        tracker.faceTrack.value = result["faceTrack"]
+        graph.update()
+        plan = buildPlan(tracker)
+        head = Evaluator().data(plan, plan.target, "headMatrix", 14)
+        solved, _ = geotrack.projectPoints(np.linalg.inv(head), canonical.vertices, width, height, camera.focalPixels(width))
+        truth, _ = geotrack.projectPoints(_plateHeadPose(14), canonical.vertices, width, height, camera.focalPixels(width))
+        assert np.median(np.hypot(*(solved - truth).T)) < 1.5
+    finally:
+        unregisterNodeDesc(SyntheticFacePlate)

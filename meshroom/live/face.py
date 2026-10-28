@@ -389,12 +389,64 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
     return faces
 
 
+class HeadPoseTracker:
+    """
+    The pose of the head followed from frame to frame by the surface of the rigid parts of the face (forehead, nose
+    bridge, temples, cheekbones: no expression moves them), as the Resection follows a geometry (geotrack.py): many
+    textured points of it followed by the optical flow, the pose solved from them (robust), then checked against an
+    anchor frame (patches searched near where the pose puts them) to limit the drift. Poses are camera-to-face matrices.
+    """
+
+    def __init__(self, mesh: scene3d.GeoData, camera: scene3d.CameraData, width: int, height: int,
+                 method: str = "flow", device=None, samples: int = 6000):
+        from . import faceRig, geotrack
+        rigidity = 1.0 - faceRig.rigOf(mesh.vertices).mobility
+        triangles = mesh.triangles()
+        rigidTriangles = triangles[rigidity[triangles].mean(axis=1) >= 0.6]
+        rigid = scene3d.GeoData(mesh.vertices, np.full(len(rigidTriangles), 3), rigidTriangles.ravel())
+        self.samples = geotrack.SurfaceSamples(rigid, samples)
+        self.settings = geotrack.TrackSettings(method=method, features=400, device=device)
+        self.width, self.height = width, height
+        self.focal = camera.focalPixels(width)
+        self.anchor = None
+
+    def _masked(self, image, frame, maskAt):
+        from . import geotrack
+        if maskAt is None:
+            return image
+        mask = np.asarray(maskAt(frame), dtype=np.float32)
+        if mask.shape == (image.bbox.height, image.bbox.width):
+            geotrack.setMask(image, mask)
+        return image
+
+    def step(self, imageA, imageB, poseA: np.ndarray, frameA: int, frameB: int, maskAt=None) -> np.ndarray:
+        """ The pose at frame B from the pose at frame A (raises geotrack.TrackingLost when the surface is lost). """
+        from . import geotrack
+        imageA, imageB = self._masked(imageA, frameA, maskAt), self._masked(imageB, frameB, maskAt)
+        if self.anchor is None:
+            self.anchor = (scene3d.toMatrix4(poseA), imageA)
+        matrix, inliers, error = geotrack.stepPose(self.samples, self.settings, poseA, imageA, imageB, poseA,
+                                                   self.width, self.height, self.focal)
+        try:
+            anchored, anchoredInliers, anchoredError = geotrack.alignPose(
+                self.samples, self.settings, self.anchor[0], self.anchor[1], matrix, imageB, self.width, self.height,
+                self.focal, searches=(self.settings.pattern + 6,))
+            if anchoredInliers >= max(self.settings.minInliers, inliers // 2) and anchoredError <= max(1.5, 2.0 * error):
+                matrix = anchored
+            else:
+                self.anchor = (matrix, imageB)
+        except geotrack.TrackingLost:
+            self.anchor = (matrix, imageB)
+        return matrix
+
+
 def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, detector=None, flowMethod: str = "lucasKanade",
                    useGpu: bool = True, agreement: float = 0.06, cancel=None,
                    progress: Optional[Callable[[int, int], None]] = None,
                    onFrame: Optional[Callable[[int, dict], None]] = None,
                    maskAt: Optional[Callable[[int], np.ndarray]] = None,
-                   regularize: Optional[Callable[[int, np.ndarray, list], np.ndarray]] = None) -> Tuple[Dict[int, dict], str]:
+                   regularize: Optional[Callable[..., np.ndarray]] = None, poseTracker=None,
+                   startPose: Optional[np.ndarray] = None) -> Tuple[Dict[int, dict], str]:
     """
     The face followed from its landmarks `start` (n, 3) normalized at frames[0] through `frames` (consecutive, forward or
     backward) by the optical flow of the plate (`flowMethod`: "lucasKanade" or "raft"): each landmark moves with the
@@ -403,6 +455,9 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
     the flow keeps the face where MediaPipe is lost or wrong (occlusions, profile, blur). Masked out landmarks are
     "hidden" (as in trackFaces). `regularize(frame, landmarks, hidden)`: the landmarks of the face model fitted on the
     flowed ones (e.g. a stiff face through them): what is followed stays a face (no drifting point breaks it).
+    `poseTracker` (a HeadPoseTracker) with `startPose` (the camera-to-face matrix at frames[0]): the pose of the head
+    followed by the surface of its rigid parts (many textured points, as the Resection), not by the landmarks: less
+    drift; kept with each frame ("pose") and given to `regularize(frame, landmarks, hidden, pose=pose)`.
 
     Returns:
         ({frame: {"landmarks", "blendshapes", "hidden", "source": "flow" or "mediapipe"}} of frames[1:], why it
@@ -414,6 +469,7 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
     from .neural import displayRGB
     faces = {}
     current = np.asarray(start, dtype=np.float64).copy()
+    currentPose = None if startPose is None else scene3d.toMatrix4(startPose)
     try:
         imageA = imageAt(frames[0])
     except (EvaluationCancelled, EvaluationError) as e:
@@ -439,8 +495,18 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
         flowed[:, 0] = (x + motion[:, 0]) / width
         flowed[:, 1] = (y - motion[:, 1]) / height
         mask = np.clip(np.asarray(maskAt(frame), dtype=np.float32), 0.0, 1.0) if maskAt else None
+        pose = None
+        if poseTracker is not None and currentPose is not None:
+            try:
+                pose = poseTracker.step(imageA, imageB, currentPose, frames[index - 1], frame, maskAt)
+            except EvaluationCancelled:
+                return faces, "cancelled"
+            except Exception as e:  # The surface lost (too few textured points): the landmarks alone
+                import logging
+                logging.info(f"[FaceTracker] Head pose not followed at frame {frame}: {e}")
         if regularize is not None:
-            flowed = regularize(frame, flowed, hiddenLandmarks(flowed, mask) if mask is not None else [])
+            hidden = hiddenLandmarks(flowed, mask) if mask is not None else []
+            flowed = regularize(frame, flowed, hidden, pose=pose) if pose is not None else regularize(frame, flowed, hidden)
         landmarks, blendshapes, source = flowed, {}, "flow"
         if detector is not None:
             rgb = displayRGB(imageB, BBox.fromFormat(width, height))
@@ -455,12 +521,12 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
                 if float(np.median(distance)) <= agreement * size:
                     landmarks, blendshapes, source = found, foundShapes, "mediapipe"
         faces[frame] = {"landmarks": landmarks, "blendshapes": blendshapes, "source": source,
-                        "hidden": hiddenLandmarks(landmarks, mask) if mask is not None else []}
+                        "hidden": hiddenLandmarks(landmarks, mask) if mask is not None else [], "pose": pose}
         if onFrame:
             onFrame(frame, faces[frame])
         if progress:
             progress(index, len(frames) - 1)
-        current, imageA = landmarks, imageB
+        current, imageA, currentPose = landmarks, imageB, pose
     return faces, ""
 
 
@@ -474,6 +540,8 @@ def _dumpFace(face: dict) -> dict:
         data["h"] = [int(i) for i in face["hidden"]]
     if face.get("source"):
         data["s"] = face["source"]
+    if face.get("pose") is not None:
+        data["p"] = [round(float(v), 6) for v in np.asarray(face["pose"]).ravel()]
     return data
 
 
@@ -492,7 +560,8 @@ def parseFaces(text: str) -> Tuple[Dict[int, dict], Optional[Tuple[int, int]]]:
         data = json.loads(text)
         faces = {int(frame): {"landmarks": np.array(face["l"], dtype=np.float64).reshape(-1, 3),
                               "blendshapes": dict(face.get("b") or {}), "hidden": [int(i) for i in face.get("h") or []],
-                              "source": face.get("s", "")}
+                              "source": face.get("s", ""),
+                              "pose": np.array(face["p"], dtype=np.float64).reshape(4, 4) if face.get("p") else None}
                  for frame, face in (data.get("frames") or {}).items()}
         imageFormat = tuple(data["format"]) if data.get("format") else None
     except (TypeError, ValueError, KeyError, AttributeError) as e:
@@ -808,6 +877,12 @@ def checkTopology(mesh: scene3d.GeoData):
                               f"vertices in the landmark order), not {count} vertices")
 
 
+def projectPose(points: np.ndarray, cameraToFace: np.ndarray, width: int, height: int, focal: float):
+    """ Nuke pixels (n, 2) and depths (n,) of face-space points seen from a camera-to-face matrix. """
+    from .geotrack import projectPoints
+    return projectPoints(cameraToFace, points, width, height, focal)
+
+
 def _defaultStart(mesh: scene3d.GeoData) -> np.ndarray:
     """ A camera looking at the face from the front (+Z), far enough to see it whole. """
     low, high = mesh.bounds()
@@ -849,7 +924,7 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
               initial: Optional[np.ndarray] = None, rigid=RIGID_LANDMARKS, deform: bool = True, hidden=(),
               pins: Optional[Tuple[np.ndarray, np.ndarray]] = None, pinRadius: float = 2.5, stiffness: float = 0.0,
               model: str = "surface", prior: Optional[np.ndarray] = None, priorWeight: float = 0.0,
-              report: Optional[dict] = None, exactPins: bool = True):
+              report: Optional[dict] = None, exactPins: bool = True, pose: Optional[np.ndarray] = None):
     """
     The face seen in the image: the pose of the head from the `rigid` landmarks, then each vertex moved at its depth
     onto the ray of its landmark (`deform`). The `hidden` landmarks (masked out) are not used: the head is placed
@@ -877,6 +952,8 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         pixels: the landmarks (n, 2) in Nuke pixels.
         camera: the plate camera (its lens, and its pose: the world).
         initial: a camera-to-face matrix to start the solve from (e.g. the previous frame).
+        pose: the camera-to-face matrix of the head, known (followed by its surface, HeadPoseTracker): kept, only the
+            expression is fitted; the rigid pins (a keyframe), when there are, place the head instead.
 
     Returns:
         (the face as a GeoData in world space, the head matrix (face space to world), the camera-to-face matrix, the
@@ -913,7 +990,14 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         repeat = max(3, int(np.ceil(len(rigid) / float(placing.sum()))))
         fitPoints = np.r_[fitPoints, np.repeat(pinPoints[placing], repeat, axis=0)]
         fitPixels = np.r_[fitPixels, np.repeat(pinPixels[placing], repeat, axis=0)]
-    cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
+    rigidPinCount = int((~expression).sum()) if (deform and model == "rig") else len(locations)
+    poseKept = pose is not None and rigidPinCount == 0
+    if poseKept:
+        cameraToFace = scene3d.toMatrix4(pose)
+        xy, _ = projectPose(mesh.vertices[rigid], cameraToFace, width, height, focal)
+        error = float(np.sqrt(np.mean(np.sum((xy - pixels[rigid]) ** 2, axis=1)))) if len(rigid) else 0.0
+    else:
+        cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
     if deform and model == "rig":
         from . import faceRig
         weights = np.ones(count)
@@ -929,20 +1013,21 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         if not locations:
             cameraToFace, params, local = faceRig.fitRig(
                 rig, pixels, weights, width, height, focal, cameraToFace, triangles=triangles, prior=prior,
-                stiffness=stiff, priorWeight=priorWeight, solve="all")
+                stiffness=stiff, priorWeight=priorWeight, solve="rig" if poseKept else "all")
         else:
-            # The expression MediaPipe sees: the face fitted on its landmarks alone (its own pose)
+            # The expression MediaPipe sees: the face fitted on its landmarks alone (its own pose, or the pose kept)
             _, expressionSeen, _ = faceRig.fitRig(
                 rig, pixels, weights, width, height, focal, cameraToFace, triangles=triangles, prior=prior,
-                stiffness=stiff, priorWeight=priorWeight, solve="all")
+                stiffness=stiff, priorWeight=priorWeight, solve="rig" if poseKept else "all")
             # The head pose alone (rotation, position), with that expression: the rigid pins (together as much as
             # the landmarks: the pins are placed where MediaPipe is wrong) and the landmarks of the rigid parts
             rigidity = 1.0 - rig.mobility
             rigidWeights = weights * PINNED_LANDMARK_WEIGHT * np.clip(rigidity[:count], 0.05, 1.0)
-            cameraToFace, _, _ = faceRig.fitRig(
-                rig, pixels, rigidWeights, width, height, focal, cameraToFace, pins=pinSubset(rigidPins),
-                triangles=triangles, prior=expressionSeen, stiffness=stiff,
-                pinWeight=max(20.0, float(weights.sum()) / max(len(rigidPins), 1)), solve="pose")
+            if not poseKept:
+                cameraToFace, _, _ = faceRig.fitRig(
+                    rig, pixels, rigidWeights, width, height, focal, cameraToFace, pins=pinSubset(rigidPins),
+                    triangles=triangles, prior=expressionSeen, stiffness=stiff,
+                    pinWeight=max(20.0, float(weights.sum()) / max(len(rigidPins), 1)), solve="pose")
             if expressionPins:
                 # The expression pins change that expression (the pose kept): the rig moved from it toward them
                 cameraToFace, params, local = faceRig.fitRig(

@@ -714,6 +714,15 @@ des parties rigides (points pondérés ×0,3 : la frame a des pins parce que Med
 d'expression bougent enfin le rig à partir de cette expression, la pose gardée. Un pin rigide déplacé fait donc
 tourner et bouger la tête sans rien déformer. Nez et narines : 1,5 % de la largeur du visage, coût ×8.
 
+Suivi de la pose par la surface (« Follow Head Surface », activé par défaut, `face.HeadPoseTracker`) : avec Track
+With flow ou mediapipe+flow, la pose de la tête n'est plus déduite des 478 points suivis un à un, mais suivie comme
+le Resection suit une géométrie (`geotrack.stepPose` puis `alignPose` contre une frame d'ancrage) : jusqu'à 400 points
+texturés (Shi-Tomasi) des parties rigides du visage (front, arête du nez, tempes, pommettes : rigidité ≥ 0,6), suivis
+par le flow (Lucas-Kanade ou RAFT), pose robuste, parties masquées exclues. La pose est gardée avec chaque frame
+(champ `"p"` de « faceTrack ») et `solveFace(pose=...)` la garde : les points ne donnent plus que l'expression (rig
+seul). Une keyframe avec des pins rigides est placée par ses pins. Surface perdue (trop peu de points texturés) : la
+frame suit les points comme avant.
+
 Détection : un visage couché (roll de plus de 45°) est cherché dans le crop tourné d'un quart ou d'un demi-tour
 (`_detectUpright` : d'abord selon le roll du visage de la frame précédente, `faceRoll` ; « Detect Lying Faces »
 pour le couper), les points revenant dans l'image ; un crop sombre est éclairci d'après les hautes lumières de son

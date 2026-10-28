@@ -86,6 +86,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                          invalidate=False,
                          description="The optical flow followed: Lucas-Kanade, or the RAFT network (large motions, "
                                      "sharp edges; PyTorch and its weights needed, else Lucas-Kanade)."),
+        desc.BoolParam(name="followSurface", label="Follow Head Surface", value=True, invalidate=False,
+                       description="With flow or mediapipe+flow: the pose of the head is followed by the surface of "
+                                   "its rigid parts (forehead, nose bridge, temples, cheekbones: many textured points, "
+                                   "as the Resection follows a geometry, the masked parts left out), not by the "
+                                   "landmarks: much less drift; the landmarks then only give the expression. Kept with "
+                                   "each tracked frame (the keyframes with rigid pins are placed by their pins)."),
         gpuParam(),
         desc.PushButtonParam(name="trackFaceBackward", label="Track Face Backward", semantic="liveAction",
                              description="Track the face from the current frame back to the start of the track range."),
@@ -410,7 +416,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (), pins=solvePins,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
-                                         model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"))
+                                         model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"),
+                                         pose=(faces.get(frame) or {}).get("pose"))
         inverse = np.linalg.inv(head)
         return geo.vertices @ inverse[:3, :3].T + inverse[:3, 3], head
 
@@ -627,11 +634,29 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
 
         regularize = self.regularizer(context.nodeContext(frame), width, height)
 
+        def poseAt(f):
+            """ The camera-to-face matrix of the fitted face at a frame (pins included), None when there is none. """
+            ctx = context.nodeContext(f)
+            geo, head = self.solve(ctx, f)
+            return None if geo.isEmpty else np.linalg.inv(head) @ self.camera(ctx, f).matrix
+
+        def poseTracker(f):
+            """ The tracker of the head pose by the surface of its rigid parts ("Follow Head Surface"), or None. """
+            if not context.values.get("followSurface", True):
+                return None
+            from meshroom.live import gpu
+            ctx = context.nodeContext(f)
+            return face.HeadPoseTracker(self.mesh(ctx, f), self.camera(ctx, f), width, height,
+                                        method="raft" if flowMethod == "raft" else "flow",
+                                        device=gpu.device(useGpu))
+
         def propagate(start, sequence, callback):
+            tracker = poseTracker(sequence[0])
             found, reason = face.propagateFaces(
                 context.render, sequence, start, detector if method == "mediapipe+flow" else None, flowMethod=flowMethod,
                 useGpu=useGpu, cancel=context.checkCancelled, onFrame=callback, maskAt=maskAt, regularize=regularize,
-                progress=lambda done, count: context.progress(done / float(count), "Track Face"))
+                progress=lambda done, count: context.progress(done / float(count), "Track Face"),
+                poseTracker=tracker, startPose=poseAt(sequence[0]) if tracker is not None else None)
             if reason and reason != "cancelled":
                 raise RuntimeError(f"Stopped: {reason}.")
             return found
@@ -758,14 +783,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         deform, stiffness = ctx.value("deform"), max(float(ctx.value("stiffness")), 0.05)
         pins = self.pins(ctx)
 
-        def regularize(frame, landmarks, hidden):
+        def regularize(frame, landmarks, hidden, pose=None):
             camera = self.camera(ctx, frame)
             pixels = face.toPixels(landmarks, width, height)
             geo, _, _, _ = face.solveFace(mesh, pixels, camera, width, height, rigid=face.RIGID_LANDMARKS,
                                           deform=deform, hidden=hidden, stiffness=stiffness,
                                           pins=self.solvePinsAt(pins, frame),
                                           pinRadius=ctx.value("pinRadius"), model=ctx.value("deformModel"),
-                                          exactPins=ctx.value("exactPins"))
+                                          exactPins=ctx.value("exactPins"), pose=pose)
             xy, _, _ = camera.project(geo.vertices, width, height)
             count = min(len(xy), len(landmarks))
             fitted = landmarks.copy()
