@@ -20,6 +20,43 @@ Item {
     property real maxZoom: 2.0
     property real minZoom: 0.1
     property var edgeAboutToBeRemoved: undefined
+    /// The edge a node dragged with Ctrl held would be inserted on when dropped (null: none)
+    property var insertEdge: null
+
+    function edgeUnderNode(nodeItem) {
+        /**
+         * The edge passing through a node being dragged (closest to its center), to insert the node on it, or null.
+         * The edge curve is sampled as drawn (Edge.qml: cubic with control points 30 px from its ends).
+         */
+        const left = nodeItem.x, top = nodeItem.y - nodeItem.foldShift
+        const right = left + nodeItem.width, bottom = top + nodeItem.height
+        const centerX = (left + right) / 2, centerY = (top + bottom) / 2
+        let best = null, bestDistance = Infinity
+        for (let i = 0; i < edgesRepeater.count; ++i) {
+            const item = edgesRepeater.itemAt(i)
+            if (!item || !item.visible || !item.isValidEdge || item.isForLoop || !item.edge)
+                continue
+            if (item.edge.src.node === nodeItem.node || item.edge.dst.node === nodeItem.node)
+                continue
+            const x0 = item.point1x, y0 = item.point1y, x3 = item.point2x, y3 = item.point2y
+            const x1 = x0 + 30, y1 = y0, x2 = x3 - 30, y2 = y3
+            for (let k = 0; k <= 32; ++k) {
+                const t = k / 32, u = 1 - t
+                const px = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3
+                const py = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3
+                if (px < left || px > right || py < top || py > bottom)
+                    continue
+                const distance = (px - centerX) * (px - centerX) + (py - centerY) * (py - centerY)
+                if (distance < bestDistance) {
+                    bestDistance = distance
+                    best = item.edge
+                }
+            }
+        }
+        if (best && !uigraph.canInsertNodeOnEdge(nodeItem.node, best))
+            return null
+        return best
+    }
 
     property var _attributeToDelegate: ({})
 
@@ -1074,12 +1111,13 @@ Item {
                             return "#B48EE0"
                         return activePalette.text
                     }
-                    color: edge.dst === root.edgeAboutToBeRemoved ? "red" : edgeSelected ? "#F5A623" : inFocus ? activePalette.highlight : streamColor
+                    color: edge.dst === root.edgeAboutToBeRemoved ? "red" : edge === root.insertEdge ? Colors.orange :
+                           edgeSelected ? "#F5A623" : inFocus ? activePalette.highlight : streamColor
                     thickness: {
                         if (forLoop) {
                             return (inFocus) ? 4 : 3
                         }
-                        return (inFocus || edgeSelected) ? 2 : 1
+                        return (inFocus || edgeSelected || edge === root.insertEdge) ? 2 : 1
                     }
                     point1x: isValidEdge ? src.globalX + src.outputAnchorPos.x : 0
                     point1y: isValidEdge ? src.globalY + src.outputAnchorPos.y : 0
@@ -1611,6 +1649,16 @@ Item {
 
                             onReleased: function(mouse, wasDragged) {
                                 nodeRepeater.ongoingDrag = false
+                                if (!dragging)
+                                    root.insertEdge = null
+                            }
+
+                            // Ctrl + drag: this node alone (Ctrl + press toggled the selection), to insert it on an edge
+                            onDraggingChanged: {
+                                if (dragging && (dragModifiers & Qt.ControlModifier)) {
+                                    uigraph.selectNodeByIndex(index, ItemSelectionModel.ClearAndSelect)
+                                    uigraph.selectedNode = node
+                                }
                             }
 
                             // Only called when the node has not been dragged.
@@ -1653,6 +1701,9 @@ Item {
                                 if (!selected || !dragging) {
                                     return
                                 }
+                                // Ctrl held: the edge it would be inserted on (one node dragged)
+                                root.insertEdge = (dragModifiers & Qt.ControlModifier) && uigraph.nodeSelection.selectedIndexes.length === 1
+                                                  ? root.edgeUnderNode(nodeDelegate) : null
 
                                 // Check for shake on the node
                                 checkForShake()
@@ -1674,6 +1725,11 @@ Item {
                                 // Dropped where it is displayed: below folded chapters, the display is moved up
                                 const offset = Qt.point(position.x - node.x, uigraph.unfoldY(position.y - foldShift) - node.y)
                                 uigraph.moveSelectedNodesBy(offset)
+                                // Dropped on an edge with Ctrl held: inserted on it
+                                const edge = root.insertEdge
+                                root.insertEdge = null
+                                if (edge && (dragModifiers & Qt.ControlModifier))
+                                    uigraph.insertNodeOnEdge(node, edge)
                             }
 
                             Behavior on x {

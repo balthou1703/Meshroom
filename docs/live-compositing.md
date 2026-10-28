@@ -445,7 +445,11 @@ d'edge caché : l'edge réapparaît ; clic droit : copier l'output ou l'input (p
 menu d'un pin), ou montrer l'edge. Créer un nœud (Tab) alors qu'un nœud de compositing est
 sélectionné le place à sa droite, connecté à lui : des nœuds créés à la suite s'enchaînent.
 
-Supprimer un nœud de compositing reconnecte sa source à ses sorties (comme Nuke).
+Supprimer un nœud de compositing reconnecte sa source à ses sorties (comme Nuke). À l'inverse, un nœud glissé avec
+Ctrl maintenu sur un edge (surligné en orange quand il le traverse) s'y intercale au relâcher : la source va dans son
+entrée « input » (sinon sa première entrée compatible, une libre d'abord : B pour un Merge), sa sortie « output »
+(sinon la première compatible) va à la destination ; pas sur ses propres edges ni s'il ferait un cycle
+(`meshroom/core/edgeInsertion.py`, `UIGraph.insertNodeOnEdge`, une étape d'annulation).
 
 ### 4.10 Chapitres du graphe
 

@@ -1798,6 +1798,27 @@ class UIGraph(QObject):
                 if edge.dst.node in selectedNodes or edge.src.node in selectedNodes:
                     self.removeEdge(edge)
 
+    @Slot(QObject, Edge, result=bool)
+    def canInsertNodeOnEdge(self, node, edge) -> bool:
+        """ Whether a node can be inserted on an edge (see insertNodeOnEdge). """
+        from meshroom.core.edgeInsertion import insertionAttributes
+        if node is None or edge is None or node.locked or edge.dst.node.locked:
+            return False
+        return insertionAttributes(node, edge.src, edge.dst) is not None
+
+    @Slot(QObject, Edge)
+    def insertNodeOnEdge(self, node, edge):
+        """ Insert a node on an edge (dropped on it with Ctrl held): src -> node input, node output -> dst. Undoable. """
+        from meshroom.core.edgeInsertion import insertionAttributes
+        if not self.canInsertNodeOnEdge(node, edge):
+            return
+        src, dst = edge.src, edge.dst
+        nodeInput, nodeOutput = insertionAttributes(node, src, dst)
+        with self.groupedGraphModification(f"Insert {node.label} between {src.node.label} and {dst.node.label}"):
+            self.removeEdge(edge)
+            self.addEdge(src, nodeInput)
+            self.addEdge(nodeOutput, dst)
+
     @Slot(Edge, Attribute, Attribute, result=Edge)
     def replaceEdge(self, edge, newSrc, newDst):
         with self.groupedGraphModification(f"Replace Edge '{edge.src.fullName}'->'{edge.dst.fullName}' with '{newSrc.fullName}'->'{newDst.fullName}'"):

@@ -32,7 +32,8 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   ├── common/                 # Qt/headless backend abstraction (BaseObject, models) used across the engine
 │   ├── core/                   # Engine logic (Graph, Node, Attribute, execution, (de)serialization,
 │   │                           #   chapters.py: folding geometry of the graph editor Chapter lines,
-│   │                           #   graphLayout.py: tree layout of the nodes along their connections, key L)
+│   │                           #   graphLayout.py: tree layout of the nodes along their connections, key L,
+│   │                           #   edgeInsertion.py: a node Ctrl-dropped on an edge inserted on it)
 │   │   ├── desc/               # Node/attribute DESCRIPTORS: desc.Node, desc.CommandLineNode, desc.*Param
 │   │   │                       #   (imported as `from meshroom.core import desc`)
 │   │   └── subgraph/           # Subgraphs: executor, contexts (Python/Houdini/Maya/Nuke), ports,

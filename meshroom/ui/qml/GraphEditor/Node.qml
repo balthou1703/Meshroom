@@ -24,6 +24,8 @@ Item {
     property bool selected: false
     property bool hovered: false
     property bool dragging: mouseArea.drag.active
+    /// Keyboard modifiers held while the node is pressed / dragged (Ctrl: insert it on the edge under it)
+    property int dragModifiers: 0
     /// Node label
     property string nodeLabel: node ? node.label : ""
     /// Combined x and y
@@ -413,7 +415,13 @@ Item {
 
         cursorShape: drag.active ? Qt.ClosedHandCursor : Qt.ArrowCursor
 
+        onPositionChanged: function(mouse) {
+            if (pressed)
+                root.dragModifiers = mouse.modifiers
+        }
+
         onPressed: function(mouse) {
+            root.dragModifiers = mouse.modifiers
             root.pressed(mouse);
             // Begin shake detection
             root.beginShaking();
