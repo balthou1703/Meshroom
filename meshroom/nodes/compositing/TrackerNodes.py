@@ -211,22 +211,48 @@ class MotionBlur(desc.ImageOpNode):
     category = "Comp Filter"
     color = "#CC804E"
     documentation = """
-Motion blur from tracking: the image is averaged along the motion of the tracks of the connected
-Tracker during the shutter (as if the camera or the object had moved while the shutter was open).
+Motion blur from tracking, or from a 3D camera: the image is averaged along the motion during the shutter
+(as if the camera or the object had moved while the shutter was open). "Motion From" chooses the source (only
+its input is shown):
+
+tracker: the motion of the tracks of the connected Tracker (or CameraTracker):
 
 - translate: the average motion of the tracks (the fastest);
 - translate rotate scale: the motion fitted on the tracks (2 tracks or more);
 - vector field: every track gives the motion around it (all the tracks, or those named): each pixel
   moves with the tracks near it (inverse distance weighting), e.g. several objects moving differently.
 
+camera: the motion of a camera (e.g. a Camera node reading a USD, Alembic or FBX camera, or the camera
+solved by a Resection) moves the image as the camera sees it: its rotation and its focal length (a zoom)
+at any distance, its translation for an image at "Distance" (scene units; 0: far away, the translation
+ignored).
+
 "Factor" multiplies the motion (2: twice as long a blur). The number of images averaged follows the
 length of the motion, up to "Samples".
 """
-    inputs = _trackerInputs("Image to blur.") + [
+    inputs = [
+        imageInput(description="Image to blur."),
+        desc.ChoiceParam(name="motionSource", label="Motion From", value="tracker", values=["tracker", "camera"],
+                         description="tracker: the motion of the tracks of the connected Tracker. camera: the motion of "
+                                     "the connected camera (USD, Alembic, FBX...)."),
+        desc.Image(name="tracker", label="Tracker", description="Tracker (or CameraTracker) whose tracks are used.",
+                   optional=True, infoOnly=True, enabled=lambda node: node.motionSource.value == "tracker"),
+        desc.Camera(name="camera", label="Camera", optional=True,
+                    enabled=lambda node: node.motionSource.value == "camera",
+                    description="The camera whose motion blurs the image (its pose and focal length at each frame)."),
+        desc.StringParam(name="tracks", label="Tracks", semantic="trackNames", value="",
+                         enabled=lambda node: node.motionSource.value == "tracker",
+                         description="The tracks used, chosen in the list of the connected Tracker (names comma "
+                                     "separated; empty: all the enabled tracks)."),
         desc.ChoiceParam(name="model", label="Motion", value="translate",
                          values=["translate", "translate rotate scale", "vector field"],
+                         enabled=lambda node: node.motionSource.value == "tracker",
                          description="translate: average motion. translate rotate scale: fitted motion. vector field: "
                                      "every track moves the pixels around it."),
+        desc.FloatParam(name="distance", label="Distance", value=0.0, range=(0.0, 1000.0, 0.1),
+                        enabled=lambda node: node.motionSource.value == "camera",
+                        description="Camera: the distance of the image from the camera (scene units), for the blur of "
+                                    "the translation of the camera; 0: far away (only its rotation and zoom blur)."),
         desc.FloatParam(name="factor", label="Factor", description="Multiplier of the motion (length of the blur).",
                         value=1.0, range=(0.0, 10.0, 0.05)),
         desc.FloatParam(name="shutter", label="Shutter", description="Shutter duration in frames (0.5: 180 degrees).",
@@ -269,9 +295,77 @@ length of the motion, up to "Samples".
         """ About one image per pixel of motion, up to "Samples". """
         return int(min(ctx.value("samples"), max(2, np.ceil(length) + 1)))
 
+    # Camera motion
+
+    def _cameraAt(self, ctx, time):
+        """ The camera at a (fractional) frame: interpolated between the cameras of the frames around it. """
+        from meshroom.live import scene3d
+        first = int(np.floor(time))
+        a = ctx.inputData("camera", first)
+        if a is None:
+            raise RuntimeError("Connect a camera to 'Camera' (Motion From: camera).")
+        weight = time - first
+        if weight < 1e-9:
+            return a
+        b = ctx.inputData("camera", first + 1) or a
+        return a.copy(matrix=scene3d.interpolateMatrices(a.matrix, b.matrix, weight),
+                      focalLength=a.focalLength + (b.focalLength - a.focalLength) * weight)
+
+    def _cameraMotion(self, ctx, offset):
+        """ The 3x3 transform (Nuke pixels) moving the image as the camera moves from the frame to `frame + offset`
+        (a homography: the image seen at "Distance", or far away). """
+        from meshroom.live import geometry
+        info = ctx.inputInfo("input")
+        width, height = info.width, info.height
+        current, other = self._cameraAt(ctx, ctx.frame), self._cameraAt(ctx, ctx.frame + offset)
+        corners = np.array([[0.25 * width, 0.25 * height], [0.75 * width, 0.25 * height],
+                            [0.75 * width, 0.75 * height], [0.25 * width, 0.75 * height]])
+        distance = float(ctx.value("distance"))
+        forward = -current.matrix[:3, 2] / max(np.linalg.norm(current.matrix[:3, 2]), 1e-12)
+        points = []
+        for x, y in corners:
+            origin, direction = current.ray(x, y, width, height)
+            if distance > 0:
+                points.append(origin + direction * distance / max(float(direction @ forward), 1e-6))
+            else:
+                # Far away: only the rotation and the zoom of the camera move it
+                points.append(other.position + direction * 1e6 * max(1.0, float(np.linalg.norm(origin))))
+        moved, _, inFront = other.project(np.array(points), width, height)
+        if not inFront.all():
+            return np.eye(3)
+        matrix = geometry.homography(corners, moved)
+        return np.eye(3) if matrix is None else matrix / matrix[2, 2]
+
+    def _renderCamera(self, ctx, image):
+        from meshroom.live import ops
+        factor = ctx.value("factor")
+        start, end = self._interval(ctx)
+
+        def matrixAt(t):
+            # The motion scaled by the factor: between the identity and the camera motion
+            return np.eye(3) + (self._cameraMotion(ctx, t) - np.eye(3)) * factor
+        corners = np.array([[image.bbox.x0, image.bbox.y0, 1.0], [image.bbox.x1, image.bbox.y1, 1.0],
+                            [image.bbox.x0, image.bbox.y1, 1.0], [image.bbox.x1, image.bbox.y0, 1.0]]).T
+        ends = []
+        for m in (matrixAt(start), matrixAt(end)):
+            p = m @ corners
+            ends.append((p[:2] / p[2]).T)
+        length = float(np.abs(ends[1] - ends[0]).max())
+        images = [ops.transformImage(image, matrixAt(t), "bilinear", ctx.checkCancelled)
+                  for t in self._times(start, end, self._sampleCount(ctx, length))]
+        return _average(image, images)
+
     def isIdentity(self, ctx):
         if ctx.value("shutter") <= 0 or ctx.value("factor") <= 0:
             return "input"
+        if ctx.value("motionSource") == "camera":
+            try:
+                start, end = self._interval(ctx)
+                still = np.allclose(self._cameraMotion(ctx, start), np.eye(3), atol=1e-7) and \
+                    np.allclose(self._cameraMotion(ctx, end), np.eye(3), atol=1e-7)
+            except Exception:
+                return None
+            return "input" if still else None
         try:
             start, end = self._interval(ctx)
             a = self._points(ctx, start)
@@ -284,6 +378,8 @@ length of the motion, up to "Samples".
     def render(self, ctx, inputs):
         from meshroom.live import geometry, ops
         image = inputs["input"]
+        if ctx.value("motionSource") == "camera":
+            return self._renderCamera(ctx, image)
         factor = ctx.value("factor")
         start, end = self._interval(ctx)
         model = ctx.value("model")

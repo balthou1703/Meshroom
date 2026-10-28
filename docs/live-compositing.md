@@ -338,7 +338,12 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   multiplié par « Factor ». Avec un CameraTracker, seules les pistes connues sur tout l'obturateur
   comptent (une feature de l'autotrack ne vit que quelques frames) ; de même pour Stabilize. Modèles : translate (moyenne des pistes, copies décalées en parallèle),
   translate rotate scale (ajusté sur les pistes), vector field (chaque piste donne le mouvement
-  autour d'elle : champ de vecteurs interpolé, flou par pixel).
+  autour d'elle : champ de vecteurs interpolé, flou par pixel). « Motion From » : tracker (ci-dessus) ou camera :
+  l'entrée Camera (un Camera lisant une caméra USD / Alembic / FBX, la caméra d'une Resection...) déplace l'image
+  comme la caméra la voit bouger pendant l'obturateur : une homographie par échantillon (`_cameraMotion`), avec sa
+  rotation et sa focale (zoom), et sa translation pour une image à « Distance » (0 : à l'infini, translation
+  ignorée) ; la caméra est interpolée entre les frames. Seule l'entrée de la source choisie a un pin (les entrées
+  désactivées n'ont pas de pin, sauf connectées).
 - **ZDefocus** : profondeur de champ. La profondeur vient de l'entrée Depth (passe Z CG, gradient
   de Roto ou de Ramp) ou d'un layer de l'entrée ; Math : depth (distance, 0 = infini), far = 0
   (1 / distance), linear (gradient), direct (taille du flou). Focal Plane, Depth Of Field, Size,

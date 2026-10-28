@@ -1014,10 +1014,12 @@ Item {
                                 delegate: Loader {
                                     id: inputLoader
 
-                                    // A disabled image input (e.g. "Match Target" while "Match Source" is off) has no
+                                    // A disabled stream input (image, camera, geo, matrix: e.g. "Match Target" while
+                                    // "Match Source" is off, the Camera of a MotionBlur blurring from a Tracker) has no
                                     // pin, unless it is connected (its link stays visible and removable)
                                     active: !modelData.isOutput && modelData.exposed && modelData.desc.visible &&
-                                            (modelData.type !== "Image" || modelData.enabled || modelData.isLink)
+                                            (["Image", "Camera", "Geo", "Matrix"].indexOf(modelData.type) < 0 ||
+                                             modelData.enabled || modelData.isLink)
                                     visible: {
                                         if (Boolean(modelData.enabled)) {
                                             if (modelData.root && (modelData.root.isExpandable) ) {

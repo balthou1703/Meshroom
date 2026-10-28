@@ -79,12 +79,29 @@ class SyntheticCubePlate(desc.ImageOpNode):
         return renderCube(cameraAt(ctx.frame))
 
 
+class TurningCamera(desc.ImageOpNode):
+    """ A camera turning around its vertical axis, "speed" degrees per frame (0: still). """
+    category = "Test"
+    inputs = [desc.FloatParam(name="speed", label="Speed", description="", value=2.0, range=(0.0, 10.0, 0.1))]
+    outputs = [desc.Camera(name="cameraOutput", label="Camera", description="")]
+
+    def getInfo(self, ctx, inputsInfo):
+        raise RuntimeError("No image")
+
+    def computeData(self, ctx, outputName):
+        if outputName == "cameraOutput":
+            return scene3d.CameraData(scene3d.composeTRS((0, 0, 6), (0, ctx.value("speed") * ctx.frame, 0)), 35, 36, 24)
+        return super().computeData(ctx, outputName)
+
+
 def setup_module():
     registerNodeDesc(SyntheticCubePlate)
+    registerNodeDesc(TurningCamera)
 
 
 def teardown_module():
     unregisterNodeDesc(SyntheticCubePlate)
+    unregisterNodeDesc(TurningCamera)
 
 
 # Tracks tracked together
@@ -579,3 +596,36 @@ def test_pinsConstrainOnlyTheirKeyedFrames(tmp_path):
     projections = resection.nodeDesc.pinProjections(ctx, lambda output: evaluator.cachedData(plan.target, output, 5))
     seen, _, _ = cameraOutput(resection, 5).project(_CUBE, W, H)
     np.testing.assert_allclose(projections["pin3"], seen[3], atol=1e-6)
+
+
+def test_motionBlurFromACamera(tmp_path):
+    from meshroom.live.evaluator import RenderContext
+    graph = Graph("cameraBlur")
+    plate = graph.addNewNode("SyntheticCubePlate")
+    camera = graph.addNewNode("TurningCamera")
+    blur = graph.addNewNode("MotionBlur", shutter=1.0, samples=16)
+    blur.motionSource.value = "camera"
+    graph.addEdge(plate.output, blur.input)
+    graph.addEdge(camera.cameraOutput, blur.camera)
+    graph.update()
+    plan = buildPlan(blur)
+    ctx = RenderContext(plan.nodes[plan.target], 5, Evaluator(), plan)
+    # Turning 2 degrees per frame: the image center moves horizontally by f * tan(2 degrees) in a frame
+    matrix = blur.nodeDesc._cameraMotion(ctx, 1.0)
+    center = matrix @ [W / 2.0, H / 2.0, 1.0]
+    focal = 35.0 / 36.0 * W
+    assert abs(abs(center[0] / center[2] - W / 2.0) - focal * np.tan(np.radians(2.0))) < 0.5
+    assert abs(center[1] / center[2] - H / 2.0) < 0.5
+    from meshroom.live.imageBuffer import BBox
+    from meshroom.live.ops import alignToBBox
+    image = Evaluator().render(plan, 5)
+    blurred = alignToBBox(image.rgba(), image.bbox, BBox.fromFormat(W, H))
+    sharp = renderCube(cameraAt(5)).rgba()
+    # Blurred horizontally only: the rows keep their mean, the columns are smoothed
+    assert np.abs(blurred - sharp).mean() > 0.005
+    assert np.abs(np.diff(blurred[:, :, 0], axis=1)).mean() < 0.8 * np.abs(np.diff(sharp[:, :, 0], axis=1)).mean()
+    # A still camera: no blur
+    camera.speed.value = 0.0
+    graph.update()
+    plan = buildPlan(blur)
+    assert blur.nodeDesc.isIdentity(RenderContext(plan.nodes[plan.target], 5, Evaluator(), plan)) == "input"
