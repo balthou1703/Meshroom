@@ -2834,3 +2834,19 @@ class TestCameraSolveRobustness:
         cameraTracker.nodeDesc.runAction("autotrack", context)
         # The first frame tracked is published at once
         assert published and published[0][0] == 2 and published[0][1] >= 20
+
+
+def test_curvePointInterpolations():
+    from meshroom.live import curves
+    smooth = [[0, 0], [1, 1], [2, 0]]
+    # Linear: straight lines to the neighbors (a corner at the point)
+    linear = [[0, 0], [1, 1, "linear"], [2, 0]]
+    np.testing.assert_allclose(curves.evaluate(linear, [0.5, 1.0, 1.5]), [0.5, 1.0, 0.5], atol=1e-9)
+    assert curves.evaluate(smooth, [0.5])[0] != 0.5
+    # Constant: held to the next point (a step), flat after a constant last point
+    step = [[0, 0, "constant"], [1, 1, "constant"], [2, 3, "constant"]]
+    np.testing.assert_allclose(curves.evaluate(step, [0.0, 0.5, 0.99, 1.0, 1.7, 2.0, 5.0, -1.0]),
+                               [0, 0, 0, 1, 1, 3, 3, 0], atol=1e-9)
+    # Stored: the smooth points without mode; an unknown mode is smooth
+    assert curves.sortedPoints([[1, 1, "linear"], [0, 0, "smooth"], [2, 2, "bogus"]]) == [[0, 0], [1, 1, "linear"], [2, 2]]
+    assert curves.isIdentity([[0, 0], [1, 1, "linear"]]) and not curves.isIdentity([[0, 0, "constant"], [1, 1]])

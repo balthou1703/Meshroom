@@ -5,6 +5,10 @@ A set of curves is stored as JSON: {"curveName": [[x, y], ...], ...}. A curve go
 its points (monotone cubic interpolation: no overshoot between two points) and continues in
 straight lines beyond its first and last points. A curve without point is the identity, a curve
 with one point is constant.
+
+A point can have a third value, its interpolation: "smooth" (the default, not stored), "linear" (no slope: a
+corner, the curve reaches it and leaves it in straight lines toward its neighbors) or "constant" (the value is held
+from it to the next point: a step).
 """
 from __future__ import annotations
 
@@ -25,15 +29,20 @@ def parseCurves(text: str) -> Dict[str, List[List[float]]]:
     return {name: sortedPoints(points) for name, points in curves.items()}
 
 
-def sortedPoints(points) -> List[List[float]]:
-    """ The valid points of a curve, sorted by x, one point per x. """
+INTERPOLATIONS = ("smooth", "linear", "constant")
+
+
+def sortedPoints(points) -> List[list]:
+    """ The valid points of a curve, sorted by x, one point per x: [x, y], or [x, y, interpolation] when it is not
+    "smooth". """
     result = {}
     for point in points or []:
         try:
-            result[float(point[0])] = float(point[1])
+            mode = point[2] if len(point) > 2 and point[2] in INTERPOLATIONS else "smooth"
+            result[float(point[0])] = (float(point[1]), mode)
         except (TypeError, ValueError, IndexError):
             continue
-    return [[x, result[x]] for x in sorted(result)]
+    return [[x, result[x][0]] + ([result[x][1]] if result[x][1] != "smooth" else []) for x in sorted(result)]
 
 
 def _slopes(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
@@ -62,20 +71,36 @@ def evaluate(points: Sequence[Sequence[float]], values) -> np.ndarray:
         return np.full_like(values, points[0][1])
     xs = np.array([p[0] for p in points])
     ys = np.array([p[1] for p in points])
+    modes = [p[2] if len(p) > 2 else "smooth" for p in points]
     slopes = _slopes(xs, ys)
+    deltas = np.diff(ys) / np.diff(xs)
+    # The tangents leaving each point (toward the next) and arriving at each point (from the previous): the smooth
+    # slope, or the straight line to the neighbor for a linear (or constant) point
+    outgoing, incoming = slopes.copy(), slopes.copy()
+    for i, mode in enumerate(modes):
+        if mode != "smooth":
+            if i < len(xs) - 1:
+                outgoing[i] = deltas[i]
+            if i > 0:
+                incoming[i] = deltas[i - 1]
     result = np.empty_like(values)
-    # Straight lines beyond the ends
+    # Straight lines beyond the ends (flat after a constant last point, or before a constant first point)
     below, above = values < xs[0], values > xs[-1]
-    result[below] = ys[0] + (values[below] - xs[0]) * slopes[0]
-    result[above] = ys[-1] + (values[above] - xs[-1]) * slopes[-1]
+    first = 0.0 if modes[0] == "constant" else outgoing[0]
+    last = 0.0 if modes[-1] == "constant" else incoming[-1]
+    result[below] = ys[0] + (values[below] - xs[0]) * first
+    result[above] = ys[-1] + (values[above] - xs[-1]) * last
     inside = ~(below | above)
     v = values[inside]
     index = np.clip(np.searchsorted(xs, v, side="right") - 1, 0, len(xs) - 2)
     h = xs[index + 1] - xs[index]
     t = (v - xs[index]) / h
     t2, t3 = t * t, t * t * t
-    result[inside] = ((2 * t3 - 3 * t2 + 1) * ys[index] + (t3 - 2 * t2 + t) * h * slopes[index]
-                      + (-2 * t3 + 3 * t2) * ys[index + 1] + (t3 - t2) * h * slopes[index + 1])
+    curve = ((2 * t3 - 3 * t2 + 1) * ys[index] + (t3 - 2 * t2 + t) * h * outgoing[index]
+             + (-2 * t3 + 3 * t2) * ys[index + 1] + (t3 - t2) * h * incoming[index + 1])
+    # Constant points: their value held up to the next point (which starts at its own value)
+    held = np.array([m == "constant" for m in modes])[index] & (v < xs[index + 1])
+    result[inside] = np.where(held, ys[index], curve)
     return result
 
 
@@ -86,7 +111,7 @@ def isIdentity(points) -> bool:
         return True
     if len(points) == 1:
         return False
-    return all(abs(x - y) < 1e-9 for x, y in points)
+    return all(abs(p[0] - p[1]) < 1e-9 and (len(p) < 3 or p[2] == "linear") for p in points)
 
 
 def addPoint(points, x: float, y: float, tolerance: float = 1e-3) -> List[List[float]]:

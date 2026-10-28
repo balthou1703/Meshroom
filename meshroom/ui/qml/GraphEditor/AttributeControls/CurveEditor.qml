@@ -11,11 +11,17 @@ import MaterialIcons 2.2
  * the time curve of TimeWarp ("timeCurve" semantic, frames).
  *
  * - the buttons above choose the edited curve (the others are drawn faintly);
- * - click to add a point (and drag it), drag a point, double-click a point to remove it;
+ * - click to add a point (and drag it); click a point to select it, Shift + click to add it to the selection,
+ *   Ctrl + drag on an empty area to select the points in a box (Shift: added), Ctrl + A: all the points;
+ *   drag a selected point to move the whole selection; Delete (or the delete button, or double-click) removes;
+ * - x / y fields: the value of the selected points; "+100", "-=5", "*2", "/2" offset or scale them all
+ *   (a plain number sets it);
+ * - interpolation of the selected points: smooth (a slope), linear (a corner) or constant (a step);
  * - Ctrl + wheel (in the attribute editor; the wheel alone scrolls it) or wheel (in the curve window):
  *   zoom around the cursor (+ Shift: horizontally only, + Alt: vertically only); middle drag or
  *   Alt + drag: pan; "fit" button: show all the points again;
- * - the "open in window" button shows the editor in its own resizable window (with a full screen button);
+ * - the bar under the editor resizes it (kept for the session); the "open in window" button shows the editor
+ *   in its own window (with a full screen button);
  * - lookup nodes: "Add Point" moves the picked Source Color to the Target Color on the curves,
  *   "Match" (with "Match Source") matches the colors of the second input.
  * Each press and release is one undoable change.
@@ -41,13 +47,14 @@ ColumnLayout {
     }
     readonly property var names: Object.keys(curves)
     property string activeName: ""
-    // Height of the plot (drag the handle under it to resize), remembered while the editor exists
-    property real plotHeight: timeCurve ? 220 : 200
-    // Index of the selected point of the active curve (edited with the x / y fields), -1 if none
-    property int selectedIndex: -1
-    readonly property var selectedPoint: {
+    // Height of the plot (drag the bar under the editor to resize), kept for the session per attribute
+    readonly property string sizeKey: (node ? node.name : "") + "." + attribute.name
+    property real plotHeight: live ? live.editorSize(sizeKey, timeCurve ? 220 : 200) : 200
+    // Indices of the selected points of the active curve (in x order)
+    property var selection: []
+    readonly property var selectedPoints: {
         var points = sortedPoints(active)
-        return selectedIndex >= 0 && selectedIndex < points.length ? points[selectedIndex] : null
+        return selection.filter(function(i) { return i < points.length }).map(function(i) { return points[i] })
     }
     readonly property string active: names.indexOf(activeName) >= 0 ? activeName : (names.length > 0 ? names[0] : "")
     readonly property var colors: ({
@@ -64,6 +71,10 @@ ColumnLayout {
     spacing: 2
 
     function copy(value) { return JSON.parse(JSON.stringify(value)) }
+    function modeOf(p) { return p.length > 2 ? p[2] : "smooth" }
+    // A point moved to (x, y), its interpolation kept
+    function withXY(p, x, y) { return p.length > 2 ? [x, y, p[2]] : [x, y] }
+    function isSelected(i) { return selection.indexOf(i) >= 0 }
 
     function computeBounds() {
         var x0, x1, y0, y1
@@ -121,6 +132,15 @@ ColumnLayout {
     function apply(newCurves) { _currentScene.setValueInteractively(root.attribute, JSON.stringify(newCurves)) }
     function end() { _currentScene.endInteractiveEdit(root.attribute) }
 
+    // One undoable change of the active curve
+    function commitPoints(points) {
+        var newCurves = copy(curves)
+        newCurves[active] = points
+        begin()
+        apply(newCurves)
+        end()
+    }
+
     // Picked colors (markers on the plot)
     readonly property string pickedColors: hasPickers ? JSON.stringify([
         node.attribute("sourceColor").value.get("r").value, node.attribute("sourceColor").value.get("g").value,
@@ -129,26 +149,105 @@ ColumnLayout {
     onPickedColorsChanged: plot.requestPaint()
     onCurvesChanged: plot.requestPaint()
     onActiveChanged: {
-        selectedIndex = -1
+        selection = []
         plot.requestPaint()
     }
-    onSelectedIndexChanged: plot.requestPaint()
-
-    // Set the selected point (x / y fields): kept between its neighbors
-    function setSelectedPoint(x, y) {
-        var points = sortedPoints(active)
-        if (selectedIndex < 0 || selectedIndex >= points.length || !isFinite(x) || !isFinite(y))
-            return
-        var minX = selectedIndex > 0 ? points[selectedIndex - 1][0] + 1e-3 : -Infinity
-        var maxX = selectedIndex < points.length - 1 ? points[selectedIndex + 1][0] - 1e-3 : Infinity
-        points[selectedIndex] = [Math.max(minX, Math.min(maxX, x)), y]
-        var newCurves = copy(curves)
-        newCurves[active] = points
-        begin()
-        apply(newCurves)
-        end()
-    }
+    onSelectionChanged: plot.requestPaint()
     onBoundsChanged: plot.requestPaint()
+
+    /**
+     * The new value of `value` for a typed text: "+N", "+=N", "-=N", "*N", "*=N", "/N", "/=N" offset or scale it,
+     * a plain number (negative included) replaces it. NaN if the text is not valid.
+     */
+    function applyExpression(text, value) {
+        var t = String(text).trim()
+        var match = t.match(/^([+\-*\/])=\s*(.+)$/) || t.match(/^([+*\/])\s*(.+)$/)
+        if (!match) {
+            var number = Number(t)
+            return t === "" ? NaN : number
+        }
+        var operand = Number(match[2])
+        if (!isFinite(operand))
+            return NaN
+        switch (match[1]) {
+            case "+": return value + operand
+            case "-": return value - operand
+            case "*": return value * operand
+            case "/": return operand !== 0 ? value / operand : NaN
+        }
+        return NaN
+    }
+
+    // The x (axis 0) or y (axis 1) of the selected points set from a typed text (see applyExpression)
+    function setSelectedValue(axis, text) {
+        var points = sortedPoints(active)
+        var chosen = selection.filter(function(i) { return i < points.length })
+        if (!chosen.length)
+            return
+        var tagged = points.map(function(p, i) { return { "point": p, "index": i } })
+        for (var k = 0; k < chosen.length; k++) {
+            var p = points[chosen[k]]
+            var value = applyExpression(text, p[axis])
+            if (!isFinite(value))
+                return
+            if (root.timeCurve && axis === 0)
+                value = Math.round(value)
+            tagged[chosen[k]].point = axis === 0 ? withXY(p, value, p[1]) : withXY(p, p[0], value)
+        }
+        // Back in x order, one point per x (a moved point replaces an unselected one at the same x)
+        tagged.sort(function(a, b) { return a.point[0] - b.point[0] || (isSelected(b.index) ? 1 : 0) - (isSelected(a.index) ? 1 : 0) })
+        var kept = []
+        tagged.forEach(function(item) {
+            if (kept.length && Math.abs(kept[kept.length - 1].point[0] - item.point[0]) < 1e-9)
+                return
+            kept.push(item)
+        })
+        var newSelection = []
+        kept.forEach(function(item, i) {
+            if (chosen.indexOf(item.index) >= 0)
+                newSelection.push(i)
+        })
+        commitPoints(kept.map(function(item) { return item.point }))
+        selection = newSelection
+    }
+
+    // The interpolation of the selected points: "smooth", "linear" or "constant"
+    function setSelectedMode(mode) {
+        var points = sortedPoints(active)
+        selection.forEach(function(i) {
+            if (i < points.length)
+                points[i] = mode === "smooth" ? [points[i][0], points[i][1]] : [points[i][0], points[i][1], mode]
+        })
+        commitPoints(points)
+    }
+
+    function deleteSelection() {
+        if (!editable || !selection.length)
+            return
+        var points = sortedPoints(active).filter(function(p, i) { return !root.isSelected(i) })
+        selection = []
+        commitPoints(points)
+    }
+
+    // The common value of the selected points on an axis ("" when they differ)
+    function commonValue(axis) {
+        var points = selectedPoints
+        if (!points.length)
+            return ""
+        var first = points[0][axis]
+        for (var i = 1; i < points.length; i++) {
+            if (Math.abs(points[i][axis] - first) > 1e-9)
+                return ""
+        }
+        return String(Math.round(first * 10000) / 10000)
+    }
+    readonly property string commonMode: {
+        var points = selectedPoints
+        if (!points.length)
+            return ""
+        var first = modeOf(points[0])
+        return points.every(function(p) { return root.modeOf(p) === first }) ? first : ""
+    }
 
     // Curve choice
     RowLayout {
@@ -211,16 +310,13 @@ ColumnLayout {
             enabled: root.editable && root.active !== ""
             ToolTip.text: "Reset the " + root.active + " curve"
             onClicked: {
-                var newCurves = root.copy(root.curves)
-                newCurves[root.active] = root.timeCurve ? [] : [[0, 0], [1, 1]]
-                root.begin()
-                root.apply(newCurves)
-                root.end()
+                root.selection = []
+                root.commitPoints(root.timeCurve ? [] : [[0, 0], [1, 1]])
             }
         }
     }
 
-    // Selected point, edited by value
+    // Selected points: their values (offsets / scales), interpolation, removal
     RowLayout {
         Layout.fillWidth: true
         spacing: 4
@@ -233,11 +329,19 @@ ColumnLayout {
             id: pointXField
             Layout.fillWidth: true
             font.pointSize: 8
-            enabled: root.editable && root.selectedPoint !== null
-            text: root.selectedPoint ? String(Math.round(root.selectedPoint[0] * 10000) / 10000) : ""
-            validator: DoubleValidator { locale: 'C' }
+            enabled: root.editable && root.selection.length > 0
+            text: root.commonValue(0)
+            placeholderText: root.selection.length > 1 ? root.selection.length + " points" : ""
             selectByMouse: true
-            onEditingFinished: root.setSelectedPoint(Number(text), root.selectedPoint ? root.selectedPoint[1] : NaN)
+            ToolTip.visible: hovered
+            ToolTip.text: "The x of the selected points. \"+100\", \"-=5\", \"*2\", \"/2\": offset or scale them all; " +
+                          "a number sets it."
+            onEditingFinished: {
+                // Unchanged (e.g. the field left): no edit
+                if (text !== root.commonValue(0))
+                    root.setSelectedValue(0, text)
+                text = Qt.binding(function() { return root.commonValue(0) })
+            }
         }
         Label {
             text: root.timeCurve ? "Input frame" : "y"
@@ -248,17 +352,52 @@ ColumnLayout {
             id: pointYField
             Layout.fillWidth: true
             font.pointSize: 8
-            enabled: root.editable && root.selectedPoint !== null
-            text: root.selectedPoint ? String(Math.round(root.selectedPoint[1] * 10000) / 10000) : ""
-            validator: DoubleValidator { locale: 'C' }
+            enabled: root.editable && root.selection.length > 0
+            text: root.commonValue(1)
+            placeholderText: root.selection.length > 1 ? root.selection.length + " points" : ""
             selectByMouse: true
-            onEditingFinished: root.setSelectedPoint(root.selectedPoint ? root.selectedPoint[0] : NaN, Number(text))
+            ToolTip.visible: hovered
+            ToolTip.text: "The y of the selected points. \"+100\", \"-=5\", \"*2\", \"/2\": offset or scale them all; " +
+                          "a number sets it."
+            onEditingFinished: {
+                // Unchanged (e.g. the field left): no edit
+                if (text !== root.commonValue(1))
+                    root.setSelectedValue(1, text)
+                text = Qt.binding(function() { return root.commonValue(1) })
+            }
         }
         Label {
-            visible: root.selectedPoint === null
-            text: "(select a point)"
+            visible: root.selection.length === 0
+            text: "(select points)"
             font.pointSize: 7
             opacity: 0.5
+        }
+        // Interpolation of the selected points
+        Repeater {
+            model: [["smooth", MaterialIcons.timeline, "Smooth: the curve goes through the point with a slope"],
+                    ["linear", MaterialIcons.show_chart, "Linear: no slope, a corner (straight lines to the neighbors)"],
+                    ["constant", MaterialIcons.stairs, "Constant: the value is held until the next point (a step)"]]
+            MaterialToolButton {
+                required property var modelData
+                visible: root.selection.length > 0
+                text: modelData[1]
+                font.pointSize: 9
+                padding: 2
+                checkable: true
+                checked: root.commonMode === modelData[0]
+                enabled: root.editable
+                ToolTip.text: modelData[2]
+                onClicked: root.setSelectedMode(modelData[0])
+            }
+        }
+        MaterialToolButton {
+            visible: root.selection.length > 0
+            text: MaterialIcons.delete_outline
+            font.pointSize: 9
+            padding: 2
+            enabled: root.editable
+            ToolTip.text: "Delete the selected points (Delete)"
+            onClicked: root.deleteSelection()
         }
     }
 
@@ -267,8 +406,9 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: root.inWindow
         Layout.preferredHeight: root.inWindow ? -1 : root.plotHeight
+        Layout.minimumHeight: 100
         color: Qt.rgba(0, 0, 0, 0.25)
-        border.color: Qt.rgba(1, 1, 1, 0.1)
+        border.color: plotMouse.activeFocus ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.1)
 
         Canvas {
             id: plot
@@ -337,11 +477,38 @@ ColumnLayout {
                     ctx.stroke()
                 })
                 ctx.globalAlpha = 1.0
-                // Points of the active curve
+                // Points of the active curve: a square (smooth), a diamond (linear), a hollow square (constant);
+                // the selected ones white and larger
+                var curveColor = root.colors[root.active] || "white"
                 root.sortedPoints(root.active).forEach(function(p, index) {
-                    ctx.fillStyle = index === plotMouse.dragged || index === root.selectedIndex ? "white" : (root.colors[root.active] || "white")
-                    ctx.fillRect(root.toScreenX(p[0]) - 3.5, root.toScreenY(p[1]) - 3.5, 7, 7)
+                    var selected = root.isSelected(index)
+                    var size = selected ? 4.5 : 3.5
+                    var x = root.toScreenX(p[0]), y = root.toScreenY(p[1])
+                    var mode = root.modeOf(p)
+                    ctx.fillStyle = selected ? "white" : curveColor
+                    ctx.strokeStyle = selected ? "white" : curveColor
+                    ctx.lineWidth = 1.5
+                    if (mode === "linear") {
+                        ctx.beginPath()
+                        ctx.moveTo(x, y - size - 1); ctx.lineTo(x + size + 1, y); ctx.lineTo(x, y + size + 1); ctx.lineTo(x - size - 1, y)
+                        ctx.closePath()
+                        ctx.fill()
+                    } else if (mode === "constant") {
+                        ctx.strokeRect(x - size, y - size, 2 * size, 2 * size)
+                    } else {
+                        ctx.fillRect(x - size, y - size, 2 * size, 2 * size)
+                    }
                 })
+                // Box selection
+                if (plotMouse.boxStart) {
+                    ctx.fillStyle = Qt.rgba(1, 1, 1, 0.08)
+                    ctx.strokeStyle = Qt.rgba(1, 1, 1, 0.6)
+                    ctx.lineWidth = 1
+                    var bx = Math.min(plotMouse.boxStart.x, plotMouse.boxEnd.x), by = Math.min(plotMouse.boxStart.y, plotMouse.boxEnd.y)
+                    var bw = Math.abs(plotMouse.boxEnd.x - plotMouse.boxStart.x), bh = Math.abs(plotMouse.boxEnd.y - plotMouse.boxStart.y)
+                    ctx.fillRect(bx, by, bw, bh)
+                    ctx.strokeRect(bx, by, bw, bh)
+                }
             }
         }
 
@@ -353,13 +520,22 @@ ColumnLayout {
             acceptedButtons: Qt.LeftButton | Qt.MiddleButton
             // Vertical drags move the points, not the attribute list around
             preventStealing: true
-            property int dragged: -1
-            property var points: []
+            // The keys (Delete, Ctrl + A) go to the plot once clicked
+            activeFocusOnTab: true
+            // Points when the drag started, and where it started
+            property var startPoints: []
+            property real startX
+            property real startY
+            property bool dragging: false
             // Panning (middle button or Alt + left): last position
             property bool panning: false
             property real lastX
             property real lastY
             property bool editing: false
+            // Box selection (Ctrl + drag on an empty area): its corners on screen, null when not selecting
+            property var boxStart: null
+            property point boxEnd
+            property bool boxAdds: false
 
             onWheel: function(wheel) {
                 // In the attribute editor, the wheel alone scrolls the editor: Ctrl + wheel zooms
@@ -383,37 +559,100 @@ ColumnLayout {
                 return -1
             }
 
+            // The selected points of `startPoints` moved by (dx, dy) curve units, each kept between its unselected
+            // neighbors (the x order does not change)
+            function moved(dx, dy) {
+                var points = root.copy(startPoints)
+                var low = -Infinity, high = Infinity
+                for (var i = 0; i < points.length; i++) {
+                    if (!root.isSelected(i))
+                        continue
+                    var previous = i - 1
+                    while (previous >= 0 && root.isSelected(previous))
+                        previous--
+                    var next = i + 1
+                    while (next < points.length && root.isSelected(next))
+                        next++
+                    if (previous >= 0)
+                        low = Math.max(low, points[previous][0] + 1e-3 - points[i][0])
+                    if (next < points.length)
+                        high = Math.min(high, points[next][0] - 1e-3 - points[i][0])
+                }
+                dx = Math.max(low, Math.min(high, dx))
+                if (root.timeCurve) {
+                    dx = Math.round(dx)
+                    dx = Math.max(Math.ceil(low), Math.min(Math.floor(high), dx))
+                    dy = Math.round(dy * 100) / 100
+                }
+                for (var j = 0; j < points.length; j++) {
+                    if (root.isSelected(j))
+                        points[j] = root.withXY(points[j], points[j][0] + dx, points[j][1] + dy)
+                }
+                return points
+            }
+
             onPressed: function(mouse) {
+                forceActiveFocus()
                 panning = mouse.button === Qt.MiddleButton || (mouse.modifiers & Qt.AltModifier)
-                editing = !panning && root.editable
+                editing = false
                 if (panning) {
                     lastX = mouse.x
                     lastY = mouse.y
                     return
                 }
-                if (!editing)
+                var index = hit(mouse.x, mouse.y)
+                if (index < 0 && (mouse.modifiers & Qt.ControlModifier)) {
+                    // Box selection
+                    boxAdds = !!(mouse.modifiers & Qt.ShiftModifier)
+                    if (!boxAdds)
+                        root.selection = []
+                    boxStart = Qt.point(mouse.x, mouse.y)
+                    boxEnd = boxStart
                     return
-                root.frozenBounds = root.computeBounds()
-                points = root.sortedPoints(root.active)
-                dragged = hit(mouse.x, mouse.y)
-                root.selectedIndex = dragged
-                root.begin()
-                if (dragged < 0) {
-                    // New point, then dragged
-                    var x = root.toCurveX(mouse.x), y = root.toCurveY(mouse.y)
-                    if (root.timeCurve) {
-                        x = Math.round(x)
-                        y = Math.round(y * 100) / 100
-                    }
-                    points = points.filter(function(p) { return Math.abs(p[0] - x) > 1e-6 })
-                    points.push([x, y])
-                    points.sort(function(a, b) { return a[0] - b[0] })
-                    dragged = points.findIndex(function(p) { return p[0] === x })
-                    root.selectedIndex = dragged
-                    var newCurves = root.copy(root.curves)
-                    newCurves[root.active] = points
-                    root.apply(newCurves)
                 }
+                if (index >= 0) {
+                    if (mouse.modifiers & Qt.ShiftModifier)
+                        root.selection = root.isSelected(index) ? root.selection.filter(function(i) { return i !== index })
+                                                                : root.selection.concat([index])
+                    else if (!root.isSelected(index))
+                        root.selection = [index]
+                    if (!root.editable || !root.isSelected(index))
+                        return
+                    editing = true
+                    root.frozenBounds = root.computeBounds()
+                    startPoints = root.sortedPoints(root.active)
+                    startX = mouse.x
+                    startY = mouse.y
+                    dragging = false
+                    root.begin()
+                    return
+                }
+                if (mouse.modifiers & Qt.ShiftModifier)
+                    return
+                if (!root.editable) {
+                    root.selection = []
+                    return
+                }
+                // New point, then dragged
+                editing = true
+                root.frozenBounds = root.computeBounds()
+                var x = root.toCurveX(mouse.x), y = root.toCurveY(mouse.y)
+                if (root.timeCurve) {
+                    x = Math.round(x)
+                    y = Math.round(y * 100) / 100
+                }
+                var points = root.sortedPoints(root.active).filter(function(p) { return Math.abs(p[0] - x) > 1e-6 })
+                points.push([x, y])
+                points.sort(function(a, b) { return a[0] - b[0] })
+                root.selection = [points.findIndex(function(p) { return p[0] === x })]
+                root.begin()
+                var newCurves = root.copy(root.curves)
+                newCurves[root.active] = points
+                root.apply(newCurves)
+                startPoints = points
+                startX = mouse.x
+                startY = mouse.y
+                dragging = false
             }
             onPositionChanged: function(mouse) {
                 if (pressed && panning) {
@@ -423,80 +662,67 @@ ColumnLayout {
                     lastY = mouse.y
                     return
                 }
-                if (!pressed || !editing || dragged < 0)
+                if (pressed && boxStart) {
+                    boxEnd = Qt.point(mouse.x, mouse.y)
+                    plot.requestPaint()
                     return
-                var x = root.toCurveX(mouse.x), y = root.toCurveY(mouse.y)
-                // Keep the x order: between the neighbors
-                var minX = dragged > 0 ? points[dragged - 1][0] + 1e-3 : -Infinity
-                var maxX = dragged < points.length - 1 ? points[dragged + 1][0] - 1e-3 : Infinity
-                x = Math.max(minX, Math.min(maxX, x))
-                if (root.timeCurve) {
-                    x = Math.max(minX, Math.min(maxX, Math.round(x)))
-                    y = Math.round(y * 100) / 100
                 }
-                points[dragged] = [x, y]
+                if (!pressed || !editing)
+                    return
+                if (!dragging && Math.abs(mouse.x - startX) < 2 && Math.abs(mouse.y - startY) < 2)
+                    return
+                dragging = true
+                var b2 = root.bounds
+                var dx = (mouse.x - startX) / plot.width * (b2.x1 - b2.x0)
+                var dy = -(mouse.y - startY) / plot.height * (b2.y1 - b2.y0)
                 var newCurves = root.copy(root.curves)
-                newCurves[root.active] = points
+                newCurves[root.active] = moved(dx, dy)
                 root.apply(newCurves)
             }
-            onReleased: {
+            function finish() {
                 panning = false
+                if (boxStart) {
+                    var x0 = Math.min(boxStart.x, boxEnd.x), x1 = Math.max(boxStart.x, boxEnd.x)
+                    var y0 = Math.min(boxStart.y, boxEnd.y), y1 = Math.max(boxStart.y, boxEnd.y)
+                    var inside = []
+                    root.sortedPoints(root.active).forEach(function(p, i) {
+                        var sx = root.toScreenX(p[0]), sy = root.toScreenY(p[1])
+                        if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1 && !root.isSelected(i))
+                            inside.push(i)
+                    })
+                    root.selection = root.selection.concat(inside)
+                    boxStart = null
+                    plot.requestPaint()
+                    return
+                }
                 if (!editing)
                     return
                 editing = false
-                dragged = -1
+                dragging = false
                 root.end()
                 root.frozenBounds = null
             }
-            onCanceled: {
-                panning = false
-                if (!editing)
-                    return
-                editing = false
-                dragged = -1
-                root.end()
-                root.frozenBounds = null
-            }
+            onReleased: finish()
+            onCanceled: finish()
             onDoubleClicked: function(mouse) {
-                if (!root.editable || mouse.button !== Qt.LeftButton || (mouse.modifiers & Qt.AltModifier))
+                if (!root.editable || mouse.button !== Qt.LeftButton || (mouse.modifiers & (Qt.AltModifier | Qt.ControlModifier)))
                     return
                 var index = hit(mouse.x, mouse.y)
                 if (index < 0)
                     return
-                var newCurves = root.copy(root.curves)
-                var remaining = root.sortedPoints(root.active)
-                remaining.splice(index, 1)
-                root.selectedIndex = -1
-                newCurves[root.active] = remaining
-                root.begin()
-                root.apply(newCurves)
-                root.end()
+                root.selection = [index]
+                root.deleteSelection()
             }
-        }
-
-        // Resize handle: drag to make the plot taller or shorter
-        Rectangle {
-            visible: !root.inWindow
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: 6
-            color: resizeMouse.containsMouse || resizeMouse.pressed ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.06)
-            MouseArea {
-                id: resizeMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                preventStealing: true
-                cursorShape: Qt.SizeVerCursor
-                property real startY
-                property real startHeight
-                onPressed: function(mouse) {
-                    startY = mapToItem(null, mouse.x, mouse.y).y
-                    startHeight = root.plotHeight
-                }
-                onPositionChanged: function(mouse) {
-                    if (pressed)
-                        root.plotHeight = Math.max(100, Math.min(1200, startHeight + mapToItem(null, mouse.x, mouse.y).y - startY))
+            Keys.onPressed: function(event) {
+                if ((event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) && root.selection.length) {
+                    root.deleteSelection()
+                    event.accepted = true
+                } else if (event.key === Qt.Key_A && (event.modifiers & Qt.ControlModifier)) {
+                    root.selection = root.sortedPoints(root.active).map(function(p, i) { return i })
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Escape && root.selection.length) {
+                    root.selection = []
+                    event.accepted = true
                 }
             }
         }
@@ -522,8 +748,8 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: 4
         Button {
-            text: root.node && root.node.nodeType === "ColorLookupHSV" ? "Add H / S / V points: Source \u2192 Target"
-                                                                       : "Add R / G / B points: Source \u2192 Target"
+            text: root.node && root.node.nodeType === "ColorLookupHSV" ? "Add H / S / V points: Source → Target"
+                                                                       : "Add R / G / B points: Source → Target"
             font.pointSize: 8
             enabled: root.editable
             ToolTip.text: "Add on the curves the points moving the Source Color to the Target Color.\n" +
@@ -544,11 +770,51 @@ ColumnLayout {
         Item { Layout.fillWidth: true }
     }
 
-    // The curves in their own window (same attribute: both editors stay in sync)
+    // Resize bar: drag it to make the editor taller or shorter (kept for the session)
+    Rectangle {
+        visible: !root.inWindow
+        Layout.fillWidth: true
+        Layout.preferredHeight: 8
+        radius: 2
+        color: resizeMouse.containsMouse || resizeMouse.pressed ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(1, 1, 1, 0.05)
+        Label {
+            anchors.centerIn: parent
+            text: MaterialIcons.drag_handle
+            font.family: MaterialIcons.fontFamily
+            font.pointSize: 8
+            opacity: resizeMouse.containsMouse || resizeMouse.pressed ? 0.9 : 0.4
+        }
+        MouseArea {
+            id: resizeMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            preventStealing: true
+            cursorShape: Qt.SizeVerCursor
+            property real startY
+            property real startHeight
+            ToolTip.visible: containsMouse && !pressed
+            ToolTip.delay: 600
+            ToolTip.text: "Drag to resize the curve editor"
+            onPressed: function(mouse) {
+                startY = mapToItem(null, mouse.x, mouse.y).y
+                startHeight = root.plotHeight
+            }
+            onPositionChanged: function(mouse) {
+                if (pressed)
+                    root.plotHeight = Math.max(100, Math.min(1600, startHeight + mapToItem(null, mouse.x, mouse.y).y - startY))
+            }
+            onReleased: {
+                if (root.live)
+                    root.live.setEditorSize(root.sizeKey, root.plotHeight)
+            }
+        }
+    }
+
+    // The curves in their own window (same attribute: both editors stay in sync), with the colors of Meshroom
     Loader {
         id: curveWindowLoader
         active: false
-        sourceComponent: Window {
+        sourceComponent: ApplicationWindow {
             id: curveWindow
             title: root.attribute.node.label + " - " + root.attribute.label
             width: 900
@@ -556,11 +822,35 @@ ColumnLayout {
             minimumWidth: 300
             minimumHeight: 240
             visible: true
+            color: palette.window
             onClosing: curveWindowLoader.active = false
+
+            // The palette of the application (QPalette is not convertible to a QML palette: copied, as main.qml)
+            Component.onCompleted: {
+                if (typeof _PaletteManager === "undefined")
+                    return
+                palette.alternateBase = _PaletteManager.alternateBase
+                palette.base = _PaletteManager.base
+                palette.button = _PaletteManager.button
+                palette.buttonText = _PaletteManager.buttonText
+                palette.highlight = _PaletteManager.highlight
+                palette.highlightedText = _PaletteManager.highlightedText
+                palette.link = _PaletteManager.link
+                palette.mid = _PaletteManager.mid
+                palette.shadow = _PaletteManager.shadow
+                palette.text = _PaletteManager.text
+                palette.toolTipBase = _PaletteManager.toolTipBase
+                palette.toolTipText = _PaletteManager.toolTipText
+                palette.window = _PaletteManager.window
+                palette.windowText = _PaletteManager.windowText
+                palette.disabled.buttonText = _PaletteManager.disabledButtonText
+                palette.disabled.text = _PaletteManager.disabledText
+                palette.disabled.windowText = _PaletteManager.disabledWindowText
+            }
 
             Pane {
                 anchors.fill: parent
-                padding: 6
+                padding: 8
                 Loader {
                     anchors.fill: parent
                     Component.onCompleted: setSource("CurveEditor.qml", {

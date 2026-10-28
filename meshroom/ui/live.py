@@ -1190,6 +1190,19 @@ class LiveController(QObject):
                     + f", {len(data.get('points', {}))} points, error {data.get('error', 0):.2f} px")
         return ""
 
+    # Sizes of the attribute editors resized by the user (e.g. the height of a curve editor), kept for the session
+
+    @Slot(str, float, result=float)
+    def editorSize(self, key, default):
+        """ The size the user gave to an editor (`key`: e.g. "node.attribute"), or `default`. """
+        return float(getattr(self, "_editorSizes", {}).get(key, default))
+
+    @Slot(str, float)
+    def setEditorSize(self, key, size):
+        if not hasattr(self, "_editorSizes"):
+            self._editorSizes = {}
+        self._editorSizes[key] = float(size)
+
     # Curves
 
     @Slot("QVariantList", float, float, int, result="QVariantList")

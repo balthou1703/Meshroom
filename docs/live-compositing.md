@@ -204,7 +204,13 @@ nœud Dot.
 - valeurs 2D : champs x / y ; une valeur « liée » (Size du Blur, Scale du Transform…) s'édite avec
   un seul curseur, le bouton « + » sépare x et y (choix enregistré sur le nœud ; des valeurs x et y
   différentes restent toujours en x / y) ;
-- éditeur de courbes : agrandissable (poignée sous la courbe), champs x / y du point sélectionné ;
+- éditeur de courbes : agrandissable (barre sous l'éditeur, hauteur gardée pour la session par attribut :
+  `LiveScene.editorSize`), sélection de plusieurs points (clic, Maj + clic : ajouter, Ctrl + glisser dans le vide :
+  cadre, Ctrl + A : tous, Échap : aucun), glisser un point sélectionné déplace toute la sélection (l'ordre en x est
+  gardé), Suppr / bouton corbeille / double-clic : supprimer ; champs x / y des points sélectionnés : un nombre les
+  fixe, « +100 », « -=5 », « *2 », « /2 » les décalent ou les mettent à l'échelle tous (ex. TimeWarp : tous les points
+  puis x « +100 ») ; interpolation des points sélectionnés : lisse (pente), linéaire (coin, sans pente) ou constante
+  (palier jusqu'au point suivant), stockée en troisième valeur du point (`curves.INTERPOLATIONS`) ;
 - gizmo du Transform sélectionné dans le viewer : centre (translate), bras horizontal (scale),
   bras vertical (rotate) ; chaque glissé est une seule étape d'annulation ;
 - gizmo du Ramp : ses deux points (orientation et longueur du fondu), et le losange du milieu
@@ -391,8 +397,8 @@ Dans le viewer, un clic sur « Exp » ou « Gamma » les remet à 0 / 1.
 
 L'éditeur de courbes (ColorLookup, TimeWarp) zoome avec Ctrl + molette (Shift : horizontalement,
 Alt : verticalement), se déplace au bouton du milieu ou Alt + glisser, « fit » recadre ; le bouton
-« ouvrir dans une fenêtre » le montre dans une fenêtre redimensionnable (plein écran possible), où
-la molette seule zoome.
+« ouvrir dans une fenêtre » le montre dans une fenêtre redimensionnable aux couleurs de Meshroom (plein écran
+possible), où la molette seule zoome.
 
 **Proxy** : le bouton « Proxy » du viewer (réduction 1/2, 1/3, 1/4 ou 1/8 dans le menu voisin ;
 le titre du viewer l'indique) calcule à résolution réduite : les Reads
