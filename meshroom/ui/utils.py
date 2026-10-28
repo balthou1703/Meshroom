@@ -234,7 +234,9 @@ def makeProperty(T, attributeName, notify=None, resetOnDestroy=False):
         if resetOnDestroy and not hasattr(instance, resetCallbackName):
             # store reset callback on instance, only way to keep a reference to this function
             # that can be used for destroyed signal (dis)connection
-            setattr(instance, resetCallbackName, lambda self=instance, *args: setter(self, None))
+            # Not when the instance itself is already gone (its child destroyed with it, e.g. when quitting)
+            setattr(instance, resetCallbackName,
+                    lambda self=instance, *args: setter(self, None) if shiboken6.isValid(self) else None)
         resetCallback = getattr(instance, resetCallbackName, None)
 
         if resetCallback and currentValue and shiboken6.isValid(currentValue):
