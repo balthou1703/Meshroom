@@ -249,6 +249,16 @@ Page {
     }
 
     Platform.FileDialog {
+        id: importCompositingDialog
+        title: "Import Compositing"
+        fileMode: Platform.FileDialog.OpenFile
+        nameFilters: ["Meshroom Graphs (*.mg *.mgt)"]
+        onAccepted: {
+            _currentScene.importCompositing(currentFile)
+        }
+    }
+
+    Platform.FileDialog {
         id: importProjectDialog
         title: "Import Project"
         fileMode: Platform.FileDialog.OpenFile
@@ -813,6 +823,15 @@ Page {
                     onTriggered: {
                         initFileDialogFolder(importNukeScriptDialog)
                         importNukeScriptDialog.open()
+                    }
+                }
+                Action {
+                    id: importCompositingAction
+                    text: "Import Compositing..."
+                    // The compositing of a project (.mg / .mgt), with its chapters, added to the compositing shown
+                    onTriggered: {
+                        initFileDialogFolder(importCompositingDialog)
+                        importCompositingDialog.open()
                     }
                 }
                 Action {

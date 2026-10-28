@@ -42,7 +42,9 @@ def subGraphSourceParams() -> list:
             label="Template",
             description="Template (.mgt / .mg) of the subgraph, used when the subgraph is not embedded.\n"
                         "A project of the compositing workspace (.mg) gives its compositing (its nodes, chapters and "
-                        "ports), as a copy / paste of it would; 'Make Local' copies it in the node.",
+                        "ports), as a copy / paste of it would; 'Make Local' copies it in the node.\n"
+                        "Ignored while the subgraph is embedded (reset 'Embedded Subgraph' to use it). To add the "
+                        "compositing of a project to the one shown, use File > Import Compositing.",
             value="",
             semantic="browseFile:Meshroom graphs:.mgt .mg",
         ),

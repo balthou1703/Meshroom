@@ -347,7 +347,7 @@ class TestReadWrite:
 def test_compositingTemplate():
     """
     The "compositing" pipeline template is registered and opens in the compositing workspace: the compositing nodes
-    are in the "compositing_1" SubGraph node, rendered by the Write outside.
+    are in the "compositing_1" SubGraph node, with the Write inside; the port of the SubGraph is the written file.
     """
     from meshroom.core.subgraph.editing import SubGraphStack
     if not pluginManager.isNodeDescRegistered("SubGraph"):
@@ -358,10 +358,19 @@ def test_compositingTemplate():
     graph = Graph("")
     graph.initFromTemplate(templates["compositing"])
     assert graph.workspaceMode == "compositing"
-    subGraphNode = graph.node("Write_1").image.inputRootLink.node
-    assert subGraphNode.nodeType == "SubGraph" and subGraphNode.label == "compositing_1"
+    assert [node.nodeType for node in graph.nodes] == ["SubGraph"]
+    subGraphNode = list(graph.nodes)[0]
+    assert subGraphNode.label == "compositing_1"
     inner = SubGraphStack().enter(graph, subGraphNode)
-    assert {node.nodeType for node in inner.nodes} >= {"Read", "Grade"}
+    assert {node.nodeType for node in inner.nodes} >= {"Read", "Grade", "Write"}
+    write = next(node for node in inner.nodes if node.nodeType == "Write")
+    assert write.image.inputRootLink.node.nodeType == "Grade"
+    output = next(node for node in inner.nodes if node.nodeType == "GraphOutput")
+    port = list(output.ports.value)[0]
+    assert port.inputRootLink.node is write and port.inputRootLink.name == "output"
+    # The port of the SubGraph node is the written file
+    outputs = {attr.name: type(attr.desc).__name__ for attr in subGraphNode.attribute("outs").value}
+    assert outputs == {"output": "File"}, outputs
 
 
 class TestBBoxNodes:

@@ -1,5 +1,6 @@
 """Compositing nodes in subgraphs: the live evaluation goes through SubGraph nodes and their GraphInput."""
 
+import json
 import numpy as np
 
 from meshroom.core.subgraph.editing import SubGraphStack, collapseIntoSubGraph
@@ -97,7 +98,6 @@ def test_subGraphNodeIsEvaluatedThroughItsImageOutput():
 
 
 def test_compositingProjectAsTemplateBringsItsCompositing(tmp_path):
-    import json
     from meshroom.core.subgraph.executor import readGraphData
     # A project of the compositing workspace: its compositing (nodes, chapters, ports) in its compositing_1 SubGraph
     inner = {"header": {"fileVersion": "2.1", "template": True}, "graph": {
@@ -116,3 +116,51 @@ def test_compositingProjectAsTemplateBringsItsCompositing(tmp_path):
     project["header"].pop("workspaceMode")
     path.write_text(json.dumps(project))
     assert sorted(readGraphData(str(path))) == ["Write_1", "compositing_1"]
+
+
+def test_importCompositingOfAProject(tmp_path):
+    """ File > Import Compositing: the content of the compositing SubGraph of a project, without its ports. """
+    from meshroom.core.graph import Graph
+    from meshroom.core.subgraph.editing import readCompositing
+    inner = {"header": {"fileVersion": "2.1", "template": True}, "graph": {
+        "Grade_1": {"nodeType": "Grade", "position": [0, 0], "inputs": {}},
+        "Blur_1": {"nodeType": "Blur", "position": [200, 0], "inputs": {"input": "{Grade_1.output}"}},
+        "Chapter_1": {"nodeType": "Chapter", "position": [-50, -50], "inputs": {}},
+        "GraphOutput_1": {"nodeType": "GraphOutput", "position": [400, 0], "inputs": {}},
+    }}
+    project = {"header": {"workspaceMode": "compositing", "fileVersion": "2.1"}, "graph": {
+        "compositing_1": {"nodeType": "SubGraph", "position": [0, 0], "inputs": {"subGraph": json.dumps(inner)}},
+    }}
+    path = tmp_path / "comp.mg"
+    path.write_text(json.dumps(project))
+    imported = readCompositing(path)
+    assert sorted(node.nodeType for node in imported.nodes) == ["Blur", "Chapter", "Grade"]
+    target = Graph("target")
+    target.addNewNode("Grade")
+    nodes = target.importGraphContent(imported)
+    assert len(nodes) == 3 and len(target.nodes) == 4
+    blur = next(node for node in nodes if node.nodeType == "Blur")
+    assert blur.input.inputRootLink.node.nodeType == "Grade" and blur.input.inputRootLink.node in nodes
+
+
+def test_writeInsideTheCompositingSubGraph(tmp_path):
+    """
+    New Compositing: the Write is inside the compositing SubGraph, whose port is the written file. Running the
+    subgraph writes the frames and gives the path of the file.
+    """
+    from meshroom.core.graph import Graph
+    from meshroom.core.subgraph import run
+    from meshroom.core.subgraph.ports import formatPortSpec
+    from meshroom.live import imageIO
+    from .test_liveCompositing import setColor
+    graph = Graph("")
+    constant = graph.addNewNode("Constant", width=4, height=2)
+    setColor(constant, r=0.25, a=1.0)
+    write = graph.addNewNode("Write", file=str(tmp_path / "render.tif"), dataType="float")
+    graph.addEdge(constant.output, write.image)
+    graphOutput = graph.addNewNode("GraphOutput", portSpec=formatPortSpec([("output", "File")]))
+    graph.addEdge(write.output, graphOutput.ports.value.get("output"))
+    result = run(graph.toDict())
+    assert result == {"output": str(tmp_path / "render.tif")}
+    image = imageIO.readImage(result["output"], "linear")
+    assert abs(float(image.rgba()[0, 0, 0]) - 0.25) < 1e-6

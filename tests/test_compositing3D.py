@@ -409,8 +409,8 @@ def test_compositingTemplateHasACompositingSubGraph():
     assert graph.workspaceMode == "compositing"
     subGraphs = [node for node in graph.nodes if node.nodeType == "SubGraph"]
     assert [node.label for node in subGraphs] == ["compositing_1"]
-    write = next(node for node in graph.nodes if node.nodeType == "Write")
-    assert write.image.inputRootLink.node is subGraphs[0]
+    # The Write is inside the SubGraph: the project graph only holds it
+    assert [node.nodeType for node in graph.nodes] == ["SubGraph"]
 
 
 class TestBake:

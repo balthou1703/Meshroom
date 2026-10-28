@@ -38,6 +38,21 @@ def buildSubGraph(node, parent=None) -> Graph:
     return graph
 
 
+def readCompositing(filepath) -> Graph:
+    """
+    A Graph with the compositing of a project file (.mg / .mgt): the content of its compositing SubGraph for a
+    project of the compositing workspace, else its whole graph. The GraphInput / GraphOutput nodes are left out:
+    the compositing is imported in another subgraph, which has its own ports.
+    """
+    data = readGraphData(str(filepath))
+    data = {name: nodeData for name, nodeData in data.items()
+            if not (isinstance(nodeData, dict) and nodeData.get("nodeType") in ("GraphInput", "GraphOutput"))}
+    graph = Graph("importedCompositing")
+    graph._deserialize({GraphIO.Keys.Header: {GraphIO.Keys.FileVersion: GraphIO.__version__, GraphIO.Keys.Template: True},
+                        GraphIO.Keys.Graph: data})
+    return graph
+
+
 def _repairPorts(graphInput, node):
     """
     Give the inputs of a node running a subgraph, and the ports of its GraphInput, the description of the

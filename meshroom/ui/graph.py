@@ -867,6 +867,24 @@ class UIGraph(QObject):
         yOffset = self.layout.gridSpacing + self.layout.nodeHeight
         return self.push(commands.ImportProjectCommand(self._graph, localFile, position=position, yOffset=yOffset))
 
+    @Slot(QUrl, result="QVariantList")
+    def importCompositing(self, filepath):
+        """
+        Import the compositing of a project (.mg / .mgt), with its chapters and backdrops, in the compositing
+        shown: the content of its compositing SubGraph for a project of the compositing workspace, else its graph.
+        """
+        localFile = filepath.toLocalFile() or filepath.toString() if isinstance(filepath, QUrl) else filepath
+        if self.rootGraph.workspaceMode == "compositing":
+            self.ensureCompositingSubGraph()
+        yOffset = self.layout.gridSpacing + self.layout.nodeHeight
+        try:
+            return self.push(commands.ImportProjectCommand(self._graph, localFile, yOffset=yOffset, compositing=True))
+        except Exception as e:
+            logging.error(f"Cannot import the compositing of {localFile}: {e}")
+            if self.parent():
+                self.parent().showMessage(f"Cannot import the compositing: {e}", "error")
+            return []
+
     @Slot(QUrl)
     def saveAs(self, url):
         self._saveAs(url, extension=MESHROOM_PROJECT_EXTENSION)

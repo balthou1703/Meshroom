@@ -306,16 +306,23 @@ class ImportProjectCommand(GraphCommand):
     Handle the import of a project into a Graph.
     """
 
-    def __init__(self, graph: Graph, filepath: PathLike, position=None, yOffset=0, parent=None):
+    def __init__(self, graph: Graph, filepath: PathLike, position=None, yOffset=0, parent=None, compositing=False):
         super().__init__(graph, parent)
         self.filepath = filepath
+        # Import the compositing of the project (the content of its compositing SubGraph) rather than its graph
+        self.compositing = compositing
         self.importedNames = []
         self.position = position
         self.yOffset = yOffset
 
     def redoImpl(self):
-        importedNodes = self.graph.importGraphContentFromFile(self.filepath)
-        self.setText(f"Import Project ({len(importedNodes)} nodes)")
+        if self.compositing:
+            from meshroom.core.subgraph.editing import readCompositing
+            importedNodes = self.graph.importGraphContent(readCompositing(self.filepath))
+            self.setText(f"Import Compositing ({len(importedNodes)} nodes)")
+        else:
+            importedNodes = self.graph.importGraphContentFromFile(self.filepath)
+            self.setText(f"Import Project ({len(importedNodes)} nodes)")
 
         lowestY = 0
         for node in self.graph.nodes:

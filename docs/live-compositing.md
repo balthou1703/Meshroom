@@ -486,8 +486,15 @@ mode compositing) montre le compositing **dans un nœud SubGraph** : le premier 
 `compositing_1` est créé puis ouvert, avec le viewer et la timeline. Un projet qui a déjà des nœuds de compositing
 dans son propre graphe (fait avant) reste tel quel. Le mode compositing et la plage de la timeline sont ceux du
 projet (header du graphe racine), aussi à l'intérieur d'un sous-graph ; le viewer évalue les nœuds du graphe
-affiché. Le template « compositing » contient `compositing_1` (Read → Grade) et le Write à l'extérieur
+affiché. Le template « compositing » ne contient que `compositing_1` : Read → Grade → Write **à l'intérieur**, et
+le port de sortie du SubGraph est un `File`, le chemin écrit par le Write. Calculer le SubGraph exécute le Write
+dans sa tâche (toutes ses frames ; pour découper en tâches, mettre le SubGraph en boucle de frames)
 (`meshroom/core/subgraph/editing.py` : `compositingSubGraphs`, `UIGraph.ensureCompositingSubGraph`).
+
+File > Import Compositing... ajoute au compositing affiché celui d'un projet (`.mg` / `.mgt`) : le contenu de son
+SubGraph de compositing pour un projet en mode compositing, sinon tout son graphe, avec chapitres et backdrops,
+sans ses GraphInput / GraphOutput (`editing.readCompositing`, `UIGraph.importCompositing`, annulable). Le champ
+Template d'un SubGraph n'est utilisé que si le sous-graph n'est pas embarqué (« Embedded Subgraph » vide).
 
 ### 4.13 3D : flux caméra, géométrie et matrice
 
