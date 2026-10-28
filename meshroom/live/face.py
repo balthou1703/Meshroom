@@ -269,18 +269,19 @@ def faceRoll(landmarks: np.ndarray, width: int, height: int) -> float:
 
 
 def _exposed(crop: np.ndarray) -> np.ndarray:
-    """ A dark crop brightened for the landmarker (trained on well exposed photos): its median brought to a middle
-    gray, at most 8 times (noise); the highlights (a bright sky around a face in the shade) do not prevent it. """
+    """ A dark crop brightened for the landmarker (trained on well exposed photos): the highlights of its middle (where
+    the face is: a bright sky at its border does not count) brought near white, at most 8 times (noise). """
     if not crop.size:
         return crop
-    luminance = crop.max(axis=2)
+    height, width = crop.shape[:2]
+    middle = crop[height // 5:height - height // 5, width // 5:width - width // 5]
+    luminance = (middle if middle.size else crop).max(axis=2)
     # Not the black of a mask
     lit = luminance[luminance > 1e-4]
-    median = float(np.median(lit)) if lit.size else 1.0
-    gain = min(8.0, 0.4 / max(median, 1e-6))
-    if gain <= 1.05:
+    level = float(np.percentile(lit, 99.0)) if lit.size else 1.0
+    if level >= 0.6:
         return crop
-    return np.clip(crop * gain, 0.0, 1.0)
+    return np.clip(crop * min(8.0, 0.9 / max(level, 1e-6)), 0.0, 1.0)
 
 
 def _detectIn(detector, rgb: np.ndarray, region, timestampMs: int, turns: int = 0):
@@ -312,6 +313,9 @@ def _detectUpright(detector, rgb: np.ndarray, region, timestampMs: int, roll: Op
     lying on its side poorly.
     """
     height, width = rgb.shape[:2]
+    if not getattr(detector, "turnLying", True):
+        # Turned off on the detector ("Detect Lying Faces" of the FaceTracker): straight only
+        return _detectIn(detector, rgb, region, timestampMs)
     first = int(round(roll / 90.0)) % 4 if roll is not None else 0
     tried, best = set(), (None, {})
     for turns in ([first, 0, 1, 3, 2] if allTurns else [first]):
@@ -898,20 +902,21 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         # The pins weigh together as much as the visible landmarks
         pinWeight = max(20.0, float(weights.sum()) / len(locations)) if locations else 20.0
         pinArgument = (locations, pinPixels) if locations else None
-        # First the head pose alone (rotation, position), from the rigid parts: the landmarks and the pins weighted by
-        # how rigid their place is (a pin on the forehead orients the head, one on a lip corner barely); the rig then
-        # explains what is left (the expression), the pose kept
-        rigidity = 1.0 - rig.mobility
         triangles = mesh.triangles()
-        pinRigidity = np.array([max(0.01, float(w @ rigidity[triangles[t]])) ** 2 for t, w in locations])
-        cameraToFace, _, _ = faceRig.fitRig(
-            rig, pixels, weights * np.clip(rigidity[:count], 0.05, 1.0), width, height, focal, cameraToFace,
-            pins=pinArgument, triangles=triangles, prior=prior, stiffness=max(float(stiffness), 1e-4),
-            pinWeight=pinWeight * pinRigidity if locations else pinWeight, solve="pose")
+        if locations:
+            # With pins: first the head pose alone (rotation, position), from the rigid parts: the landmarks and the
+            # pins weighted by how rigid their place is (a pin on the forehead orients the head, one on a lip corner
+            # barely); the rig then explains what is left (the expression), the pose kept
+            rigidity = 1.0 - rig.mobility
+            pinRigidity = np.array([max(0.01, float(w @ rigidity[triangles[t]])) ** 2 for t, w in locations])
+            cameraToFace, _, _ = faceRig.fitRig(
+                rig, pixels, weights * np.clip(rigidity[:count], 0.05, 1.0), width, height, focal, cameraToFace,
+                pins=pinArgument, triangles=triangles, prior=prior, stiffness=max(float(stiffness), 1e-4),
+                pinWeight=pinWeight * pinRigidity, solve="pose")
         cameraToFace, params, local = faceRig.fitRig(
             rig, pixels, weights, width, height, focal, cameraToFace, pins=pinArgument, triangles=triangles,
             prior=prior, stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight, pinWeight=pinWeight,
-            solve="rig")
+            solve="rig" if locations else "all")
         if report is not None:
             report["rigParams"] = params
         head = camera.matrix @ np.linalg.inv(cameraToFace)

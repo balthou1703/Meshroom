@@ -700,15 +700,16 @@ ferme pas au-delà du repos) et son coût (nez ×4, joues ×2 : leurs points son
 sont dures (plus fortes que les pins), et si des contrôles tirés l'un contre l'autre retournent des triangles,
 l'expression est atténuée jusqu'à ce qu'aucun ne le soit (`unfoldedFraction`). Le warp des pins exacts s'arrête de
 même avant de replier le visage : un pin trop loin de ce que le visage peut faire n'est alors pas exact.
-Ajustement en deux temps (`solveFace`, modèle `rig`, `fitRig(solve="pose" / "rig")`) : d'abord la pose seule
+Avec des pins à la frame, ajustement en deux temps (`solveFace`, modèle `rig`, `fitRig(solve="pose" / "rig")`) ;
+sans pin, pose et rig ensemble : d'abord la pose seule
 (rotation, position), avec les points et les pins pondérés par la rigidité de leur place (`1 - mobility`, au carré
 pour les pins : un pin sur le front ou la tempe oriente la tête, un pin sur un coin de lèvre presque pas) ; puis le
 rig seul, la pose gardée, explique le reste (l'expression). Nez et narines : 1,5 % de la largeur du visage, coût ×8.
 
 Détection : un visage couché (roll de plus de 45°) est cherché dans le crop tourné d'un quart ou d'un demi-tour
-(`_detectUpright` : d'abord selon le roll du visage de la frame précédente, `faceRoll`), les points revenant dans
-l'image ; un crop sombre est éclairci d'après sa médiane (×8 au plus, `_exposed`) : un ciel clair autour d'un visage
-à l'ombre ne l'empêche plus.
+(`_detectUpright` : d'abord selon le roll du visage de la frame précédente, `faceRoll` ; « Detect Lying Faces »
+pour le couper), les points revenant dans l'image ; un crop sombre est éclairci d'après les hautes lumières de son
+milieu (×8 au plus, `_exposed`) : un ciel clair au bord ne l'empêche plus.
 
 **FaceBuilder** (Comp 3D, `FaceNodes.py`, `face.buildShape`) : la tête d'un acteur à partir de photos, comme KeenTools
 FaceBuilder. Entrées « View 1 » à « View 4 » : chacune une photo ou une séquence (chaque frame une vue, « Max

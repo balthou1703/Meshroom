@@ -236,7 +236,7 @@ def test_mediapipeImportedWithoutMatplotlib(monkeypatch, tmp_path):
 def test_maskLimitsTheSearchAndHidesLandmarks():
     from meshroom.live import ImageBuffer
     width, height = 1200, 400
-    rgba = np.full((height, width, 4), 0.01, np.float32)
+    rgba = np.full((height, width, 4), 0.001, np.float32)
     rgba[:, :, 3] = 1.0
     # Two "faces": the left one masked out, the right one half masked
     rgba[100:200, 100:200, :3] = 0.5

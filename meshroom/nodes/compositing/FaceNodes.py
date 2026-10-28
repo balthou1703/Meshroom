@@ -67,6 +67,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.FloatParam(name="minConfidence", label="Min Confidence", value=0.5, range=(0.1, 0.95, 0.05),
                         invalidate=False,
                         description="A face is found (and followed) when MediaPipe is at least this confident."),
+        desc.BoolParam(name="detectLying", label="Detect Lying Faces", value=True, invalidate=False,
+                       description="A face lying on its side (turned more than 45 degrees in the image) is searched in "
+                                   "the image turned by a quarter or half turn, so that MediaPipe sees it upright. Off: "
+                                   "the image as it is."),
         desc.ChoiceParam(name="exportTracks", label="Tracks", value="features", values=["features", "all", "none"],
                          invalidate=False,
                          description="Landmarks given as tracks by 'Track Face': the features (lips, eyes, eyebrows, "
@@ -586,6 +590,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 detector = face.landmarker(context.value("minConfidence"))
             except face.FaceUnavailable as e:
                 raise RuntimeError(f"Track Face: {e}") from e
+            detector.turnLying = bool(context.values.get("detectLying", True))
         keyframes = self.keyframes(context)
         flowMethod = "raft" if context.value("flowMethod") == "raft" else "lucasKanade"
         useGpu = bool(context.value("useGpu")) if "useGpu" in context.values else True

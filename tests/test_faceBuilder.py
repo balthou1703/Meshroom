@@ -234,6 +234,7 @@ def test_lyingFaceIsDetectedUpright():
 
 def test_darkFaceUnderBrightSkyIsBrightened():
     crop = np.full((100, 100, 3), 0.05, dtype=np.float32)
-    crop[:10] = 1.0  # A bright sky above
+    crop[40:60, 40:60] = 0.2  # The face, in the shade
+    crop[:10] = 1.0  # A bright sky at the border
     exposed = face._exposed(crop)
-    assert 0.3 < exposed[50, 50, 0] < 0.5
+    assert 0.8 < exposed[50, 50, 0] <= 0.91
