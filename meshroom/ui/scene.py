@@ -475,9 +475,30 @@ class Scene(UIGraph):
         # Lower the input and the dictionary keys to make sure that all input types can be found:
         # - correct pipeline name but the case does not match (e.g. panoramaHDR instead of panoramaHdr)
         # - lowercase pipeline name given through the "New Pipeline" menu
-        loweredPipelineTemplates = {k.lower(): v for k, v in meshroom.core.pipelineTemplates.items()}
-        filepath = loweredPipelineTemplates.get(p.lower(), p)
-        return self._loadWithErrorReport(self.initFromTemplate, filepath)
+        filepath = self._templatePath(p)
+        if filepath is None and p.lower() == "compositing":
+            # No template (e.g. a plugin folder without it): an empty project in the compositing workspace, with its
+            # compositing subgraph
+            ok = self._loadWithErrorReport(self.initFromTemplate, "")
+            self.setWorkspaceMode("compositing")
+            return ok
+        return self._loadWithErrorReport(self.initFromTemplate, filepath if filepath is not None else p)
+
+    @staticmethod
+    def _templatePath(name: str) -> Optional[str]:
+        """
+        The file of a pipeline template by name (any case), None if there is none. The templates of the plugins (e.g.
+        "compositing", from meshroom/nodes/compositing) are looked up again when it is not known yet.
+        """
+        if not name or os.path.isfile(name):
+            return name
+        for attempt in range(2):
+            lowered = {k.lower(): v for k, v in meshroom.core.pipelineTemplates.items()}
+            if name.lower() in lowered:
+                return lowered[name.lower()]
+            if attempt == 0:
+                meshroom.core.initPipelines()
+        return None
 
     def _initFromTemplateWithOutputNodes(self, filepath: str) -> None:
         self.initFromTemplate(filepath, keepOutputNodes=True)
@@ -487,9 +508,8 @@ class Scene(UIGraph):
     def newWithOutputNodes(self, pipeline: Optional[str] = None) -> bool:
         """ Create a new pipeline with all the output nodes included if the provided template has any. """
         p = pipeline if pipeline is not None else self._defaultPipeline
-        loweredPipelineTemplates = {k.lower(): v for k, v in meshroom.core.pipelineTemplates.items()}
-        filepath = loweredPipelineTemplates.get(p.lower(), p)
-        return self._loadWithErrorReport(self._initFromTemplateWithOutputNodes, filepath)
+        filepath = self._templatePath(p)
+        return self._loadWithErrorReport(self._initFromTemplateWithOutputNodes, filepath if filepath is not None else p)
 
     @Slot(result=bool)
     @Slot(str, result=bool)

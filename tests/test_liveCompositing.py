@@ -2850,3 +2850,11 @@ def test_curvePointInterpolations():
     # Stored: the smooth points without mode; an unknown mode is smooth
     assert curves.sortedPoints([[1, 1, "linear"], [0, 0, "smooth"], [2, 2, "bogus"]]) == [[0, 0], [1, 1, "linear"], [2, 2]]
     assert curves.isIdentity([[0, 0], [1, 1, "linear"]]) and not curves.isIdentity([[0, 0, "constant"], [1, 1]])
+
+
+def test_compositingTemplateIsRegistered():
+    # "New Compositing" opens the "compositing" template of the compositing plugin (meshroom/nodes/compositing)
+    import meshroom.core
+    meshroom.core.initPipelines()
+    path = {k.lower(): v for k, v in meshroom.core.pipelineTemplates.items()}.get("compositing")
+    assert path and os.path.isfile(path) and path.endswith("compositing.mgt")

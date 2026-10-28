@@ -259,6 +259,8 @@ class MeshroomApp(QApplication):
         meshroom.core.initSubmitters()
         meshroom.core.initPlugins()
         meshroom.core.initNodes()
+        # Again: the templates of the plugins just loaded (e.g. "compositing")
+        meshroom.core.initPipelines()
 
         # Initialize the list of recent project files
         self._recentProjectFiles = self._getRecentProjectFilesFromSettings()
