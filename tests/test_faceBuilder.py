@@ -173,3 +173,28 @@ def test_rigidHeadFollowKeepsTheSkull():
     back = head.vertices[:, 2] < -8.0
     a, b = head.vertices[back], result[back]
     np.testing.assert_allclose(np.linalg.norm(a - a.mean(0), axis=1), np.linalg.norm(b - b.mean(0), axis=1), atol=1e-6)
+
+
+def test_rigDoesNotFoldTheFace():
+    """ Wrong landmarks and pins far off around the nose and the mouth (a profile, an occlusion, pins misplaced): the
+    rig stays within what a face can do and the mesh never folds, exact pins or not. """
+    from meshroom.live import faceRig
+    base = face.canonicalFace()
+    width, height = 1000, 800
+    camera = face.viewCamera(50.0, width, height)
+    head = scene3d.composeTRS((0.0, -1.0, -45.0), (5.0, 55.0, 80.0))
+    pixels, _, _ = camera.project(scene3d.transformPoints(head, base.vertices), width, height)
+    rng = np.random.default_rng(3)
+    near = np.linalg.norm(base.vertices - base.vertices[faceRig.LANDMARK["noseTip"]], axis=1) < 4.0
+    pixels[near] += rng.normal(0, 25.0, (int(near.sum()), 2))
+    pinned = [1, 129, 358, 13, 14, 61]
+    pins = (base.vertices[pinned], pixels[pinned] + rng.normal(0, 40.0, (len(pinned), 2)))
+    reference = faceRig.triangleNormals(base.vertices, base.triangles())
+    for exactPins in (False, True):
+        report = {}
+        geo, headMatrix, _, _ = face.solveFace(base, pixels, camera, width, height, model="rig", stiffness=0.3,
+                                               pins=pins, exactPins=exactPins, report=report)
+        local = scene3d.transformPoints(np.linalg.inv(headMatrix), geo.vertices)
+        assert (faceRig.triangleNormals(local, base.triangles()) * reference).sum(1).min() > 0.0
+        params = report["rigParams"]
+        assert faceRig.JAW_LIMITS[0][0] - 1e-9 <= params[-2] <= faceRig.JAW_LIMITS[0][1] + 1e-9

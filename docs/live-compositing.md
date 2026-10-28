@@ -694,6 +694,12 @@ par défaut) : après le rig, un warp local rend chaque pin exact, mais seulemen
 (`FaceRig.mobility` : bouche, mâchoire, paupières, sourcils, joues, bout du nez) ; un pin sur une partie rigide
 (front, arête du nez, tempes, côtés de la tête) oriente la tête sans rien déformer. Désactivé : les pins orientent la
 tête et bougent les contrôles du rig, rien d'autre.
+Le rig ne replie jamais le maillage : chaque contrôle a sa limite (`faceRig.CONTROL_LIMITS`, en largeurs de visage :
+nez et narines 2,5 %, joues et paupières 5 %, sourcils 8 %, lèvres 12 %, coins de la bouche 15 % ; la mâchoire ne se
+ferme pas au-delà du repos) et son coût (nez ×4, joues ×2 : leurs points sont souvent faux de profil), les limites
+sont dures (plus fortes que les pins), et si des contrôles tirés l'un contre l'autre retournent des triangles,
+l'expression est atténuée jusqu'à ce qu'aucun ne le soit (`unfoldedFraction`). Le warp des pins exacts s'arrête de
+même avant de replier le visage : un pin trop loin de ce que le visage peut faire n'est alors pas exact.
 
 **FaceBuilder** (Comp 3D, `FaceNodes.py`, `face.buildShape`) : la tête d'un acteur à partir de photos, comme KeenTools
 FaceBuilder. Entrées « View 1 » à « View 4 » : chacune une photo ou une séquence (chaque frame une vue, « Max

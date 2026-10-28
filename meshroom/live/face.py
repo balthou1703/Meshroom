@@ -842,7 +842,8 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
             # smooth warp around each pin, exact at the pins (as the pins of KeenTools), on what the rig moves only
             view = np.linalg.inv(cameraToFace)
             inCamera = _followPins(local @ view[:3, :3].T + view[:3, 3], mesh, locations, pinPixels, width, height,
-                                   focal, pinRadius, mobility=rig.mobility)
+                                   focal, pinRadius, mobility=rig.mobility,
+                                   reference=mesh.vertices @ view[:3, :3].T + view[:3, 3])
             world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
         else:
             world = local @ head[:3, :3].T + head[:3, 3]
@@ -927,12 +928,15 @@ def regularizedShifts(mesh: scene3d.GeoData, shifts: np.ndarray, weights: np.nda
 
 
 def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixels: np.ndarray, width: int, height: int,
-                focal: float, radius: float, mobility: Optional[np.ndarray] = None) -> np.ndarray:
+                focal: float, radius: float, mobility: Optional[np.ndarray] = None,
+                reference: Optional[np.ndarray] = None) -> np.ndarray:
     """
     The face (vertices in camera space) moved in the image, each vertex at its depth, so that the pins go through
     their positions: their errors interpolated over the neutral face by gaussians of `radius` (exact at the pins).
     `mobility` (n,) in [0, 1]: how much each vertex may move (0: a rigid part, not warped); the pins on parts that
-    cannot move (less than 0.2) are left out (they only placed the head).
+    cannot move (less than 0.2) are left out (they only placed the head). The warp stops short of folding the mesh:
+    no triangle turned over from its orientation in `reference` (the rest face in camera space; `inCamera` by
+    default).
     """
     def project(points):
         z = np.where(points[:, 2] < -1e-9, -points[:, 2], 1e-9)
@@ -966,8 +970,17 @@ def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixel
         shift = vertexKernel @ weights
         n = min(count, len(shift))
         xy, depth = project(moved[:n])
-        xy = xy + shift[:n]
-        moved[:n] = np.c_[(xy[:, 0] - width / 2.0) / focal, (xy[:, 1] - height / 2.0) / focal, -np.ones(n)] * depth[:, None]
+        before = moved.copy()
+
+        def warped(t, before=before, xy=xy, depth=depth, shift=shift, n=n):
+            result = before.copy()
+            target = xy + t * shift[:n]
+            result[:n] = np.c_[(target[:, 0] - width / 2.0) / focal, (target[:, 1] - height / 2.0) / focal,
+                               -np.ones(n)] * depth[:, None]
+            return result
+        # Not so far that the mesh folds (a pin far from where the face can go): the pin is then not exact
+        from .faceRig import unfoldedFraction
+        moved = warped(unfoldedFraction(warped, inCamera if reference is None else reference, triangles))
     return moved
 
 

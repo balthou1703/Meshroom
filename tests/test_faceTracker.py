@@ -279,12 +279,23 @@ def test_pinsPullTheFaceNonRigid():
     np.testing.assert_allclose(xy[far], pixels[far], atol=0.3)
     # A pin on the surface between vertices goes through its position too
     point = FACE.vertices[FACE.triangles()[100]].mean(axis=0)
-    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True,
-                                  pins=(point[None], np.array([[300.0, 200.0]])), pinRadius=3.0)
     (triangle, weights), = face.pinLocations(FACE, point[None])
+    free, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True)
+    start, _, _ = CAMERA.project((free.vertices[FACE.triangles()[triangle]].T @ weights)[None], W, H)
+    target = start[0] + [12.0, -8.0]
+    geo, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True,
+                                  pins=(point[None], target[None]), pinRadius=3.0)
     onFace = geo.vertices[FACE.triangles()[triangle]].T @ weights
     xy, _, _ = CAMERA.project(onFace[None], W, H)
-    np.testing.assert_allclose(xy[0], [300.0, 200.0], atol=1.0)
+    np.testing.assert_allclose(xy[0], target, atol=1.0)
+    # A pin too far for the face (a smooth warp would fold it): the face goes toward it without folding
+    from meshroom.live import faceRig
+    geo, head, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, rigid=RIGID, deform=True,
+                                     pins=(point[None], np.array([[start[0][0] - 80.0, start[0][1] + 20.0]])),
+                                     pinRadius=3.0)
+    local = scene3d.transformPoints(np.linalg.inv(head), geo.vertices)
+    reference = faceRig.triangleNormals(FACE.vertices, FACE.triangles())
+    assert (faceRig.triangleNormals(local, FACE.triangles()) * reference).sum(1).min() > 0.0
 
 
 def test_trackRangeLimitsTheFrames():
@@ -503,6 +514,9 @@ def test_rigFitsExpressionsAndKeepsRigidPartsRigid():
     rig = faceRig.FaceRig(FACE.vertices)
     rng = np.random.default_rng(5)
     params = rng.normal(0, 0.3, rig.paramCount)
+    # Within what each control can do (the nose and the cheeks barely move)
+    limits = np.repeat([faceRig.controlLimit(name)[0] / 0.1 for name, *_ in faceRig.CONTROLS], 3)
+    params[:-2] = np.clip(params[:-2], -0.8 * limits, 0.8 * limits)
     params[-2:] = [0.12, 0.03]  # The jaw open, a little sideways
     expression = rig.deform(params)
     world = scene3d.transformPoints(headAt(2), expression)

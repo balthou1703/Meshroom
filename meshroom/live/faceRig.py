@@ -48,9 +48,26 @@ JAW_PARAMS = 2
 # Soft limits of the parameters: a translation of a control beyond 2 units (a fifth of the face width), the jaw beyond
 # these angles (radians), cost a lot (a face cannot do more)
 TRANSLATION_LIMIT = 2.0
-JAW_LIMITS = ((-0.15, 0.6), (-0.25, 0.25))
+JAW_LIMITS = ((-0.05, 0.6), (-0.15, 0.15))
+# Per control: (soft limit of its translation, in face widths; cost of moving it, times the stiffness). The nose and the
+# cheeks barely move (their landmarks are often wrong on a profile: they would fold the mesh), the lips and the mouth
+# corners move the most
+CONTROL_LIMITS = {
+    "brow": (0.08, 1.0), "lid": (0.05, 1.0), "mouth": (0.15, 1.0), "lip": (0.12, 1.0),
+    "cheek": (0.05, 2.0), "nose": (0.025, 4.0), "nostril": (0.025, 4.0),
+}
+
+
+def controlLimit(name: str) -> Tuple[float, float]:
+    """ (soft limit in face widths, cost factor) of a control by its name. """
+    for prefix in ("nostril", "nose", "brow", "lid", "mouth", "lip", "cheek"):
+        if name.startswith(prefix):
+            return CONTROL_LIMITS[prefix]
+    return (0.2, 1.0)
 # The moves of the controls toward / away from the camera are poorly seen: they cost more
 DEPTH_COST = 3.0
+# Cost of a parameter beyond its limit, in pixels per unit
+LIMIT_STRENGTH = 2000.0
 
 
 def _smoothstep(x):
@@ -179,9 +196,13 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
     regularization = np.sqrt(stiffness) * 10.0
     # The cost of each parameter (the translations along the forward axis of the face cost more)
     forward = np.abs(rig.axes[2])
-    costs = np.r_[np.tile(1.0 + (DEPTH_COST - 1.0) * forward, controls), np.ones(JAW_PARAMS)]
-    low = np.r_[np.full(3 * controls, -TRANSLATION_LIMIT), [limit[0] for limit in JAW_LIMITS]]
-    high = np.r_[np.full(3 * controls, TRANSLATION_LIMIT), [limit[1] for limit in JAW_LIMITS]]
+    # Each control: its own limit (in parameter units: a tenth of the face width) and cost
+    limits = np.array([controlLimit(name) for name, *_ in CONTROLS[:controls]])
+    perControl = np.repeat(limits[:, 0] / 0.1, 3)
+    costs = np.r_[np.tile(1.0 + (DEPTH_COST - 1.0) * forward, controls) * np.repeat(np.sqrt(limits[:, 1]), 3),
+                  np.ones(JAW_PARAMS)]
+    low = np.r_[-perControl, [limit[0] for limit in JAW_LIMITS]]
+    high = np.r_[perControl, [limit[1] for limit in JAW_LIMITS]]
     normals = _vertexNormals(rig.rest, triangles) if triangles is not None else None
     priorScale = np.sqrt(priorWeight) * 10.0 if priorWeight > 0 else 0.0
 
@@ -201,9 +222,9 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
             onFace = np.array([projected[triangles[t]].T @ w for t, w in pinLocations])
             parts.append(((onFace - pinTargets) * np.sqrt(pinWeight)).ravel())
         parts.append(regularization * costs * params)
-        # Soft limits: 100 pixels per unit beyond them
+        # Limits: 2000 pixels per unit beyond them (stronger than the pins: a face cannot do more)
         beyond = np.minimum(params - low, 0.0) + np.maximum(params - high, 0.0)
-        parts.append(100.0 * beyond)
+        parts.append(LIMIT_STRENGTH * beyond)
         if priorScale:
             parts.append(priorScale * (params - prior))
         residual = np.concatenate(parts)
@@ -238,7 +259,7 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         identity[:, 6:] = np.eye(len(params))
         rows.append(regularization * costs[:, None] * identity)
         outside = ((params < low) | (params > high)).astype(np.float64)
-        rows.append(100.0 * outside[:, None] * identity)
+        rows.append(LIMIT_STRENGTH * outside[:, None] * identity)
         if priorScale:
             rows.append(priorScale * identity)
         return residual, projected, np.concatenate(rows)
@@ -251,7 +272,8 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
             current, projected, jacobian = evaluate(rotation0, x, landmarkWeights, True)
             normal, gradient = jacobian.T @ jacobian, jacobian.T @ current
             improved = False
-            for _ in range(6):
+            # Up to a strong damping: a step across a limit (stiff) is retried shorter
+            for _ in range(12):
                 try:
                     delta = -np.linalg.solve(normal + damping * np.diag(np.diag(normal) + 1e-9), gradient)
                 except np.linalg.LinAlgError:
@@ -282,4 +304,39 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
             landmarkWeights = landmarkWeights * np.clip((facing[:count] + 0.05) / 0.2, 0.0, 1.0)
     rotation = rodrigues(x[:3]) @ rotation0
     matrix = scene3d.cameraMatrixFromCvPose(rotation, translation0 + x[3:6])
-    return matrix, x[6:], rig.deform(x[6:])
+    # Never beyond the limits, never folded (controls pulled against each other: the expression toned down until no
+    # triangle turns over)
+    params = np.clip(x[6:], low, high)
+    if triangles is not None:
+        params = params * unfoldedFraction(lambda t: rig.deform(params * t), rig.rest, triangles)
+    return matrix, params, rig.deform(params)
+
+
+def triangleNormals(vertices: np.ndarray, triangles: np.ndarray) -> np.ndarray:
+    normals = np.cross(vertices[triangles[:, 1]] - vertices[triangles[:, 0]], vertices[triangles[:, 2]] - vertices[triangles[:, 0]])
+    return normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+
+
+def unfoldedFraction(deformed, rest: np.ndarray, triangles: np.ndarray, steps: int = 8) -> float:
+    """
+    The largest fraction t in [0, 1] of a deformation (`deformed(t)`: the vertices) for which no triangle turns over
+    (or nearly: its normal more than ~80 degrees from its `rest` one), by bisection; 1 when the whole deformation is
+    fine. The triangles already turned at t = 0 are left out.
+    """
+    reference = triangleNormals(rest, triangles)
+    # The triangles already turned at t = 0 (e.g. by another step) are not counted
+    counted = (triangleNormals(deformed(0.0), triangles) * reference).sum(1) >= 0.15
+
+    def folded(t):
+        # Turned over, or nearly (more than ~80 degrees from its rest orientation)
+        return bool((((triangleNormals(deformed(t), triangles) * reference).sum(1) < 0.15) & counted).any())
+    if not folded(1.0):
+        return 1.0
+    low, high = 0.0, 1.0
+    for _ in range(steps):
+        middle = 0.5 * (low + high)
+        if folded(middle):
+            high = middle
+        else:
+            low = middle
+    return low
