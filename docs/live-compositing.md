@@ -704,11 +704,15 @@ ferme pas au-delà du repos) et son coût (nez ×4, joues ×2 : leurs points son
 sont dures (plus fortes que les pins), et si des contrôles tirés l'un contre l'autre retournent des triangles,
 l'expression est atténuée jusqu'à ce qu'aucun ne le soit (`unfoldedFraction`). Le warp des pins exacts s'arrête de
 même avant de replier le visage : un pin trop loin de ce que le visage peut faire n'est alors pas exact.
-Avec des pins à la frame, ajustement en deux temps (`solveFace`, modèle `rig`, `fitRig(solve="pose" / "rig")`) ;
-sans pin, pose et rig ensemble : d'abord la pose seule
-(rotation, position), avec les points et les pins pondérés par la rigidité de leur place (`1 - mobility`, au carré
-pour les pins : un pin sur le front ou la tempe oriente la tête, un pin sur un coin de lèvre presque pas) ; puis le
-rig seul, la pose gardée, explique le reste (l'expression). Nez et narines : 1,5 % de la largeur du visage, coût ×8.
+Pins rigides et pins d'expression (modèle `rig`) : un pin est rigide par défaut (cyan) : il ne fait que placer la
+tête (rotation, position) ; le bouton « visage souriant » du viewer fait des pins sélectionnés des pins d'expression
+(magenta, champ `"expression": true`) : ils déforment le visage (contrôles du rig, puis warp local avec « Exact
+Pins »). Sans pin, la pose et le rig sont ajustés ensemble. Avec des pins, MediaPipe dit l'expression et les pins
+disent où est la tête (`solveFace`) : l'expression est celle du visage ajusté sur les seuls points ; la pose est
+ensuite ajustée seule avec cette expression, à partir des pins rigides (ensemble autant que les points) et des points
+des parties rigides (points pondérés ×0,3 : la frame a des pins parce que MediaPipe s'y trompe) ; les pins
+d'expression bougent enfin le rig à partir de cette expression, la pose gardée. Un pin rigide déplacé fait donc
+tourner et bouger la tête sans rien déformer. Nez et narines : 1,5 % de la largeur du visage, coût ×8.
 
 Détection : un visage couché (roll de plus de 45°) est cherché dans le crop tourné d'un quart ou d'un demi-tour
 (`_detectUpright` : d'abord selon le roll du visage de la frame précédente, `faceRoll` ; « Detect Lying Faces »

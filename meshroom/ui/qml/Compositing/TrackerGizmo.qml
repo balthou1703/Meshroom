@@ -87,6 +87,8 @@ Item {
     readonly property bool tracking: !!live && live.trackingProgress >= 0
     readonly property color trackColor: "#6FD0E0"
     readonly property color selectedColor: "#F5C26B"
+    // FaceTracker: an expression pin (it deforms the face; the others only place the head)
+    readonly property color expressionColor: "#E07AD0"
 
     visible: !!node && formatHeight > 0
 
@@ -220,7 +222,8 @@ Item {
             ctx.reset()
             root.tracks.forEach(function(track) {
                 var selected = root.isSelected(track.name)
-                var color = track.enabled === false ? "#808080" : (selected ? root.selectedColor : root.trackColor)
+                var color = track.enabled === false ? "#808080" : (selected ? root.selectedColor :
+                            (root.faceMode && track.expression ? root.expressionColor : root.trackColor))
                 ctx.strokeStyle = color
                 ctx.fillStyle = color
                 // Path (colored by the match scores with "Error")
@@ -421,6 +424,25 @@ Item {
     }
 
     function selectAll() { selectedNames = tracks.map(function(t) { return t.name }) }
+
+    // FaceTracker: the selected pins become expression pins (they deform the face), or rigid again when they all are
+    readonly property bool selectionIsExpression: {
+        var selected = rawTracks.filter(function(t) { return root.isSelected(t.name) })
+        return selected.length > 0 && selected.every(function(t) { return !!t.expression })
+    }
+    function toggleExpressionOnSelection() {
+        var expression = !selectionIsExpression
+        var newTracks = copy(rawTracks)
+        newTracks.forEach(function(t) {
+            if (root.isSelected(t.name)) {
+                if (expression)
+                    t.expression = true
+                else
+                    delete t.expression
+            }
+        })
+        commit(newTracks)
+    }
 
     HoverHandler { id: trackerHover }
     Shortcut {
@@ -677,6 +699,17 @@ Item {
             }
             // FaceTracker: the face itself (Track With: MediaPipe, flow, or both), backward / forward, image by image
             Rectangle { visible: root.faceMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
+            MaterialToolButton {
+                visible: root.faceMode
+                font.pointSize: 16
+                text: MaterialIcons.mood
+                checkable: true
+                checked: root.selectionIsExpression
+                enabled: root.selectedNames.length > 0
+                onClicked: root.toggleExpressionOnSelection()
+                ToolTip.text: "Expression pins: the selected pins deform the face (magenta: mouth, eyelids...); off: " +
+                              "rigid pins (cyan, the default), they only place the head (rotation, position)"
+            }
             Label { visible: root.faceMode; text: MaterialIcons.face; font.family: MaterialIcons.fontFamily; font.pointSize: 14 }
             Repeater {
                 model: root.faceMode ? [["trackFaceBackward", MaterialIcons.skip_previous, "Track the face backward, to the previous keyframe or the start of the track range"],

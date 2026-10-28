@@ -105,7 +105,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         *trackRangeParams(),
         desc.StringParam(name="pins", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position and its point on the neutral face "
-                                     "(\"point\": [x, y, z]). Edited in the viewer."),
+                                     "(\"point\": [x, y, z]); \"expression\": true for an expression pin. Edited in "
+                                     "the viewer: a rigid pin (cyan, the default) only places the head (rotation, "
+                                     "position); an expression pin (magenta, toggled in the viewer) deforms the face "
+                                     "(rig model: its controls, then a local warp with 'Exact Pins')."),
         desc.ChoiceParam(name="deformModel", label="Non Rigid Model", value="rig", values=["rig", "surface"],
                          description="rig: the face moved by a rig (jaw, brows, eyelids, lips, mouth corners, cheeks), "
                                      "as the head model of KeenTools FaceTracker: the rigid parts (forehead, skull, nose "
@@ -286,6 +289,20 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             positions.append((float(key[0]), float(key[1])))
         return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
 
+    @staticmethod
+    def isExpressionPin(pin) -> bool:
+        """ An expression pin deforms the face (mouth, eyelids...); a rigid pin (the default) only places the head. """
+        return bool(pin.get("expression", False))
+
+    @classmethod
+    def solvePinsAt(cls, pins, frame):
+        """ The pins of a frame for face.solveFace: (points, positions, expression flags), or None without pins. """
+        keyed = [pin for pin in pins if int(frame) == frame and (pin.get("keys") or {}).get(str(int(frame))) is not None]
+        points, positions = cls.pinsAt(keyed, frame)
+        if not len(points):
+            return None
+        return points, positions, np.array([cls.isExpressionPin(pin) for pin in keyed], dtype=bool)
+
     def pinProjections(self, ctx, cachedData) -> dict:
         """ {pin name: [x, y]}: where each pin is seen at the frame, on the fitted face (`cachedData(output)`: the cached
         output at the frame, or None), in the pixels of the plate of `ctx`. """
@@ -308,8 +325,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         from meshroom.live import face
         if not (ctx.value("showPinReach") and ctx.value("deform")):
             return None
-        # The pins of this frame (a keyframe): the others do not move the face here
-        points, _ = self.pinsAt(self.pins(ctx, info), ctx.frame)
+        # The expression pins of this frame (a keyframe): the others do not move the face here, the rigid ones never
+        pins = [pin for pin in self.pins(ctx, info) if self.isExpressionPin(pin) or ctx.value("deformModel") != "rig"]
+        points, _ = self.pinsAt(pins, ctx.frame)
         if not len(points):
             return None
         mesh = self.mesh(ctx)
@@ -381,16 +399,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         landmarks = face.landmarksAt(faces, frame, ctx.value("smoothing"))
         pixels = face.toPixels(landmarks, info.width, info.height)
         tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
-        pinPoints, pinPositions = self.pinsAt(self.pins(ctx, info), frame)
+        solvePins = self.solvePinsAt(self.pins(ctx, info), frame)
         neutral = self.baseMesh(ctx, frame)
-        if len(pinPoints) and rest is not neutral:
+        if solvePins is not None and rest is not neutral:
             # The pins are points of the base face mesh: the same places on the rest shape
-            pinPoints = face._onSurface(rest.vertices, rest.triangles(), face.pinLocations(neutral, pinPoints))
+            solvePins = (face._onSurface(rest.vertices, rest.triangles(), face.pinLocations(neutral, solvePins[0])),
+                         solvePins[1], solvePins[2])
         camera = self.camera(ctx, frame)
         geo, head, _, _ = face.solveFace(rest, pixels, camera, info.width, info.height, initial=initial,
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
-                                         hidden=tracked.get("hidden") or (),
-                                         pins=(pinPoints, pinPositions) if len(pinPoints) else None,
+                                         hidden=tracked.get("hidden") or (), pins=solvePins,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
                                          model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"))
         inverse = np.linalg.inv(head)
@@ -678,11 +696,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         pins = self.pins(ctx, context.info)
         observations = []
         for f in chosen:
-            pinPoints, pinPositions = self.pinsAt(pins, f)
             observations.append({"pixels": face.toPixels(faces[f]["landmarks"], width, height),
                                  "hidden": faces[f].get("hidden") or [], "camera": self.camera(ctx, f),
-                                 "weight": 3.0 if f in keyframes else 1.0,
-                                 "pins": (pinPoints, pinPositions) if len(pinPoints) else None})
+                                 "weight": 3.0 if f in keyframes else 1.0, "pins": self.solvePinsAt(pins, f)})
         offsets = face.fitShape(base, observations, width, height, cancel=context.checkCancelled,
                                 progress=lambda done: context.progress(done, "Fit Shape"))
         return {"faceShape": face.dumpShape(offsets)}
@@ -745,10 +761,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         def regularize(frame, landmarks, hidden):
             camera = self.camera(ctx, frame)
             pixels = face.toPixels(landmarks, width, height)
-            pinPoints, pinPositions = self.pinsAt(pins, frame)
             geo, _, _, _ = face.solveFace(mesh, pixels, camera, width, height, rigid=face.RIGID_LANDMARKS,
                                           deform=deform, hidden=hidden, stiffness=stiffness,
-                                          pins=(pinPoints, pinPositions) if len(pinPoints) else None,
+                                          pins=self.solvePinsAt(pins, frame),
                                           pinRadius=ctx.value("pinRadius"), model=ctx.value("deformModel"),
                                           exactPins=ctx.value("exactPins"))
             xy, _, _ = camera.project(geo.vertices, width, height)

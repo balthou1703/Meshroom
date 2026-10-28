@@ -664,3 +664,22 @@ def test_exactPinOnTheMouthIsReached():
                                   pins=(FACE.vertices[[mobile]], target[None]), pinRadius=2.0)
     xy, _, _ = CAMERA.project(geo.vertices, W, H)
     assert np.hypot(*(xy[mobile] - target)) < 0.5
+
+
+def test_rigidAndExpressionPins():
+    from meshroom.live import faceRig
+    pixels = face.toPixels(landmarksAt(2), W, H)
+    corner = faceRig.LANDMARK["mouthR"]
+    target = pixels[corner] + [0.0, -12.0]
+    pin = (FACE.vertices[[corner]], target[None])
+    kwargs = dict(rigid=RIGID, model="rig", stiffness=0.3)
+    free, freeHead, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, **kwargs)
+    rigid, rigidHead, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, pins=pin + (np.array([False]),), **kwargs)
+    expression, _, _, _ = face.solveFace(FACE, pixels, CAMERA, W, H, pins=pin + (np.array([True]),), **kwargs)
+    # A rigid pin on the mouth corner does not move the mouth: its face (in face space) stays as without the pin
+    local = scene3d.transformPoints(np.linalg.inv(rigidHead), rigid.vertices)
+    freeLocal = scene3d.transformPoints(np.linalg.inv(freeHead), free.vertices)
+    assert np.abs(local[corner] - freeLocal[corner]).max() < 0.15
+    # An expression pin moves it onto the pin
+    xy, _, _ = CAMERA.project(expression.vertices, W, H)
+    assert np.hypot(*(xy[corner] - target)) < 0.5

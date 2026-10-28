@@ -27,6 +27,9 @@ from . import scene3d
 LANDMARKS = 478
 MESH_VERTICES = 468
 
+# The weight of the landmarks of a frame with pins (the pins are placed where MediaPipe is wrong)
+PINNED_LANDMARK_WEIGHT = 0.3
+
 # Landmarks that move little with the expressions: the head pose is solved with them
 RIGID_LANDMARKS = (1, 4, 5, 6, 8, 9, 10, 151, 168, 195, 197, 33, 133, 362, 263, 127, 356, 234, 454, 21, 251, 54, 284,
                    103, 332, 67, 297, 109, 338)
@@ -858,10 +861,14 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     neighboring vertices kept alike, `regularizedShifts`): a wrong landmark (drift, occlusion) is ignored, the hidden
     ones follow their neighbors, the mesh does not fold; 0: each vertex exactly on its landmark.
     `model` "rig": the face moved by its rig instead (faceRig.py: jaw, brows, lids, lips, cheeks; the rigid parts stay
-    rigid), the head pose refined with it; the pins orient the head (together they weigh as much as the landmarks)
-    and move the controls, then, with `exactPins`, what the rig cannot do is done by a local warp around them (exact
-    at the pins, over `pinRadius`) on the parts the rig moves only: a pin on a rigid part (forehead, nose bridge,
-    temples, the sides of the head) orients the head and deforms nothing; `stiffness` keeps the
+    rigid). Without pins, the head pose and the rig are fitted together. With pins, MediaPipe tells the expression
+    and the pins where the head is: the expression is that of the face fitted on the landmarks alone; the head pose is
+    then fitted alone with it, from the rigid pins and the landmarks of the rigid parts; the expression pins then move
+    the rig from that expression (the pose kept), then, with `exactPins`, what the rig cannot do is done by a local
+    warp around the expression pins (exact at the pins, over `pinRadius`) on the parts the rig moves only. `pins` may have a third element: for each
+    pin, whether it is an expression pin (it deforms the face) or a rigid one (it only places the head); without it,
+    a pin is an expression pin where the rig moves the face, a rigid one elsewhere. The landmarks of a frame with pins
+    weigh less (the pins are placed where MediaPipe is wrong); `stiffness` keeps the
     controls near the rest shape, `prior` / `priorWeight` near other parameters (e.g. the previous frame). `report`
     (a dict) receives the "rigParams".
 
@@ -885,46 +892,76 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     start = initial if initial is not None else _defaultStart(mesh)
     fitPoints, fitPixels = mesh.vertices[rigid], pixels[rigid]
     locations = []
+    expression = np.zeros(0, dtype=bool)
     if pins is not None and len(pins[0]):
         locations = pinLocations(mesh, pins[0])
         pinPoints = _onSurface(mesh.vertices, mesh.triangles(), locations)
         pinPixels = np.asarray(pins[1], dtype=np.float64).reshape(-1, 2)
-        # Placed by hand: together, as much as the rigid landmarks (they orient the head where MediaPipe is wrong)
-        repeat = max(3, int(np.ceil(len(rigid) / float(len(pinPoints)))))
-        fitPoints = np.r_[fitPoints, np.repeat(pinPoints, repeat, axis=0)]
-        fitPixels = np.r_[fitPixels, np.repeat(pinPixels, repeat, axis=0)]
+        if len(pins) > 2 and pins[2] is not None:
+            expression = np.asarray(pins[2], dtype=bool).reshape(-1)
+        elif deform and model == "rig":
+            # Not told: an expression pin where the rig moves the face
+            from . import faceRig
+            mobility = faceRig.rigOf(mesh.vertices).mobility
+            triangles = mesh.triangles()
+            expression = np.array([float(w @ mobility[triangles[t]]) >= 0.5 for t, w in locations], dtype=bool)
+        else:
+            expression = np.ones(len(locations), dtype=bool)
+        # Placed by hand: together, as much as the rigid landmarks (they orient the head where MediaPipe is wrong); the
+        # rigid pins only when there are some
+        placing = ~expression if (deform and model == "rig" and (~expression).any()) else np.ones(len(locations), bool)
+        repeat = max(3, int(np.ceil(len(rigid) / float(placing.sum()))))
+        fitPoints = np.r_[fitPoints, np.repeat(pinPoints[placing], repeat, axis=0)]
+        fitPixels = np.r_[fitPixels, np.repeat(pinPixels[placing], repeat, axis=0)]
     cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
     if deform and model == "rig":
         from . import faceRig
         weights = np.ones(count)
         weights[[i for i in hidden if i < count]] = 0.0
         rig = faceRig.rigOf(mesh.vertices)
-        # The pins weigh together as much as the visible landmarks
-        pinWeight = max(20.0, float(weights.sum()) / len(locations)) if locations else 20.0
-        pinArgument = (locations, pinPixels) if locations else None
         triangles = mesh.triangles()
-        if locations:
-            # With pins: first the head pose alone (rotation, position), from the rigid parts: the landmarks and the
-            # pins weighted by how rigid their place is (a pin on the forehead orients the head, one on a lip corner
-            # barely); the rig then explains what is left (the expression), the pose kept
+        rigidPins = [i for i in range(len(locations)) if not expression[i]]
+        expressionPins = [i for i in range(len(locations)) if expression[i]]
+
+        def pinSubset(indices):
+            return ([locations[i] for i in indices], pinPixels[indices]) if indices else None
+        stiff = max(float(stiffness), 1e-4)
+        if not locations:
+            cameraToFace, params, local = faceRig.fitRig(
+                rig, pixels, weights, width, height, focal, cameraToFace, triangles=triangles, prior=prior,
+                stiffness=stiff, priorWeight=priorWeight, solve="all")
+        else:
+            # The expression MediaPipe sees: the face fitted on its landmarks alone (its own pose)
+            _, expressionSeen, _ = faceRig.fitRig(
+                rig, pixels, weights, width, height, focal, cameraToFace, triangles=triangles, prior=prior,
+                stiffness=stiff, priorWeight=priorWeight, solve="all")
+            # The head pose alone (rotation, position), with that expression: the rigid pins (together as much as
+            # the landmarks: the pins are placed where MediaPipe is wrong) and the landmarks of the rigid parts
             rigidity = 1.0 - rig.mobility
-            pinRigidity = np.array([max(0.01, float(w @ rigidity[triangles[t]])) ** 2 for t, w in locations])
+            rigidWeights = weights * PINNED_LANDMARK_WEIGHT * np.clip(rigidity[:count], 0.05, 1.0)
             cameraToFace, _, _ = faceRig.fitRig(
-                rig, pixels, weights * np.clip(rigidity[:count], 0.05, 1.0), width, height, focal, cameraToFace,
-                pins=pinArgument, triangles=triangles, prior=prior, stiffness=max(float(stiffness), 1e-4),
-                pinWeight=pinWeight * pinRigidity, solve="pose")
-        cameraToFace, params, local = faceRig.fitRig(
-            rig, pixels, weights, width, height, focal, cameraToFace, pins=pinArgument, triangles=triangles,
-            prior=prior, stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight, pinWeight=pinWeight,
-            solve="rig" if locations else "all")
+                rig, pixels, rigidWeights, width, height, focal, cameraToFace, pins=pinSubset(rigidPins),
+                triangles=triangles, prior=expressionSeen, stiffness=stiff,
+                pinWeight=max(20.0, float(weights.sum()) / max(len(rigidPins), 1)), solve="pose")
+            if expressionPins:
+                # The expression pins change that expression (the pose kept): the rig moved from it toward them
+                cameraToFace, params, local = faceRig.fitRig(
+                    rig, pixels, np.zeros_like(weights), width, height, focal, cameraToFace,
+                    pins=pinSubset(expressionPins), triangles=triangles, prior=expressionSeen, stiffness=stiff,
+                    priorWeight=1.0, pinWeight=20.0, solve="rig")
+            else:
+                # Rigid pins only: the head placed by them, with the expression MediaPipe sees
+                params = expressionSeen
+                local = rig.deform(params)
         if report is not None:
             report["rigParams"] = params
         head = camera.matrix @ np.linalg.inv(cameraToFace)
-        if locations and exactPins:
-            # What the rig cannot do to reach the pins (a feature it has no control for, a stronger move): a local
-            # smooth warp around each pin, exact at the pins (as the pins of KeenTools), on what the rig moves only
+        if expressionPins and exactPins:
+            # What the rig cannot do to reach the expression pins (a feature it has no control for, a stronger move):
+            # a local smooth warp around each pin, exact at the pins (as the pins of KeenTools), on what the rig moves
             view = np.linalg.inv(cameraToFace)
-            inCamera = _followPins(local @ view[:3, :3].T + view[:3, 3], mesh, locations, pinPixels, width, height,
+            inCamera = _followPins(local @ view[:3, :3].T + view[:3, 3], mesh, [locations[i] for i in expressionPins],
+                                   pinPixels[expressionPins], width, height,
                                    focal, pinRadius, mobility=rig.mobility,
                                    reference=mesh.vertices @ view[:3, :3].T + view[:3, 3])
             world = inCamera @ camera.matrix[:3, :3].T + camera.matrix[:3, 3]
@@ -1140,7 +1177,7 @@ def fitShape(mesh: scene3d.GeoData, observations: List[dict], width: int, height
             pins = observation.get("pins")
             if pins is not None and len(pins[0]):
                 # The pins are points of the base mesh: the same places on the current shape
-                pins = (_onSurface(shape.vertices, shape.triangles(), pinLocations(mesh, pins[0])), pins[1])
+                pins = (_onSurface(shape.vertices, shape.triangles(), pinLocations(mesh, pins[0])),) + tuple(pins[1:])
             _, _, cameraToFace, _ = solveFace(shape, pixels, camera, width, height, rigid=RIGID_LANDMARKS, deform=True,
                                               hidden=observation.get("hidden") or (), model="rig", stiffness=1.0,
                                               pins=pins, report=report)
