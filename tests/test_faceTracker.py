@@ -20,6 +20,12 @@ if not pluginManager.isNodeDescRegistered("Grade"):
 W, H = 640, 480
 
 
+@pytest.fixture(autouse=True)
+def _uprightSyntheticFace(monkeypatch):
+    """ The synthetic face has no eyes: its landmarks 33 and 263 tell no roll (the crops are not turned). """
+    monkeypatch.setattr(face, "faceRoll", lambda landmarks, width, height: 0.0)
+
+
 def syntheticFace():
     """ A face-like surface with 468 vertices (18 x 26 grid, bulged toward +Z), in centimeters. """
     columns, rows = 18, 26

@@ -198,3 +198,42 @@ def test_rigDoesNotFoldTheFace():
         assert (faceRig.triangleNormals(local, base.triangles()) * reference).sum(1).min() > 0.0
         params = report["rigParams"]
         assert faceRig.JAW_LIMITS[0][0] - 1e-9 <= params[-2] <= faceRig.JAW_LIMITS[0][1] + 1e-9
+
+
+def test_lyingFaceIsDetectedUpright():
+    """ A face lying on its side: the crop is turned so that the landmarker sees it upright, the landmarks come back
+    in the image. """
+    width, height = 300, 200
+    rgb = np.zeros((height, width, 3), dtype=np.float32)
+    # The "face": a bright square with a mark on its top edge (upright when the mark is at the top of what is seen)
+    rgb[50:150, 100:200] = 0.5
+    rgb[50:60, 140:160] = 1.0
+    turnedRgb = np.rot90(rgb, -1)  # Lying: the mark on the right side
+
+    class UprightOnly:
+        """ Finds the face only when its mark is at the top; its landmarks: the mark (33 and 263 its ends). """
+        turns = []
+
+        def detect(self, image, timestampMs):
+            rows, columns = np.nonzero(image[:, :, 0] > 200)
+            if not len(rows) or (rows.max() - rows.min()) > (columns.max() - columns.min()):
+                return None, {}
+            h, w = image.shape[:2]
+            landmarks = np.zeros((478, 3))
+            landmarks[:, 0], landmarks[:, 1] = columns.mean() / w, rows.mean() / h
+            landmarks[33, 0], landmarks[263, 0] = columns.min() / w, columns.max() / w
+            return landmarks, {}
+    height2, width2 = turnedRgb.shape[:2]
+    found, _ = face._detectUpright(UprightOnly(), np.ascontiguousarray(turnedRgb), (0, 0, width2, height2), 0)
+    assert found is not None
+    # The mark of the lying face: rows 140-160 of the turned image, at its right (columns 140-150)
+    rows, columns = np.nonzero(turnedRgb[:, :, 0] > 0.9)
+    assert abs(found[0, 0] * width2 - columns.mean()) < 2.0 and abs(found[0, 1] * height2 - rows.mean()) < 2.0
+    assert abs(abs(face.faceRoll(found, width2, height2)) - 90.0) < 10.0
+
+
+def test_darkFaceUnderBrightSkyIsBrightened():
+    crop = np.full((100, 100, 3), 0.05, dtype=np.float32)
+    crop[:10] = 1.0  # A bright sky above
+    exposed = face._exposed(crop)
+    assert 0.3 < exposed[50, 50, 0] < 0.5

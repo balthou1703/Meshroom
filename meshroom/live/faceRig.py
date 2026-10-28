@@ -54,7 +54,7 @@ JAW_LIMITS = ((-0.05, 0.6), (-0.15, 0.15))
 # corners move the most
 CONTROL_LIMITS = {
     "brow": (0.08, 1.0), "lid": (0.05, 1.0), "mouth": (0.15, 1.0), "lip": (0.12, 1.0),
-    "cheek": (0.05, 2.0), "nose": (0.025, 4.0), "nostril": (0.025, 4.0),
+    "cheek": (0.05, 2.0), "nose": (0.015, 8.0), "nostril": (0.015, 8.0),
 }
 
 
@@ -169,7 +169,7 @@ def _vertexNormals(vertices: np.ndarray, triangles: np.ndarray) -> np.ndarray:
 def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, height: int, focal: float,
            cameraToFace: np.ndarray, pins: Optional[Tuple[list, np.ndarray]] = None, triangles=None,
            prior: Optional[np.ndarray] = None, stiffness: float = 0.3, priorWeight: float = 0.0,
-           pinWeight: float = 20.0, rounds: int = 3, iterations: int = 12):
+           pinWeight=20.0, rounds: int = 3, iterations: int = 12, solve: str = "all"):
     """
     The head pose and the rig parameters putting the face on the landmarks (`pixels` (n, 2), Nuke pixels, `weights`
     (n,): 0 for a hidden landmark) seen by the camera, and on the pins ((locations (triangle, barycentric weights) on the
@@ -177,7 +177,9 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
     `prior` parameters (`priorWeight`, e.g. the previous frame). Robust (Cauchy weights of the landmarks, again and
     again); the landmarks on the side of the face turned away from the camera (a profile: MediaPipe guesses them) are
     not used; the controls stay within what a face can do (soft limits), their moves in depth (poorly seen) cost more.
-    Levenberg-Marquardt, from `cameraToFace` (the rigid pose).
+    Levenberg-Marquardt, from `cameraToFace` (the rigid pose). `pinWeight`: a number, or one per pin. `solve`: "all"
+    (the pose and the rig together), "pose" (the head pose only, the rig kept at `prior`), "rig" (the rig only, the
+    pose kept).
 
     Returns:
         (camera-to-face matrix, rig parameters, the face vertices (n, 3) in face space).
@@ -191,6 +193,7 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
     prior = np.zeros(rig.paramCount) if prior is None else np.asarray(prior, dtype=np.float64)
     pinLocations, pinTargets = (pins if pins is not None and len(pins[0]) else ([], np.zeros((0, 2))))
     pinTargets = np.c_[pinTargets[:, 0] - width / 2.0, -(pinTargets[:, 1] - height / 2.0)] if len(pinLocations) else pinTargets
+    pinRoots = np.sqrt(np.clip(np.broadcast_to(np.asarray(pinWeight, dtype=np.float64), (len(pinLocations),)), 0.0, None))
 
     controls = rig.controlCount
     regularization = np.sqrt(stiffness) * 10.0
@@ -220,7 +223,7 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         pinRows = None
         if len(pinLocations):
             onFace = np.array([projected[triangles[t]].T @ w for t, w in pinLocations])
-            parts.append(((onFace - pinTargets) * np.sqrt(pinWeight)).ravel())
+            parts.append(((onFace - pinTargets) * pinRoots[:, None]).ravel())
         parts.append(regularization * costs * params)
         # Limits: 2000 pixels per unit beyond them (stronger than the pins: a face cannot do more)
         beyond = np.minimum(params - low, 0.0) + np.maximum(params - high, 0.0)
@@ -254,7 +257,7 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         rows = [(dProjected[:count] * root[:, None, None]).reshape(-1, k)]
         if len(pinLocations):
             pinRows = np.array([np.einsum("j,jik->ik", w, dProjected[triangles[t]]) for t, w in pinLocations])
-            rows.append((pinRows * np.sqrt(pinWeight)).reshape(-1, k))
+            rows.append((pinRows * pinRoots[:, None, None]).reshape(-1, k))
         identity = np.zeros((len(params), k))
         identity[:, 6:] = np.eye(len(params))
         rows.append(regularization * costs[:, None] * identity)
@@ -265,6 +268,12 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         return residual, projected, np.concatenate(rows)
 
     x = np.r_[np.zeros(6), prior]
+    # The parameters solved (the others kept)
+    active = np.ones(len(x), dtype=bool)
+    if solve == "pose":
+        active[6:] = False
+    elif solve == "rig":
+        active[:6] = False
     landmarkWeights = base.copy()
     for _ in range(rounds):
         damping = 1e-3
@@ -275,7 +284,9 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
             # Up to a strong damping: a step across a limit (stiff) is retried shorter
             for _ in range(12):
                 try:
-                    delta = -np.linalg.solve(normal + damping * np.diag(np.diag(normal) + 1e-9), gradient)
+                    reduced = normal[active][:, active]
+                    delta = np.zeros(len(x))
+                    delta[active] = -np.linalg.solve(reduced + damping * np.diag(np.diag(reduced) + 1e-9), gradient[active])
                 except np.linalg.LinAlgError:
                     break
                 candidate = x + delta

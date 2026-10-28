@@ -245,25 +245,90 @@ def hiddenLandmarks(landmarks: np.ndarray, mask: np.ndarray) -> List[int]:
     return [int(i) for i in np.flatnonzero(mask[rows, columns] < 0.5)]
 
 
-def _detectIn(detector, rgb: np.ndarray, region, timestampMs: int):
+def _fromRotated(points: np.ndarray, turns: int) -> np.ndarray:
+    """ Normalized points (x, y: [0, 1], rows from the top) of an image turned `turns` quarter turns counterclockwise
+    (np.rot90), back in the image before the turn. """
+    x, y = points[:, 0], points[:, 1]
+    turns %= 4
+    result = points.copy()
+    if turns == 1:
+        result[:, 0], result[:, 1] = 1.0 - y, x
+    elif turns == 2:
+        result[:, 0], result[:, 1] = 1.0 - x, 1.0 - y
+    elif turns == 3:
+        result[:, 0], result[:, 1] = y, 1.0 - x
+    return result
+
+
+def faceRoll(landmarks: np.ndarray, width: int, height: int) -> float:
+    """ The roll of a face in the image (degrees, clockwise as seen; 0 upright): the line from its right eye corner to
+    its left one. """
+    dx = (landmarks[263, 0] - landmarks[33, 0]) * width
+    dy = (landmarks[263, 1] - landmarks[33, 1]) * height
+    return float(np.degrees(np.arctan2(dy, dx)))
+
+
+def _exposed(crop: np.ndarray) -> np.ndarray:
+    """ A dark crop brightened for the landmarker (trained on well exposed photos): its median brought to a middle
+    gray, at most 8 times (noise); the highlights (a bright sky around a face in the shade) do not prevent it. """
+    if not crop.size:
+        return crop
+    luminance = crop.max(axis=2)
+    # Not the black of a mask
+    lit = luminance[luminance > 1e-4]
+    median = float(np.median(lit)) if lit.size else 1.0
+    gain = min(8.0, 0.4 / max(median, 1e-6))
+    if gain <= 1.05:
+        return crop
+    return np.clip(crop * gain, 0.0, 1.0)
+
+
+def _detectIn(detector, rgb: np.ndarray, region, timestampMs: int, turns: int = 0):
     """ The landmarks (normalized to the whole image) and blendshapes of the face in a region of `rgb` (floats in [0,
-    1]), brightened when dark; (None, {}) without face. """
+    1]), brightened when dark, turned `turns` quarter turns counterclockwise first (a face lying on its side is found
+    upright); (None, {}) without face. """
     x0, y0, x1, y1 = region
-    crop = rgb[y0:y1, x0:x1]
-    # Dark crops brightened (the landmarker is trained on well exposed photos), at most 8 times (noise)
-    level = float(np.percentile(crop.max(axis=2), 99.9)) if crop.size else 1.0
-    if level < 0.6:
-        crop = np.clip(crop * min(8.0, 0.9 / max(level, 1e-6)), 0.0, 1.0)
-    landmarks, blendshapes = detector.detect((crop * 255.0 + 0.5).astype(np.uint8), timestampMs)
+    crop = _exposed(rgb[y0:y1, x0:x1])
+    if turns % 4:
+        crop = np.rot90(crop, turns % 4)
+    landmarks, blendshapes = detector.detect(np.ascontiguousarray((crop * 255.0 + 0.5).astype(np.uint8)), timestampMs)
     if landmarks is None:
         return None, {}
     height, width = rgb.shape[:2]
     cropWidth, cropHeight = x1 - x0, y1 - y0
-    landmarks = np.asarray(landmarks, dtype=np.float64).copy()
+    landmarks = _fromRotated(np.asarray(landmarks, dtype=np.float64).copy(), turns)
     landmarks[:, 0] = (landmarks[:, 0] * cropWidth + x0) / width
     landmarks[:, 1] = (landmarks[:, 1] * cropHeight + y0) / height
-    landmarks[:, 2] *= cropWidth / float(width)
+    landmarks[:, 2] *= (cropHeight if turns % 2 else cropWidth) / float(width)
     return landmarks, blendshapes
+
+
+def _detectUpright(detector, rgb: np.ndarray, region, timestampMs: int, roll: Optional[float] = None,
+                   allTurns: bool = True):
+    """
+    `_detectIn` with the region turned so that the face is about upright: by the roll of the face of the previous
+    frame (`roll`, degrees), else straight, then, when the face found is lying (more than 45 degrees) or none is found,
+    turned a quarter (both ways) and half a turn (`allTurns`; else only the first try). The landmarker finds a face
+    lying on its side poorly.
+    """
+    height, width = rgb.shape[:2]
+    first = int(round(roll / 90.0)) % 4 if roll is not None else 0
+    tried, best = set(), (None, {})
+    for turns in ([first, 0, 1, 3, 2] if allTurns else [first]):
+        if turns in tried:
+            continue
+        tried.add(turns)
+        landmarks, blendshapes = _detectIn(detector, rgb, region, timestampMs, turns)
+        if landmarks is None:
+            continue
+        # The roll of the face in the turned crop: upright there, the landmarks are the most reliable
+        residual = faceRoll(landmarks, width, height) - 90.0 * turns
+        residual = (residual + 180.0) % 360.0 - 180.0
+        if abs(residual) <= 45.0:
+            return landmarks, blendshapes
+        if best[0] is None:
+            best = (landmarks, blendshapes)
+    return best
 
 
 def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0, cancel=None,
@@ -298,10 +363,12 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
             regions.insert(0, _cropAround(previous, width, height))
         landmarks, blendshapes = None, {}
         timestamp = int(round(index * 1000.0 / max(fps, 1e-3)))
-        for region in regions:
+        for regionIndex, region in enumerate(regions):
             if cancel:
                 cancel()
-            landmarks, blendshapes = _detectIn(detector, rgb, region, timestamp)
+            roll = faceRoll(previous, width, height) if previous is not None else None
+            # Every turn in the first regions (around the previous face, the whole frame) only: the tiles are many
+            landmarks, blendshapes = _detectUpright(detector, rgb, region, timestamp, roll, allTurns=regionIndex < 2)
             if landmarks is not None:
                 break
         previous = landmarks
@@ -372,8 +439,8 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
             rgb = displayRGB(imageB, BBox.fromFormat(width, height))
             if mask is not None:
                 rgb = rgb * mask[:, :, None]
-            found, foundShapes = _detectIn(detector, rgb, _cropAround(flowed, width, height),
-                                           int(round(index * 1000.0 / 24.0)))
+            found, foundShapes = _detectUpright(detector, rgb, _cropAround(flowed, width, height),
+                                                int(round(index * 1000.0 / 24.0)), faceRoll(flowed, width, height))
             if found is not None:
                 count = min(len(found), len(flowed))
                 size = max(np.ptp(flowed[:count, 0]) * width, np.ptp(flowed[:count, 1]) * height, 1.0)
@@ -830,10 +897,21 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         rig = faceRig.rigOf(mesh.vertices)
         # The pins weigh together as much as the visible landmarks
         pinWeight = max(20.0, float(weights.sum()) / len(locations)) if locations else 20.0
+        pinArgument = (locations, pinPixels) if locations else None
+        # First the head pose alone (rotation, position), from the rigid parts: the landmarks and the pins weighted by
+        # how rigid their place is (a pin on the forehead orients the head, one on a lip corner barely); the rig then
+        # explains what is left (the expression), the pose kept
+        rigidity = 1.0 - rig.mobility
+        triangles = mesh.triangles()
+        pinRigidity = np.array([max(0.01, float(w @ rigidity[triangles[t]])) ** 2 for t, w in locations])
+        cameraToFace, _, _ = faceRig.fitRig(
+            rig, pixels, weights * np.clip(rigidity[:count], 0.05, 1.0), width, height, focal, cameraToFace,
+            pins=pinArgument, triangles=triangles, prior=prior, stiffness=max(float(stiffness), 1e-4),
+            pinWeight=pinWeight * pinRigidity if locations else pinWeight, solve="pose")
         cameraToFace, params, local = faceRig.fitRig(
-            rig, pixels, weights, width, height, focal, cameraToFace,
-            pins=(locations, pinPixels) if locations else None, triangles=mesh.triangles(), prior=prior,
-            stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight, pinWeight=pinWeight)
+            rig, pixels, weights, width, height, focal, cameraToFace, pins=pinArgument, triangles=triangles,
+            prior=prior, stiffness=max(float(stiffness), 1e-4), priorWeight=priorWeight, pinWeight=pinWeight,
+            solve="rig")
         if report is not None:
             report["rigParams"] = params
         head = camera.matrix @ np.linalg.inv(cameraToFace)
