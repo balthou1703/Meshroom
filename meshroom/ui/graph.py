@@ -555,6 +555,8 @@ class UIGraph(QObject):
             self._layout.reset()
             self._undoStack.clear()
         self._nodeSelection.setModel(self._graph.nodes)
+        # The chapter lines of the graph shown fold (not those of the graph shown before)
+        self._watchChapters()
         # The Run Live statuses are those of the nodes of the graph shown before
         self._setLiveNodeStatuses({})
         # The viewer evaluates the nodes of the graph shown (its cache is kept)
@@ -2490,9 +2492,26 @@ class UIGraph(QObject):
     # Chapters
 
     def _watchChapters(self):
-        """ Follow the Chapter nodes of the current graph, to update the folded sections. """
+        """ Follow the Chapter nodes of the current graph (the project graph or an entered subgraph), to update the
+        folded sections. """
+        previous = getattr(self, "_chapterGraph", None)
+        if previous is not None and previous is not self._graph:
+            try:
+                previous.nodes.countChanged.disconnect(self._onNodesCountChanged)
+            except (RuntimeError, TypeError):
+                pass
+            for node in self._watchedChapters:
+                try:
+                    node.positionChanged.disconnect(self._updateFolds)
+                    node.internalAttribute("folded").valueChanged.disconnect(self._updateFolds)
+                except (RuntimeError, TypeError):
+                    pass
         self._watchedChapters = set()
-        self._graph.nodes.countChanged.connect(self._onNodesCountChanged)
+        if previous is not self._graph:
+            self._graph.nodes.countChanged.connect(self._onNodesCountChanged)
+        self._chapterGraph = self._graph
+        # The folds of the graph shown are computed again
+        self._foldSignature = None
         self._onNodesCountChanged()
 
     def _onNodesCountChanged(self):
