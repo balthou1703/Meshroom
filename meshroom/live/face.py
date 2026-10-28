@@ -486,7 +486,8 @@ def featureIndices() -> List[int]:
 def canonicalFace() -> scene3d.GeoData:
     """
     The canonical face of MediaPipe (468 vertices, the landmark order; centimeters, looking along +Z): from the
-    MediaPipe package when it has it, else from the models folder. FaceUnavailable when there is none.
+    MediaPipe package when it has it, else from the models folder, else the copy kept with the head
+    (data/faceHead.npz). FaceUnavailable when there is none.
     """
     candidates = []
     try:
@@ -506,13 +507,218 @@ def canonicalFace() -> scene3d.GeoData:
     for path in candidates:
         if os.path.isfile(path):
             return scene3d.readSceneFile(path).geo(0)
+    try:
+        # The copy kept with the head (data/faceHead.npz)
+        data = headData()
+        return scene3d.GeoData(data["faceVertices"].astype(np.float64), np.full(len(data["faceTriangles"]), 3),
+                               data["faceTriangles"].astype(np.int64).ravel(), name="face")
+    except (OSError, KeyError):
+        pass
     raise FaceUnavailable("the canonical face mesh of MediaPipe is missing: run 'python -m meshroom.live.neural.download "
                           "facelandmarker', or connect a face mesh with the MediaPipe topology to 'Face'")
 
 
+# The head: the face of MediaPipe with ears, skull and neck (data/faceHead.npz, from the ICT-FaceKit head, MIT; see
+# data/buildFaceHead.py), which follow the face (`HeadFollow`): its first 468 vertices are the face
+
+_HEAD_DATA = {}
+
+
+def headData() -> dict:
+    """ The head added to the face (data/faceHead.npz): "vertices" (canonical face space), "triangles" (face + head
+    indices), "hole" (head vertices on the face oval), "holeEdges" (their two oval vertices), "holeWeights". """
+    if not _HEAD_DATA:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "faceHead.npz")
+        with np.load(path) as data:
+            _HEAD_DATA.update({key: np.array(data[key]) for key in data.files})
+    return _HEAD_DATA
+
+
+def headVertexCount() -> int:
+    return MESH_VERTICES + len(headData()["vertices"])
+
+
+def isHead(mesh: Optional[scene3d.GeoData]) -> bool:
+    """ Whether a mesh has the head topology (the face, then the ears, skull and neck). """
+    return mesh is not None and len(mesh.vertices) == headVertexCount()
+
+
+_FACE_PARTS = {}
+
+
+def _polygons(topology: scene3d.Topology) -> List[np.ndarray]:
+    starts = np.r_[0, np.cumsum(topology.faceCounts)[:-1]].astype(np.int64)
+    return [topology.faceIndices[start:start + count] for start, count in zip(starts, topology.faceCounts)]
+
+
+def facePart(mesh: scene3d.GeoData) -> scene3d.GeoData:
+    """ The face of a head: its first 468 vertices and their faces (those along the oval without the head vertices
+    inserted in their border edge), a topology shared by the frames; a face as it is. """
+    if not isHead(mesh):
+        return mesh
+    key = id(mesh.topology)
+    cached = _FACE_PARTS.get(key)
+    if cached is None or cached[0] is not mesh.topology:
+        polygons = [polygon[polygon < MESH_VERTICES] for polygon in _polygons(mesh.topology)]
+        polygons = [polygon for polygon in polygons if len(polygon) >= 3]
+        counts = np.array([len(polygon) for polygon in polygons], dtype=np.int64)
+        indices = np.concatenate(polygons) if polygons else np.zeros(0, dtype=np.int64)
+        if len(_FACE_PARTS) > 16:
+            _FACE_PARTS.clear()
+        cached = _FACE_PARTS[key] = (mesh.topology, scene3d.Topology(counts, indices, MESH_VERTICES))
+    return scene3d.GeoData(mesh.vertices[:MESH_VERTICES], name=mesh.name, topology=cached[1])
+
+
+_HEAD_TOPOLOGIES = {}
+
+
+def _headTopology(face: scene3d.GeoData) -> scene3d.Topology:
+    """
+    The topology of the head made on a face mesh: its faces (on the 468 face vertices) then those of the head. The
+    head vertices on an edge of the face oval are inserted in the face polygon along that edge: every edge is shared
+    by two faces (no crack, no open edge along the oval).
+    """
+    key = id(face.topology)
+    cached = _HEAD_TOPOLOGIES.get(key)
+    if cached is None or cached[0] is not face.topology:
+        data = headData()
+        # {oval edge (a, b): the head vertices on it, from a to b}
+        onEdge = {}
+        for vertex, (a, b), weight in zip(data["hole"], data["holeEdges"], data["holeWeights"]):
+            onEdge.setdefault((int(a), int(b)), []).append((float(weight), MESH_VERTICES + int(vertex)))
+        for edge in list(onEdge):
+            ordered = [vertex for _, vertex in sorted(onEdge[edge])]
+            onEdge[edge] = ordered
+            onEdge[(edge[1], edge[0])] = ordered[::-1]
+        polygons = []
+        for polygon in _polygons(face.topology):
+            polygon = [int(i) for i in polygon]
+            if max(polygon) >= MESH_VERTICES:
+                continue
+            result, inserted = [], -1
+            for k, a in enumerate(polygon):
+                b = polygon[(k + 1) % len(polygon)]
+                result.append(a)
+                if (a, b) in onEdge:
+                    result.extend(onEdge[(a, b)])
+                    inserted = len(result)
+            if inserted >= 0:
+                # The fan triangulation starts from a vertex off the oval edge (the one after its end vertex): no flat
+                # triangle
+                start = (inserted + 1) % len(result)
+                result = result[start:] + result[:start]
+            polygons.append(result)
+        triangles = data["triangles"].astype(np.int64)
+        counts = np.r_[[len(polygon) for polygon in polygons], np.full(len(triangles), 3)]
+        indices = np.r_[np.concatenate(polygons), triangles.ravel()]
+        if len(_HEAD_TOPOLOGIES) > 16:
+            _HEAD_TOPOLOGIES.clear()
+        cached = _HEAD_TOPOLOGIES[key] = (face.topology, scene3d.Topology(counts, indices, headVertexCount()))
+    return cached[1]
+
+
+def headOf(face: scene3d.GeoData) -> scene3d.GeoData:
+    """ The head of a face mesh (MediaPipe topology): its 468 face vertices, then the ears, skull and neck following
+    them (from the canonical face to this one); a head as it is. """
+    if isHead(face):
+        return face
+    head = HeadFollow.of(canonicalHead().vertices).follow(face.vertices[:MESH_VERTICES])
+    return scene3d.GeoData(head, name=face.name or "head", topology=_headTopology(face))
+
+
+def _canonicalFaceVertices() -> np.ndarray:
+    """ The 468 vertices of the canonical face the head was made on (data/faceHead.npz is in its space). """
+    return headData()["faceVertices"].astype(np.float64)
+
+
+def canonicalHead() -> scene3d.GeoData:
+    """ The canonical head: the canonical face of MediaPipe (kept in data/faceHead.npz) with ears, skull and neck. """
+    data = headData()
+    if "topology" not in _CANONICAL_HEAD:
+        triangles = data["faceTriangles"].astype(np.int64)
+        canonical = scene3d.GeoData(data["faceVertices"].astype(np.float64), np.full(len(triangles), 3), triangles.ravel())
+        _CANONICAL_HEAD["topology"] = _headTopology(canonical)
+    vertices = np.concatenate([data["faceVertices"], data["vertices"]]).astype(np.float64)
+    return scene3d.GeoData(vertices, name="head", topology=_CANONICAL_HEAD["topology"])
+
+
+_CANONICAL_HEAD = {}
+
+
+class HeadFollow:
+    """
+    How the ears, skull and neck of a head follow its face: an affine transform fitted on the upper face (forehead,
+    eyes, nose, cheekbones: not the jaw nor the mouth) moves the whole head, the vertices on the face oval stay on it
+    (each on its oval edge), and what the face does beyond the affine transform there (a wider jaw, the jaw opening)
+    fades out harmonically over `FADE` units (centimeters for the canonical face) away from the face.
+    """
+    FADE = 5.0
+    _CACHE = {}
+
+    def __init__(self, rest: np.ndarray):
+        from scipy import sparse
+        from scipy.sparse.linalg import splu
+        from scipy.spatial import cKDTree
+        data = headData()
+        rest = np.asarray(rest, dtype=np.float64)
+        self.rest = rest
+        self.restFace = rest[:MESH_VERTICES]
+        face = self.restFace
+        # The upper face: above the nose tip (landmark 1)
+        self.upper = np.where(face[:, 1] >= face[1, 1])[0]
+        hole = data["hole"].astype(np.int64)
+        self.hole, self.holeEdges, self.holeWeights = hole, data["holeEdges"].astype(np.int64), data["holeWeights"]
+        extra = rest[MESH_VERTICES:]
+        total = len(rest)
+        # The graph of the head (its triangles, those along the oval included: they use the oval vertices of the face)
+        triangles = data["triangles"].astype(np.int64)
+        edges = np.unique(np.sort(np.r_[triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]], axis=1), axis=0)
+        adjacency = sparse.coo_matrix((np.ones(2 * len(edges)), (np.r_[edges[:, 0], edges[:, 1]],
+                                                                 np.r_[edges[:, 1], edges[:, 0]])), shape=(total, total)).tocsr()
+        laplacian = (sparse.diags(np.asarray(adjacency.sum(1)).ravel()) - adjacency).tocsr()
+        distance, _ = cKDTree(extra[hole]).query(extra)
+        free = np.where(distance <= self.FADE)[0]
+        free = np.setdiff1d(free, hole)
+        self.free = free
+        # Known: the face and the hole vertices (their residual from the affine transform); the far ones have none
+        self.known = np.r_[np.arange(MESH_VERTICES), MESH_VERTICES + hole]
+        freeHead = MESH_VERTICES + free
+        solver = splu(laplacian[freeHead][:, freeHead].tocsc())
+        coupling = -laplacian[freeHead][:, self.known].toarray()
+        self.harmonic = solver.solve(coupling) if len(free) else np.zeros((0, len(self.known)))
+
+    @classmethod
+    def of(cls, rest: np.ndarray) -> "HeadFollow":
+        """ The HeadFollow of a rest head (cached). """
+        rest = np.asarray(rest, dtype=np.float64)
+        key = hash(rest.tobytes())
+        follow = cls._CACHE.get(key)
+        if follow is None:
+            if len(cls._CACHE) > 8:
+                cls._CACHE.clear()
+            follow = cls._CACHE[key] = cls(rest)
+        return follow
+
+    def follow(self, face: np.ndarray) -> np.ndarray:
+        """ The head (all its vertices) of a face (468 vertices, in the space of the rest head). """
+        face = np.asarray(face, dtype=np.float64)[:MESH_VERTICES]
+        source = np.c_[self.restFace[self.upper], np.ones(len(self.upper))]
+        affine, *_ = np.linalg.lstsq(source, face[self.upper], rcond=None)
+        extra = np.c_[self.rest[MESH_VERTICES:], np.ones(len(self.rest) - MESH_VERTICES)] @ affine
+        # The oval: where each hole vertex is now (on its oval edge); what the face and the oval do beyond the affine
+        # transform fades out over the head
+        onOval = (1.0 - self.holeWeights)[:, None] * face[self.holeEdges[:, 0]] \
+            + self.holeWeights[:, None] * face[self.holeEdges[:, 1]]
+        residual = np.r_[face - np.c_[self.restFace, np.ones(len(face))] @ affine, onOval - extra[self.hole]]
+        extra[self.hole] = onOval
+        extra[self.free] += self.harmonic @ residual
+        return np.concatenate([face, extra])
+
+
 def checkTopology(mesh: scene3d.GeoData):
-    """ FaceUnavailable unless the mesh has the MediaPipe face topology (468 or 478 vertices in the landmark order). """
-    if mesh is None or len(mesh.vertices) not in (MESH_VERTICES, LANDMARKS):
+    """ FaceUnavailable unless the mesh has the MediaPipe face topology (468 or 478 vertices in the landmark order), or
+    is a head (`isHead`: that face, then ears, skull and neck). """
+    if mesh is None or (len(mesh.vertices) not in (MESH_VERTICES, LANDMARKS) and not isHead(mesh)):
         count = 0 if mesh is None else len(mesh.vertices)
         raise FaceUnavailable(f"the face mesh must have the MediaPipe face topology ({MESH_VERTICES} or {LANDMARKS} "
                               f"vertices in the landmark order), not {count} vertices")
@@ -763,7 +969,8 @@ def fitShape(mesh: scene3d.GeoData, observations: List[dict], width: int, height
 
     Args:
         observations: per frame, {"pixels": (n, 2) Nuke pixels, "hidden": [landmarks], "camera": CameraData,
-            "weight": float (e.g. more for a keyframe), "pins": (points (k, 3) on `mesh`, positions (k, 2)) or None}.
+            "weight": float (e.g. more for a keyframe), "pins": (points (k, 3) on `mesh`, positions (k, 2)) or None,
+            "size": (width, height) of its image when not `width`, `height` (photos of different sizes)}.
     """
     from scipy import sparse
     from scipy.sparse.linalg import spsolve
@@ -793,6 +1000,7 @@ def fitShape(mesh: scene3d.GeoData, observations: List[dict], width: int, height
     symmetric = sparse.coo_matrix((values, (rows, columns)), shape=(3 * n, 3 * n)).tocsr()
     laplacian = sparse.kron(_laplacian(mesh, n), sparse.identity(3)).tocsr()
     total = sum(float(o.get("weight", 1.0)) for o in observations)
+    size = (width, height)
     for round_ in range(rounds):
         shape = scene3d.GeoData(rest + offsets, topology=mesh.topology)
         blocks = np.zeros((n, 3, 3))
@@ -802,6 +1010,7 @@ def fitShape(mesh: scene3d.GeoData, observations: List[dict], width: int, height
             if cancel:
                 cancel()
             camera = observation["camera"]
+            width, height = observation.get("size") or size
             pixels = np.asarray(observation["pixels"], dtype=np.float64)
             count = min(n, len(pixels))
             report = {}
@@ -849,6 +1058,99 @@ def fitShape(mesh: scene3d.GeoData, observations: List[dict], width: int, height
         delta = spsolve((data + regularization).tocsc(), rhs.ravel() - regularization @ current)
         offsets = (current + delta).reshape(n, 3)
     return offsets
+
+
+# Views of the actor (the FaceBuilder): photos or frames, each with its own lens
+
+def viewCamera(focal: float, width: int, height: int) -> scene3d.CameraData:
+    """ The camera of a view: at the origin looking along -Z, `focal` mm on a 36 mm wide film back. """
+    return scene3d.CameraData(np.eye(4), float(focal), 36.0, 36.0 * height / float(width))
+
+
+def fitView(mesh: scene3d.GeoData, pixels: np.ndarray, width: int, height: int, focal: float, hidden=()):
+    """ The face of a view fitted on `mesh` (head pose and rig): (camera-to-face matrix, RMS error of the visible
+    landmarks in pixels). """
+    camera = viewCamera(focal, width, height)
+    geo, _, cameraToFace, _ = solveFace(mesh, pixels, camera, width, height, rigid=RIGID_LANDMARKS, deform=True,
+                                        hidden=hidden, model="rig", stiffness=1.0)
+    count = min(len(geo.vertices), len(pixels))
+    xy, _, _ = camera.project(geo.vertices[:count], width, height)
+    visible = np.ones(count, dtype=bool)
+    visible[[i for i in hidden if i < count]] = False
+    error = float(np.sqrt(np.mean(np.sum((xy - pixels[:count]) ** 2, axis=1)[visible]))) if visible.any() else 0.0
+    return cameraToFace, error
+
+
+def estimateFocal(mesh: scene3d.GeoData, pixels: np.ndarray, width: int, height: int, hidden=(),
+                  low: float = 12.0, high: float = 300.0, typical: float = 50.0) -> float:
+    """
+    The focal length (mm, 36 mm film back) of a view: the one where the face fits its landmarks best (the
+    perspective of a close face differs from that of a far one). Weakly told by a single view: a mild preference for
+    `typical` breaks the ties.
+    """
+    def cost(logFocal):
+        error = fitView(mesh, pixels, width, height, float(np.exp(logFocal)), hidden)[1]
+        return error * (1.0 + 0.01 * (logFocal - np.log(typical)) ** 2)
+    grid = np.linspace(np.log(low), np.log(high), 10)
+    costs = [cost(value) for value in grid]
+    best = int(np.argmin(costs))
+    a, b = grid[max(best - 1, 0)], grid[min(best + 1, len(grid) - 1)]
+    # Golden section between the neighbors of the best one
+    ratio = (np.sqrt(5.0) - 1.0) / 2.0
+    c, d = b - ratio * (b - a), a + ratio * (b - a)
+    costC, costD = cost(c), cost(d)
+    for _ in range(8):
+        if costC < costD:
+            b, d, costD = d, c, costC
+            c = b - ratio * (b - a)
+            costC = cost(c)
+        else:
+            a, c, costC = c, d, costD
+            d = a + ratio * (b - a)
+            costD = cost(d)
+    return float(np.exp((a + b) / 2.0))
+
+
+def buildShape(mesh: scene3d.GeoData, views: List[dict], focal: Optional[float] = None, rounds: int = 2,
+               smoothness: float = 3.0, symmetry: float = 1.0, closeness: float = 0.05, cancel=None,
+               progress: Optional[Callable[[float], None]] = None) -> Tuple[np.ndarray, List[dict]]:
+    """
+    The shape of the actor's face from views of it (the FaceBuilder): offsets (n, 3) of the vertices of `mesh`, and
+    each view with its "focal" (mm) and "cameraToFace" (4x4: the face at the origin). Each view: {"pixels": (n, 2)
+    Nuke pixels, "size": (width, height), "hidden": [landmarks], "weight"}. `focal` None: estimated for each view, then
+    again on the fitted shape (`rounds`).
+    """
+    views = [dict(view) for view in views]
+    offsets = np.zeros_like(np.asarray(mesh.vertices, dtype=np.float64))
+    steps = max(1, rounds) * 2
+    step = [0]
+
+    def report(fraction):
+        if progress:
+            progress((step[0] + fraction) / steps)
+    for round_ in range(max(1, rounds)):
+        shape = scene3d.GeoData(mesh.vertices + offsets, topology=mesh.topology)
+        for index, view in enumerate(views):
+            if cancel:
+                cancel()
+            width, height = view["size"]
+            view["focal"] = float(focal) if focal else estimateFocal(shape, view["pixels"], width, height,
+                                                                     view.get("hidden") or ())
+            report((index + 1) / float(len(views)))
+        step[0] += 1
+        observations = [{"pixels": view["pixels"], "size": view["size"], "hidden": view.get("hidden") or [],
+                         "camera": viewCamera(view["focal"], *view["size"]), "weight": view.get("weight", 1.0)}
+                        for view in views]
+        offsets = fitShape(mesh, observations, views[0]["size"][0], views[0]["size"][1], smoothness=smoothness,
+                           symmetry=symmetry, closeness=closeness, cancel=cancel, progress=report)
+        step[0] += 1
+        if focal:
+            break
+    shape = scene3d.GeoData(mesh.vertices + offsets, topology=mesh.topology)
+    for view in views:
+        view["cameraToFace"], view["error"] = fitView(shape, view["pixels"], view["size"][0], view["size"][1],
+                                                      view["focal"], view.get("hidden") or ())
+    return offsets, views
 
 
 def dumpShape(offsets: np.ndarray) -> str:

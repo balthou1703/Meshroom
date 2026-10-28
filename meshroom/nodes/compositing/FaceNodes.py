@@ -28,7 +28,10 @@ Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools 
   (forehead, nose bridge, eye corners, temples), then, with "Non Rigid", every vertex moved at its depth onto its
   landmark: the lips and the eyelids follow.
 - "Face": any mesh with the MediaPipe face topology (468 or 478 vertices in the landmark order), e.g. a scan of the
-  actor retopologized on it; its shape is the neutral face. Without it: the canonical face of MediaPipe.
+  actor retopologized on it, or a head of the FaceBuilder; its shape is the neutral face. Without it: the canonical
+  face of MediaPipe.
+- "Mesh": the face only, or the head: the face with ears, skull and neck that follow it (they are not fitted: the face
+  is, the rest of the head goes with it).
 
 Outputs: "Face" (the face mesh at each frame, in the world of the camera), "Head Matrix" (the rigid pose of the head:
 face space to world, e.g. for the "Input Matrix" of a ReadGeo), "Camera" (the plate camera), and the plate with the face
@@ -51,7 +54,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                 "back, at the origin, looking along -Z."),
         desc.Geo(name="face", label="Face", optional=True,
                  description="A face mesh with the MediaPipe face topology (468 or 478 vertices in the landmark order), "
-                             "e.g. a scan of the actor retopologized on it. Without it: the canonical face of MediaPipe."),
+                             "e.g. a scan of the actor retopologized on it, or a head of the FaceBuilder. Without it: "
+                             "the canonical face of MediaPipe."),
+        desc.ChoiceParam(name="meshType", label="Mesh", value="head", values=["head", "face"],
+                         description="head: the face with ears, skull and neck following it (only the face is fitted). "
+                                     "face: the face mesh only."),
         desc.Image(name="mask", label="Mask", optional=True, infoOnly=True,
                    description="Optional mask: the face is searched in its white part only, and the landmarks it "
                                "masks out (e.g. behind foliage: a roto of it, inverted) do not place the head nor "
@@ -173,8 +180,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         camera = ctx.inputData("camera", frame)
         return camera if camera is not None else scene3d.CameraData(np.eye(4), 35.0, 36.0, 24.0)
 
-    def baseMesh(self, ctx, frame=None):
-        """ The face mesh (MediaPipe topology): the "face" input, or the canonical face. """
+    def inputMesh(self, ctx, frame=None):
+        """ The "face" input (a face or a head of MediaPipe topology), or the canonical face. """
         from meshroom.live import face
         mesh = ctx.inputData("face", frame)
         try:
@@ -183,6 +190,34 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         except face.FaceUnavailable as e:
             raise RuntimeError(str(e)) from e
         return mesh
+
+    def baseMesh(self, ctx, frame=None):
+        """ The face mesh (MediaPipe topology) fitted: the "face" input (the face of a head), or the canonical face. """
+        from meshroom.live import face
+        return face.facePart(self.inputMesh(ctx, frame))
+
+    def headRest(self, ctx, frame=None):
+        """ The rest head ("Mesh" head): the rest face (`mesh`, with its fitted shape) with ears, skull and neck; None
+        for the face only. """
+        from meshroom.live import face
+        if ctx.value("meshType") != "head":
+            return None
+        rest = self.mesh(ctx, frame)
+        source = self.inputMesh(ctx, frame)
+        if face.isHead(source):
+            # A head connected: its own ears, skull and neck, following the fitted shape
+            return scene3d.GeoData(face.HeadFollow.of(source.vertices).follow(rest.vertices), name="head",
+                                   topology=source.topology)
+        return face.headOf(rest)
+
+    def withHead(self, ctx, local, frame=None):
+        """ The vertices (face space) of the head of a fitted face (`local`: its vertices), and its topology; the
+        face as it is for "Mesh" face. """
+        from meshroom.live import face
+        rest = self.headRest(ctx, frame)
+        if rest is None:
+            return local, self.mesh(ctx, frame).topology
+        return face.HeadFollow.of(rest.vertices).follow(local), rest.topology
 
     _SHAPED = {}
 
@@ -310,8 +345,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return None
         mesh = self.baseMesh(ctx)
         triangle, weights = face.surfaceLocation(geo.vertices, geo.triangles(), hit)
+        corners = geo.triangles()[triangle]
+        if corners.max() >= len(mesh.vertices):
+            # On the ears, skull or neck: the pins are on the face (what is fitted)
+            return None
         # The same place on the base face mesh (the pins stay valid when the shape is fitted again)
-        return mesh.vertices[mesh.triangles()[triangle]].T @ weights
+        return mesh.vertices[corners].T @ weights
 
     def reference(self, ctx):
         """ The reference frame ("Use Reference Frame"), or None. """
@@ -431,9 +470,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 rotation = Rotation.from_matrix(heads[:, :3, :3] / scales[:, None, :]).mean(weights).as_matrix()
                 head[:3, :3] = rotation * np.einsum("k,kd->d", weights, scales)[None, :]
                 head[:3, 3] = np.einsum("k,kd->d", weights, heads[:, :3, 3])
+        local, topology = self.withHead(ctx, local, frame)
         world = local @ head[:3, :3].T + head[:3, 3]
-        mesh = self.mesh(ctx, frame)
-        return scene3d.GeoData(world, name="face", topology=mesh.topology), head
+        return scene3d.GeoData(world, name="face", topology=topology), head
 
     def computeData(self, ctx, outputName):
         if outputName == "cameraOutput":
@@ -443,7 +482,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if outputName in ("headMatrix", "matrix"):
             return self.solve(ctx)[1]
         if outputName == "shapeOutput":
-            return self.mesh(ctx)
+            return self.headRest(ctx) or self.mesh(ctx)
         return super().computeData(ctx, outputName)
 
     def render(self, ctx, inputs):
@@ -714,8 +753,279 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if geo.isEmpty:
             return tracked
         xy, _, _ = self.camera(ctx, frame).project(geo.vertices, info.width, info.height)
-        count = min(len(xy), face.LANDMARKS)
+        # The landmarks of the mesh: the irises too when it has them (478 vertices; not a head)
+        count = min(len(xy), face.LANDMARKS) if not face.isHead(geo) else face.MESH_VERTICES
         landmarks = tracked.copy() if len(tracked) >= count else np.zeros((count, 3))
         landmarks[:count, 0] = xy[:count, 0] / info.width
         landmarks[:count, 1] = (info.height - xy[:count, 1]) / info.height
         return landmarks
+
+
+_VIEW_INPUTS = ("input", "input1", "input2", "input3")
+
+
+class FaceBuilder(desc.ImageOpNode):
+    category = "Comp 3D"
+    color = _COLOR
+    documentation = """
+Builds the head of an actor from photos (or frames) of their face, like KeenTools FaceBuilder: a base head (the
+canonical face of MediaPipe with ears, skull and neck following it) warped onto the actor's face.
+
+- Connect one to four views: each one a photo, or a sequence (every frame a view, up to "Max Frames" spread over it),
+  e.g. a Read of photos from the front, the sides, three quarters. Different sizes and lenses are fine.
+- "Build Head": MediaPipe finds the 478 landmarks of the face in each view, then the shape of the face is fitted on
+  all the views at once, each with its head pose and expression (the face rig) and its focal length (estimated, or
+  "Focal Length"). The views from different angles give the depth one view does not. "Fit Again" fits on the stored
+  landmarks again (e.g. after changing "Smoothness").
+- The ears, skull and neck are not seen by the landmarks: they follow the face (its size and proportions).
+
+Outputs: "Head" (the warped head, face space: centimeters, looking along +Z), "Original" (the base head), "Camera"
+(the camera of the view shown, the head at the origin) and the view shown with the head drawn over it. Connect "Head"
+to the "Face" input of a FaceTracker: it then tracks the actor's own head.
+
+Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
+(python -m meshroom.live.neural.download facelandmarker).
+"""
+    inputs = [
+        desc.Image(name=name, label=f"View {index + 1}", optional=index > 0,
+                   description=f"View {index + 1} of the actor's face: a photo, or a sequence (each frame a view).")
+        for index, name in enumerate(_VIEW_INPUTS)
+    ] + [
+        desc.Geo(name="face", label="Base", optional=True,
+                 description="The base face or head (MediaPipe face topology: 468 or 478 vertices in the landmark "
+                             "order, or a head of the FaceBuilder). Without it: the canonical head."),
+        desc.ChoiceParam(name="meshType", label="Mesh", value="head", values=["head", "face"],
+                         description="head: the face with ears, skull and neck following it. face: the face only."),
+        desc.FloatParam(name="minConfidence", label="Min Confidence", value=0.5, range=(0.1, 0.95, 0.05),
+                        invalidate=False, description="A face is found when MediaPipe is at least this confident."),
+        desc.IntParam(name="maxFrames", label="Max Frames", value=12, range=(1, 60, 1), invalidate=False,
+                      description="The views taken from a sequence: at most this many frames, spread over it."),
+        desc.BoolParam(name="estimateFocal", label="Estimate Focal Length", value=True, invalidate=False,
+                       description="Estimate the focal length of each view from how the face is seen (close: strong "
+                                   "perspective); off: 'Focal Length' for all."),
+        desc.FloatParam(name="focal", label="Focal Length", value=50.0, range=(8.0, 300.0, 1.0), invalidate=False,
+                        enabled=lambda node: not node.estimateFocal.value,
+                        description="Focal length of the views (mm, on a 36 mm wide film back: the 35 mm equivalent)."),
+        desc.FloatParam(name="smoothness", label="Smoothness", value=3.0, range=(0.0, 20.0, 0.1), invalidate=False,
+                        description="How smooth the change of shape is (less: closer to the landmarks, more noise)."),
+        desc.FloatParam(name="symmetry", label="Symmetry", value=1.0, range=(0.0, 10.0, 0.1), invalidate=False,
+                        description="How much the change of shape stays symmetric."),
+        desc.FloatParam(name="closeness", label="Stay Near Base", value=0.05, range=(0.0, 1.0, 0.01), invalidate=False,
+                        description="How much the shape stays near the base face."),
+        desc.PushButtonParam(name="buildHead", label="Build Head", semantic="liveAction",
+                             description="Find the face in each view and fit the head on all of them."),
+        desc.PushButtonParam(name="refitHead", label="Fit Again", semantic="liveAction",
+                             description="Fit the head again on the landmarks found by 'Build Head' (after changing "
+                                         "the parameters of the fit)."),
+        desc.PushButtonParam(name="clearHead", label="Clear", semantic="liveAction",
+                             description="Back to the base head."),
+        desc.StringParam(name="faceShape", label="Face Shape", value="", semantic="faceShape", advanced=True,
+                         description="The shape of the actor: offsets of the vertices of the base face (JSON)."),
+        desc.StringParam(name="views", label="Views", value="", visible=False, advanced=True,
+                         description="The views (JSON): their input, frame, size, landmarks, focal length and pose."),
+        desc.ChoiceParam(name="showView", label="Show View", value="input", values=list(_VIEW_INPUTS),
+                         description="The view output (and drawn on): input (View 1), input1 (View 2)..."),
+        desc.ChoiceParam(name="display", label="Display", value="wireframe",
+                         values=["shaded", "edges", "wireframe", "points", "landmarks", "none"],
+                         description="What is drawn over the view: the head, the landmarks, or nothing."),
+        desc.FloatParam(name="opacity", label="Opacity", value=0.6, range=(0.0, 1.0, 0.01),
+                        description="Opacity of the head drawn over the view."),
+    ]
+    outputs = [
+        desc.Geo(name="geoOutput", label="Head", description="The head of the actor (face space)."),
+        desc.Geo(name="originalOutput", label="Original", description="The base head (face space)."),
+        desc.Camera(name="cameraOutput", label="Camera",
+                    description="The camera of the view shown at this frame, the head at the origin."),
+        desc.Image(name="output", label="Output", description="The view shown, with the head drawn over it."),
+    ]
+
+    # The views
+
+    def shownInput(self, ctx):
+        name = ctx.value("showView")
+        return name if ctx.hasInput(name) else "input"
+
+    def infoOnlyInputs(self, ctx):
+        # Only the view shown is rendered
+        shown = self.shownInput(ctx)
+        return [name for name in _VIEW_INPUTS if name != shown]
+
+    def getInfo(self, ctx, inputsInfo):
+        info = inputsInfo.get(self.shownInput(ctx))
+        return info if info is not None else super().getInfo(ctx, inputsInfo)
+
+    def isIdentity(self, ctx):
+        return self.shownInput(ctx) if ctx.value("display") == "none" else None
+
+    @staticmethod
+    def storedViews(ctx_or_context):
+        import json
+        text = ctx_or_context.value("views")
+        if not text:
+            return []
+        try:
+            return json.loads(text)
+        except ValueError as e:
+            raise RuntimeError(f"Invalid views: {e}") from e
+
+    def viewAt(self, ctx, frame=None):
+        """ The stored view of the input shown at a frame (a photo: any frame), or None. """
+        frame = ctx.frame if frame is None else frame
+        shown = self.shownInput(ctx)
+        views = [view for view in self.storedViews(ctx) if view["input"] == shown]
+        for view in views:
+            if view.get("still") or int(view["frame"]) == int(frame):
+                return view
+        return None
+
+    # The head
+
+    def inputMesh(self, ctx):
+        from meshroom.live import face
+        mesh = ctx.inputData("face")
+        try:
+            mesh = mesh if mesh is not None else face.canonicalHead()
+            face.checkTopology(mesh)
+        except face.FaceUnavailable as e:
+            raise RuntimeError(str(e)) from e
+        return mesh
+
+    def baseMesh(self, ctx):
+        """ The face fitted (MediaPipe topology): the face of the base. """
+        from meshroom.live import face
+        return face.facePart(self.inputMesh(ctx))
+
+    def original(self, ctx):
+        """ The base head (or face, "Mesh" face). """
+        from meshroom.live import face
+        source = self.inputMesh(ctx)
+        if ctx.value("meshType") != "head":
+            return face.facePart(source)
+        return face.headOf(source)
+
+    def head(self, ctx):
+        """ The head of the actor: the base with the fitted shape (its ears, skull and neck following the face). """
+        from meshroom.live import face
+        base = self.baseMesh(ctx)
+        try:
+            offsets = face.parseShape(ctx.value("faceShape"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        original = self.original(ctx)
+        if offsets is None or len(offsets) != len(base.vertices):
+            return original
+        shaped = base.vertices + offsets
+        if ctx.value("meshType") != "head":
+            return scene3d.GeoData(shaped, name="face", topology=base.topology)
+        return scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(shaped), name="head",
+                               topology=original.topology)
+
+    def viewCamera(self, ctx, view):
+        """ The camera of a stored view, the head at the origin. """
+        from meshroom.live import face
+        width, height = view["size"]
+        return face.viewCamera(view["focal"], width, height).copy(
+            matrix=np.array(view["cameraToFace"], dtype=np.float64).reshape(4, 4))
+
+    def computeData(self, ctx, outputName):
+        if outputName == "geoOutput":
+            return self.head(ctx)
+        if outputName == "originalOutput":
+            return self.original(ctx)
+        if outputName == "cameraOutput":
+            view = self.viewAt(ctx)
+            return self.viewCamera(ctx, view) if view is not None else None
+        return super().computeData(ctx, outputName)
+
+    def render(self, ctx, inputs):
+        from meshroom.live import face, geoRender
+        image = inputs[self.shownInput(ctx)]
+        rgba = np.array(image.rgba(), dtype=np.float32)
+        width, height = image.width, image.height
+        view = self.viewAt(ctx)
+        display, alpha = ctx.value("display"), ctx.value("opacity")
+        if view is not None and list(view["size"]) == [width, height]:
+            if display == "landmarks":
+                pixels = face.toPixels(np.array(view["landmarks"], dtype=np.float64), width, height)
+                scene3d.drawPoints(rgba, image.bbox, pixels, (1.0, 0.85, 0.2), alpha, 2)
+            else:
+                from meshroom.live import gpu
+                camera = self.viewCamera(ctx, view)
+                geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
+                                       (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx))
+        return image.withRGBA(rgba)
+
+    # Actions
+
+    def runAction(self, name, context):
+        """ "Build Head": the landmarks of each view, then the shape fitted on all of them; "Fit Again": the fit on
+        the stored landmarks; "Clear". """
+        import json
+        from meshroom.live import face
+        if name == "clearHead":
+            return {"faceShape": "", "views": ""}
+        if name not in ("buildHead", "refitHead"):
+            raise RuntimeError(f"Unknown action: {name}")
+        if name == "buildHead":
+            stored = self.detectViews(context)
+        else:
+            stored = self.storedViews(context)
+            if not stored:
+                raise RuntimeError("Build the head first (Build Head).")
+        views = [{"pixels": face.toPixels(np.array(view["landmarks"], dtype=np.float64), *view["size"]),
+                  "size": tuple(view["size"]), "hidden": view.get("hidden") or []} for view in stored]
+        ctx = context.nodeContext()
+        base = self.baseMesh(ctx)
+        offsets, fitted = face.buildShape(
+            base, views, focal=None if context.value("estimateFocal") else context.value("focal"),
+            smoothness=context.value("smoothness"), symmetry=context.value("symmetry"),
+            closeness=context.value("closeness"), cancel=context.checkCancelled,
+            progress=lambda done: context.progress(done, "Build Head"))
+        for view, result in zip(stored, fitted):
+            view["focal"] = round(float(result["focal"]), 3)
+            view["cameraToFace"] = [round(float(v), 6) for v in np.asarray(result["cameraToFace"]).ravel()]
+            view["error"] = round(float(result["error"]), 3)
+        return {"faceShape": face.dumpShape(offsets), "views": json.dumps(stored)}
+
+    def detectViews(self, context):
+        """ The views of the connected inputs with a face: {input, frame, still, size, landmarks, hidden}. """
+        from meshroom.live import face
+        try:
+            detector = face.landmarker(context.value("minConfidence"))
+        except face.FaceUnavailable as e:
+            raise RuntimeError(f"Build Head: {e}") from e
+        sources = []
+        for name in _VIEW_INPUTS:
+            if not context.hasInput(name):
+                continue
+            frames = list(context.inputFrames(name))
+            still = len(frames) == 1
+            count = max(1, int(context.value("maxFrames")))
+            if len(frames) > count:
+                frames = [frames[int(i)] for i in np.linspace(0, len(frames) - 1, count)]
+            sources.append((name, frames, still))
+        total = max(1, sum(len(frames) for _, frames, _ in sources))
+        views, done = [], [0]
+        try:
+            for name, frames, still in sources:
+                sizes = {}
+
+                def imageAt(f, name=name, sizes=sizes):
+                    image = context.renderInput(name, f)
+                    sizes[f] = image.format
+                    return image
+                # Each view on its own (no search around the face of the previous one: photos are unrelated)
+                for f in frames:
+                    found = face.trackFaces(imageAt, [f], detector, cancel=context.checkCancelled)
+                    done[0] += 1
+                    context.progress(0.3 * done[0] / total, "Find the faces")
+                    if f in found:
+                        landmarks = found[f]["landmarks"]
+                        views.append({"input": name, "frame": int(f), "still": still, "size": list(sizes[f]),
+                                      "landmarks": [[round(float(v), 5) for v in point] for point in landmarks],
+                                      "hidden": list(found[f].get("hidden") or [])})
+        finally:
+            detector.close()
+        if not views:
+            raise RuntimeError("No face found in the views (connect photos of the face, lower 'Min Confidence'?).")
+        return views

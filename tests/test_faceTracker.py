@@ -153,7 +153,9 @@ def test_faceTrackerNode(tmp_path, monkeypatch):
     # The constant plate is a still image: frame 1 only
     geo = evaluator.data(plan, plan.target, "geoOutput", 1)
     np.testing.assert_allclose(evaluator.data(plan, plan.target, "headMatrix", 1), headAt(1), atol=1e-3)
-    xy, _, _ = CAMERA.project(geo.vertices, W, H)
+    # The head (default "Mesh"): the face, then the ears, skull and neck
+    assert face.isHead(geo)
+    xy, _, _ = CAMERA.project(geo.vertices[:face.MESH_VERTICES], W, H)
     # The landmarks are stored with 5 decimals (normalized)
     np.testing.assert_allclose(xy, face.toPixels(landmarksAt(1), W, H), atol=0.01)
     image = evaluator.render(plan, 1)
@@ -488,7 +490,7 @@ def test_referenceFrameIsTheBaseOfTheFit(tmp_path, monkeypatch):
     evaluator = Evaluator()
     for f in (2, 5, 7, 1):
         geo = evaluator.data(plan, plan.target, "geoOutput", f)
-        xy, _, _ = CAMERA.project(geo.vertices, W, H)
+        xy, _, _ = CAMERA.project(geo.vertices[:face.MESH_VERTICES], W, H)
         errors = np.hypot(*(xy - face.toPixels(faces[f]["landmarks"], W, H)).T)
         assert np.median(errors) < 0.3 and errors.max() < 1.5
     # The other frames are fitted on the face of the reference frame (wider than the neutral mesh)
@@ -604,7 +606,8 @@ def test_fitShapeAction(tmp_path, monkeypatch):
     graph.update()
     plan = buildPlan(tracker)
     shape = Evaluator().data(plan, plan.target, "shapeOutput", 1)
-    assert _procrustes(shape.vertices, actor) < 0.6 * _procrustes(FACE.vertices, actor)
+    assert face.isHead(shape)
+    assert _procrustes(shape.vertices[:face.MESH_VERTICES], actor) < 0.6 * _procrustes(FACE.vertices, actor)
     assert tracker.nodeDesc.runAction("clearShape", context) == {"faceShape": ""}
 
 

@@ -672,6 +672,32 @@ de dessin de MediaPipe, ne sont pas nécessaires : remplacés à l'import quand 
 `python -m meshroom.live.neural.download facelandmarker` (modèle et visage canonique dans MESHROOM_MODELS_PATH).
 Limite : les sommets gardent leur profondeur neutre (le mouvement des lèvres vers l'avant n'est pas suivi).
 
+**Tête** (« Mesh » : head par défaut, ou face ; `face.canonicalHead`, `headOf`, `HeadFollow`, `facePart`) : le visage
+canonique de MediaPipe (468 sommets, toujours en premier, dans l'ordre des points) avec oreilles, crâne et cou
+(4 523 sommets de plus), tirés de la tête neutre d'ICT-FaceKit (licence MIT) : `meshroom/live/data/faceHead.npz`,
+construit par `python -m meshroom.live.data.buildFaceHead canonical_face_model.obj generic_neutral_mesh.obj`
+(alignement sur 68 points, découpe sous l'ovale du visage et sous le cou, déformation harmonique jusqu'à l'ovale ; un
+sommet du bord par sommet de l'ovale est fusionné avec lui, les autres sont sur une arête de l'ovale et insérés dans
+le polygone du visage le long de cette arête : maillage fermé hors du cou, sans fissure). Le fichier garde aussi le
+visage canonique (licence Apache 2.0, `data/LICENSE-MediaPipe.md`) : il sert de visage par défaut quand MediaPipe
+ne le fournit pas. Seul le visage est ajusté ; le reste de la tête le suit (`HeadFollow`) : une transformation
+affine ajustée sur le haut du visage (au-dessus du bout du nez : pas la mâchoire) déplace toute la tête, les sommets
+du bord restent sur leur arête de l'ovale, et ce que le visage fait de plus (mâchoire plus large, bouche ouverte)
+s'estompe harmoniquement sur 5 cm. Une tête (sortie du FaceBuilder) peut être branchée en « Face » : son visage est
+ajusté, ses oreilles et son crâne suivent ; les pins ne se posent que sur le visage.
+
+**FaceBuilder** (Comp 3D, `FaceNodes.py`, `face.buildShape`) : la tête d'un acteur à partir de photos, comme KeenTools
+FaceBuilder. Entrées « View 1 » à « View 4 » : chacune une photo ou une séquence (chaque frame une vue, « Max
+Frames » au plus, réparties) ; tailles et focales différentes acceptées. « Build Head » : MediaPipe trouve les points
+du visage dans chaque vue (`detectViews`, gardés dans « Views »), puis la forme est ajustée sur toutes les vues à la
+fois (`face.fitShape`, chaque vue avec sa pose, son expression par le rig et sa taille d'image), la focale de chaque
+vue estimée (`estimateFocal` : la focale où le visage colle le mieux à ses points, légère préférence pour 50 mm ; puis
+réestimée sur la forme ajustée) ou donnée (« Focal Length », mm sur 36 mm). « Fit Again » réajuste sur les points
+gardés (après un changement de « Smoothness », « Symmetry », « Stay Near Base »). Sorties : « Head » (la tête
+déformée, espace du visage, en cm), « Original » (la tête de base), « Camera » (la caméra de la vue affichée, la tête
+à l'origine) et l'image de la vue choisie par « Show View » avec la tête dessinée. Entrée « Base » : un autre visage
+ou une tête de topologie MediaPipe. Brancher « Head » dans « Face » d'un FaceTracker pour suivre la tête de l'acteur.
+
 **Plage de tracking** (« Limit Track Range », « Track First », « Track Last » : Tracker, CameraTracker, Resection,
 FaceTracker, Roto ; `params.trackRangeParams` / `trackRange`) : les actions de tracking (boutons Track du viewer,
 Autotrack, Track Geometry et Refine, Track Face, Track Shapes) ne calculent que dans cette plage ; une frame courante
