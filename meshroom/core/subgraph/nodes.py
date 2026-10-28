@@ -40,8 +40,11 @@ def subGraphSourceParams() -> list:
         desc.File(
             name="template",
             label="Template",
-            description="Template (.mgt / .mg) of the subgraph, used when the subgraph is not embedded.",
+            description="Template (.mgt / .mg) of the subgraph, used when the subgraph is not embedded.\n"
+                        "A project of the compositing workspace (.mg) gives its compositing (its nodes, chapters and "
+                        "ports), as a copy / paste of it would; 'Make Local' copies it in the node.",
             value="",
+            semantic="browseFile:Meshroom graphs:.mgt .mg",
         ),
         desc.StringParam(
             name="subGraph",

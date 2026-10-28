@@ -2858,3 +2858,16 @@ def test_compositingTemplateIsRegistered():
     meshroom.core.initPipelines()
     path = {k.lower(): v for k, v in meshroom.core.pipelineTemplates.items()}.get("compositing")
     assert path and os.path.isfile(path) and path.endswith("compositing.mgt")
+
+
+def test_browserListsFilesOfKindsAndResolvesTypedPaths(tmp_path):
+    from meshroom.live.sequences import listFolder, resolvePath
+    (tmp_path / "shots").mkdir()
+    for name in ("a.mg", "b.mgt", "c.exr", "notes.txt"):
+        (tmp_path / name).write_text("{}")
+    names = [entry["name"] for entry in listFolder(str(tmp_path), False, [".mgt", ".mg"])]
+    assert names == ["shots", "a.mg", "b.mgt"]
+    assert resolvePath("shots", str(tmp_path)) == {"type": "folder", "path": str(tmp_path / "shots")}
+    assert resolvePath(str(tmp_path / "a.mg"), "/") == {"type": "file", "path": str(tmp_path / "a.mg")}
+    assert resolvePath("nothing", str(tmp_path))["type"] == "missing"
+    assert resolvePath("~", "/")["path"] == os.path.expanduser("~")

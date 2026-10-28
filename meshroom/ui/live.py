@@ -1974,6 +1974,17 @@ class LiveController(QObject):
         """ List a folder with the frames of image sequences grouped (see meshroom.live.sequences). """
         return listFolder(folder, imagesOnly)
 
+    @Slot(str, "QVariantList", result="QVariantList")
+    def listFiles(self, folder, extensions):
+        """ List a folder: its sub-folders and its files of the given extensions (e.g. [".mgt", ".mg"]). """
+        return listFolder(folder, False, [str(e).lower() for e in extensions])
+
+    @Slot(str, str, result="QVariant")
+    def resolvePath(self, text, folder):
+        """ What a typed path leads to: {"type": "folder" / "file" / "missing", "path"} (see sequences.resolvePath). """
+        from meshroom.live.sequences import resolvePath
+        return resolvePath(text, folder)
+
     @Slot(str, result=str)
     def browseStartFolder(self, currentPath):
         """ Folder to open a file browser in: the folder of `currentPath` if it exists, the home folder otherwise. """

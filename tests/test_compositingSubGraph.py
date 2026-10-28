@@ -94,3 +94,25 @@ def test_subGraphNodeIsEvaluatedThroughItsImageOutput():
     plan = buildPlan(subGraphNode)
     assert plan.targetNode.name == f"{subGraphNode.name}/{grade.name}"
     np.testing.assert_allclose(Evaluator().render(plan, 1).rgba(), flat)
+
+
+def test_compositingProjectAsTemplateBringsItsCompositing(tmp_path):
+    import json
+    from meshroom.core.subgraph.executor import readGraphData
+    # A project of the compositing workspace: its compositing (nodes, chapters, ports) in its compositing_1 SubGraph
+    inner = {"header": {"fileVersion": "2.1", "template": True}, "graph": {
+        "Constant_1": {"nodeType": "Constant", "position": [0, 0], "inputs": {}},
+        "Chapter_1": {"nodeType": "Chapter", "position": [0, -100], "inputs": {}},
+        "GraphOutput_1": {"nodeType": "GraphOutput", "position": [300, 0], "inputs": {}},
+    }}
+    project = {"header": {"workspaceMode": "compositing", "fileVersion": "2.1"}, "graph": {
+        "Write_1": {"nodeType": "Write", "position": [250, 0], "inputs": {"image": "{compositing_1.outs.output}"}},
+        "compositing_1": {"nodeType": "SubGraph", "position": [0, 0], "inputs": {"subGraph": json.dumps(inner)}},
+    }}
+    path = tmp_path / "shot.mg"
+    path.write_text(json.dumps(project))
+    assert sorted(readGraphData(str(path))) == ["Chapter_1", "Constant_1", "GraphOutput_1"]
+    # Another project (default workspace): all its nodes, as before
+    project["header"].pop("workspaceMode")
+    path.write_text(json.dumps(project))
+    assert sorted(readGraphData(str(path))) == ["Write_1", "compositing_1"]

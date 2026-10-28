@@ -617,6 +617,8 @@ RowLayout {
                 case "File":
                     if (attribute.desc.semantic === "imageSequence" && !attribute.isOutput)
                         return sequenceFieldComponent
+                    if (attribute.desc.semantic.startsWith("browseFile") && !attribute.isOutput && !attribute.isLink)
+                        return browseFileComponent
                     if ((attribute.desc.semantic.startsWith("saveFile") || attribute.desc.semantic.startsWith("openFile")) &&
                         !attribute.isOutput && !attribute.isLink)
                         return saveFileComponent
@@ -750,6 +752,48 @@ RowLayout {
                     nameFilters: filter ? [filter, "All files (*)"] : ["All files (*)"]
                     currentFolder: attribute.value ? Filepath.stringToUrl(Filepath.dirname(attribute.value)) : ""
                     onAccepted: setTextFieldAttribute(Filepath.urlToString(selectedFile))
+                }
+            }
+        }
+
+        // File read by a node, chosen in the browser of Meshroom (location bar: type a path, as in a file manager).
+        // "browseFile:Title:.ext1 .ext2" gives the title and the kinds of files shown
+        Component {
+            id: browseFileComponent
+            RowLayout {
+                spacing: 2
+                readonly property var parts: attribute.desc.semantic.split(":")
+                TextField {
+                    Layout.fillWidth: true
+                    text: attribute.value
+                    readOnly: !root.editable
+                    selectByMouse: true
+                    placeholderText: "Path of the file (or browse)"
+                    onEditingFinished: {
+                        if (text.trim() !== attribute.value)
+                            setTextFieldAttribute(text.trim())
+                    }
+                }
+                MaterialToolButton {
+                    text: MaterialIcons.folder
+                    enabled: root.editable
+                    font.pointSize: 11
+                    ToolTip.text: "Browse"
+                    onClicked: {
+                        fileBrowserLoader.active = true
+                        fileBrowserLoader.item.openAt(attribute.value)
+                    }
+                }
+                Loader {
+                    id: fileBrowserLoader
+                    active: false
+                    sourceComponent: SequenceBrowser {
+                        live: _currentScene.live
+                        browseTitle: parts.length > 1 && parts[1] ? parts[1] : attribute.label
+                        extensions: parts.length > 2 ? parts[2].split(" ").filter(function(e) { return e !== "" }) : []
+                        onSelected: (path) => setTextFieldAttribute(path)
+                        onClosed: Qt.callLater(function() { fileBrowserLoader.active = false })
+                    }
                 }
             }
         }

@@ -188,6 +188,10 @@ def _nodeDescFor(nodeType: str):
     return provider.nodeDescClass()
 
 
+# Node types only drawn in the graph editor (backdrops, chapter lines): never run
+BACKDROP_TYPES = ("Backdrop", "Chapter")
+
+
 def readGraphData(source) -> dict:
     """
     The serialized nodes {name: node data} of a subgraph, from a file path (.mg / .mgt), a JSON string, a
@@ -203,7 +207,36 @@ def readGraphData(source) -> dict:
         source = json.loads(text) if text.strip() else {}
     if not isinstance(source, dict):
         raise SubGraphError("A subgraph must be a JSON object.")
+    compositing = _compositingSubGraph(source)
+    if compositing is not None:
+        return readGraphData(compositing)
     return source.get("graph", source) if ("graph" in source or "header" in source) else source
+
+
+def _compositingSubGraph(project: dict):
+    """
+    The compositing of a Meshroom project made in the compositing workspace (header "workspaceMode":
+    "compositing"): the subgraph of its compositing SubGraph node ("compositing_1", else its first SubGraph), with
+    its nodes, chapters and ports, so that such a project used as the template of a SubGraph brings its compositing
+    (as a copy / paste of it would). None for any other source.
+    """
+    header = project.get("header") if isinstance(project.get("header"), dict) else {}
+    graph = project.get("graph")
+    if header.get("workspaceMode") != "compositing" or not isinstance(graph, dict):
+        return None
+    subGraphs = [(name, data) for name, data in sorted(graph.items())
+                 if isinstance(data, dict) and data.get("nodeType") == "SubGraph"]
+    if not subGraphs:
+        return None
+    name, data = next(((n, d) for n, d in subGraphs if n.startswith("compositing")), subGraphs[0])
+    inputs = data.get("inputs") or {}
+    embedded = inputs.get("subGraph")
+    if isinstance(embedded, str) and embedded.strip():
+        return embedded
+    template = inputs.get("template")
+    if isinstance(template, str) and template.strip():
+        return template
+    return None
 
 
 def contextOf(nodeDesc) -> Tuple[str, ...]:
@@ -304,7 +337,7 @@ class SubGraphPlan:
         self.graphData = {name: data for name, data in graphData.items() if isinstance(data, dict) and "nodeType" in data}
         self.nodeDescs = {}
         for name, data in self.graphData.items():
-            if data["nodeType"] in ("Backdrop",):
+            if data["nodeType"] in BACKDROP_TYPES:
                 continue
             self.nodeDescs[name] = _nodeDescFor(data["nodeType"])
         inputs = [name for name, nodeDesc in self.nodeDescs.items() if getattr(nodeDesc, "subGraphRole", "") == "input"]
@@ -530,7 +563,7 @@ def runGraph(graph, plan: SubGraphPlan, ctx: RunContext, inputs: Optional[dict] 
     eachStep = stepNodes(graph, order, plan, ctx.loop.mode)
     planned = {node.name for node in order}
     for node in graph.nodes:
-        if node.name not in planned and node.nodeType != "Backdrop":
+        if node.name not in planned and node.nodeType not in BACKDROP_TYPES:
             ctx.report(node.name, NodeStatus.SKIPPED, "Not run: not needed for the outputs here "
                                                       "(e.g. the scene comes from the session of the software).")
     durations = {}

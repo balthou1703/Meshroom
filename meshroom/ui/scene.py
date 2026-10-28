@@ -498,6 +498,11 @@ class Scene(UIGraph):
                 return lowered[name.lower()]
             if attempt == 0:
                 meshroom.core.initPipelines()
+        # A template of a built-in plugin folder (e.g. meshroom/nodes/compositing/compositing.mgt)
+        builtIn = os.path.join(meshroom.core.meshroomFolder, "nodes", name, name + ".mgt")
+        if os.path.isfile(builtIn):
+            return builtIn
+        logging.warning(f"Pipeline template '{name}' not found (known: {', '.join(sorted(meshroom.core.pipelineTemplates))}).")
         return None
 
     def _initFromTemplateWithOutputNodes(self, filepath: str) -> None:
