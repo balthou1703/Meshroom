@@ -451,6 +451,12 @@ entrée « input » (sinon sa première entrée compatible, une libre d'abord : 
 (sinon la première compatible) va à la destination ; pas sur ses propres edges ni s'il ferait un cycle
 (`meshroom/core/edgeInsertion.py`, `UIGraph.insertNodeOnEdge`, une étape d'annulation).
 
+Disposition des panneaux (`Application.qml`) : View > « Attribute Editor Full Height » ancre l'éditeur
+d'attributs à droite sur toute la hauteur (comme le Properties Bin de Nuke) au lieu de sous le viewer ; réglage
+mémorisé (`UILayout/attributeEditorFullHeight`). Ctrl+B (View > « Maximize Panel Under Cursor », comme Houdini)
+affiche seul le panneau sous la souris (viewer, graphe ou attributs ; attributs par défaut), Ctrl+B ou le bouton
+de la barre restaure. Les panneaux sont reparentés (`parent:` lié) vers des emplacements vides, pas recréés.
+
 ### 4.10 Chapitres du graphe
 
 Nœud `Chapter` (bouton « Add Chapter Line » de la barre du graphe) : une ligne horizontale
