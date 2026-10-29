@@ -729,6 +729,12 @@ par le flow (Lucas-Kanade ou RAFT), pose robuste, parties masquées exclues. La 
 (champ `"p"` de « faceTrack ») et `solveFace(pose=...)` la garde : les points ne donnent plus que l'expression (rig
 seul). Une keyframe avec des pins rigides est placée par ses pins. Surface perdue (trop peu de points texturés) : la
 frame suit les points comme avant.
+Un point suivi sur dix est gardé avec la frame (champ `"t"` : x, y en pixels, 1 s'il colle à la pose, 0 s'il est
+rejeté) et affiché (« Show Surface Tracks ») : vert ou rouge, pour voir sur quoi la pose s'accroche.
+
+Affichage du maillage en quads (wireframe du FaceTracker et du FaceBuilder, `geoRender.quadEdges`) : les triangles
+sont appariés en quads convexes, presque plans, aux angles proches de 90° (meilleures paires d'abord) et la diagonale
+n'est pas tracée ; affichage seul, la géométrie reste en triangles.
 
 Détection : un visage couché (roll de plus de 45°) est cherché dans le crop tourné d'un quart ou d'un demi-tour
 (`_detectUpright` : d'abord selon le roll du visage de la frame précédente, `faceRoll` ; « Detect Lying Faces »

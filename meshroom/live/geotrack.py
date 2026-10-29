@@ -280,9 +280,12 @@ def _measureMotion(settings: TrackSettings, lumA: tuple, lumB: tuple, imageA, im
 
 
 def stepPose(samples: SurfaceSamples, settings: TrackSettings, matrixA: np.ndarray, imageA, imageB,
-             predictedB: np.ndarray, width: int, height: int, focalPixels: float, cancel=None):
+             predictedB: np.ndarray, width: int, height: int, focalPixels: float, cancel=None,
+             report: Optional[dict] = None):
     """
     The pose of frame B from the known pose of frame A: the visible textured samples of A followed into B.
+    `report` (a dict) receives the "positions" (k, 2) in frame B (Nuke pixels) of the points followed and whether
+    each one fits the pose ("inliers", k booleans).
 
     Returns:
         (camera-to-world matrix of B, number of points fitting it, their RMS error in pixels). Raises TrackingLost when
@@ -304,6 +307,8 @@ def stepPose(samples: SurfaceSamples, settings: TrackSettings, matrixA: np.ndarr
     if found.sum() < settings.minInliers:
         raise TrackingLost(f"only {int(found.sum())} points of the geometry were found in the next frame")
     matrix, inliers, error = robustPose(points[found], positionsB[found], width, height, focalPixels, predictedB)
+    if report is not None:
+        report["positions"], report["inliers"] = positionsB[found], np.asarray(inliers, dtype=bool)
     if inliers.sum() < settings.minInliers:
         raise TrackingLost(f"only {int(inliers.sum())} points of the geometry move with it")
     return matrix, int(inliers.sum()), error

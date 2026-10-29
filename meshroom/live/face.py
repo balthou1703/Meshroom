@@ -419,14 +419,28 @@ class HeadPoseTracker:
             geotrack.setMask(image, mask)
         return image
 
+    # One in SURFACE_POINTS_STEP of the followed points is kept for display (10%)
+    SURFACE_POINTS_STEP = 10
+
     def step(self, imageA, imageB, poseA: np.ndarray, frameA: int, frameB: int, maskAt=None) -> np.ndarray:
-        """ The pose at frame B from the pose at frame A (raises geotrack.TrackingLost when the surface is lost). """
+        """
+        The pose at frame B from the pose at frame A (raises geotrack.TrackingLost when the surface is lost).
+        `points` then holds one in SURFACE_POINTS_STEP of the points followed into B: (k, 3) Nuke pixels x, y and
+        1 where the point fits the pose, 0 where it was rejected (for display).
+        """
         from . import geotrack
         imageA, imageB = self._masked(imageA, frameA, maskAt), self._masked(imageB, frameB, maskAt)
         if self.anchor is None:
             self.anchor = (scene3d.toMatrix4(poseA), imageA)
-        matrix, inliers, error = geotrack.stepPose(self.samples, self.settings, poseA, imageA, imageB, poseA,
-                                                   self.width, self.height, self.focal)
+        report = {}
+        self.points = np.zeros((0, 3))
+        try:
+            matrix, inliers, error = geotrack.stepPose(self.samples, self.settings, poseA, imageA, imageB, poseA,
+                                                       self.width, self.height, self.focal, report=report)
+        finally:
+            if "positions" in report:
+                shown = slice(None, None, self.SURFACE_POINTS_STEP)
+                self.points = np.c_[report["positions"][shown], report["inliers"][shown].astype(np.float64)]
         try:
             anchored, anchoredInliers, anchoredError = geotrack.alignPose(
                 self.samples, self.settings, self.anchor[0], self.anchor[1], matrix, imageB, self.width, self.height,
@@ -495,10 +509,11 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
         flowed[:, 0] = (x + motion[:, 0]) / width
         flowed[:, 1] = (y - motion[:, 1]) / height
         mask = np.clip(np.asarray(maskAt(frame), dtype=np.float32), 0.0, 1.0) if maskAt else None
-        pose = None
+        pose, surfacePoints = None, None
         if poseTracker is not None and currentPose is not None:
             try:
                 pose = poseTracker.step(imageA, imageB, currentPose, frames[index - 1], frame, maskAt)
+                surfacePoints = getattr(poseTracker, "points", None)
             except EvaluationCancelled:
                 return faces, "cancelled"
             except Exception as e:  # The surface lost (too few textured points): the landmarks alone
@@ -522,6 +537,8 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
                     landmarks, blendshapes, source = found, foundShapes, "mediapipe"
         faces[frame] = {"landmarks": landmarks, "blendshapes": blendshapes, "source": source,
                         "hidden": hiddenLandmarks(landmarks, mask) if mask is not None else [], "pose": pose}
+        if surfacePoints is not None and len(surfacePoints):
+            faces[frame]["surface"] = surfacePoints
         if onFrame:
             onFrame(frame, faces[frame])
         if progress:
@@ -531,7 +548,8 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
 
 
 # Storage (the "faceTrack" parameter): {"format": [w, h], "frames": {"1001": {"l": [x, y, z, ...], "b": {...},
-# "h": [hidden landmarks] (when there are)}}}
+# "h": [hidden landmarks] (when there are), "s": source, "p": head pose (16), "t": some points followed on the
+# surface of the head [x, y, fits, ...] (Follow Head Surface)}}}
 
 def _dumpFace(face: dict) -> dict:
     data = {"l": [round(float(v), 5) for v in np.asarray(face["landmarks"]).ravel()],
@@ -542,6 +560,9 @@ def _dumpFace(face: dict) -> dict:
         data["s"] = face["source"]
     if face.get("pose") is not None:
         data["p"] = [round(float(v), 6) for v in np.asarray(face["pose"]).ravel()]
+    if face.get("surface") is not None and len(face["surface"]):
+        # x, y (pixels, 0.1), fitting the pose (1) or rejected (0)
+        data["t"] = [round(float(v), 1) for v in np.asarray(face["surface"]).ravel()]
     return data
 
 
@@ -561,7 +582,8 @@ def parseFaces(text: str) -> Tuple[Dict[int, dict], Optional[Tuple[int, int]]]:
         faces = {int(frame): {"landmarks": np.array(face["l"], dtype=np.float64).reshape(-1, 3),
                               "blendshapes": dict(face.get("b") or {}), "hidden": [int(i) for i in face.get("h") or []],
                               "source": face.get("s", ""),
-                              "pose": np.array(face["p"], dtype=np.float64).reshape(4, 4) if face.get("p") else None}
+                              "pose": np.array(face["p"], dtype=np.float64).reshape(4, 4) if face.get("p") else None,
+                              "surface": np.array(face["t"], dtype=np.float64).reshape(-1, 3) if face.get("t") else None}
                  for frame, face in (data.get("frames") or {}).items()}
         imageFormat = tuple(data["format"]) if data.get("format") else None
     except (TypeError, ValueError, KeyError, AttributeError) as e:

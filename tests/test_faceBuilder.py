@@ -297,6 +297,9 @@ def test_headPoseFollowedByTheSurface():
     pose = poseAt(0)
     for f in range(1, 7):
         pose = tracker.step(images[f - 1], images[f], pose, f - 1, f)
+        # One in ten of the followed points kept for display, most of them fitting the pose
+        assert 5 <= len(tracker.points) and tracker.points[:, 2].mean() > 0.7
+        assert np.all((tracker.points[:, 0] >= 0) & (tracker.points[:, 0] <= width))
     focal = camera.focalPixels(width)
     xy, _ = geotrack.projectPoints(pose, mesh.vertices, width, height, focal)
     truth, _ = geotrack.projectPoints(poseAt(6), mesh.vertices, width, height, focal)

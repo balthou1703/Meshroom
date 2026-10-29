@@ -288,7 +288,7 @@ def drawLines(rgba: np.ndarray, u, v, z, edges: np.ndarray, color, alpha: float,
 def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, mode: str = "shaded",
                  color=(0.35, 1.0, 0.45), alpha: float = 0.6, creaseDegrees: float = 40.0, hiddenLines: bool = True,
                  maxEdges: int = 2_000_000, pointSize: int = 2, useGpu: bool = False,
-                 vertexColors: Optional[np.ndarray] = None) -> np.ndarray:
+                 vertexColors: Optional[np.ndarray] = None, quads: bool = False) -> np.ndarray:
     """
     Draw a geometry over an RGBA array covering `bbox`, in place (see MODES):
         shaded: its surface lit from the camera, and its feature edges;
@@ -297,7 +297,8 @@ def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, m
         points: its vertices.
     `hiddenLines`: the edges (and points) behind the surface are not drawn. `useGpu`: the depth buffer is computed on
     the GPU when there is one (meshroom/live/gpu.py). `vertexColors` (n, 3): a color per vertex instead of `color`
-    (e.g. the reach of the pins of a FaceTracker).
+    (e.g. the reach of the pins of a FaceTracker). `quads`: the wireframe of a triangulated geometry drawn as quads
+    where its triangles pair up (quadEdges).
     """
     from . import gpu
 
@@ -359,9 +360,86 @@ def drawGeometry(rgba: np.ndarray, bbox, geo, camera, width: int, height: int, m
         edges = featureEdges(geo, camera.position, creaseDegrees)
         drawLines(rgba, u, v, z, _inFrontEdges(edges, inFront, maxEdges), color, alpha, zbuffer, vertexColors=vertexColors)
     else:
-        drawLines(rgba, u, v, z, _inFrontEdges(geo.edges(), inFront, maxEdges), color, alpha, zbuffer,
+        wire = quadEdges(geo) if quads else geo.edges()
+        drawLines(rgba, u, v, z, _inFrontEdges(wire, inFront, maxEdges), color, alpha, zbuffer,
                   vertexColors=vertexColors)
     return rgba
+
+
+def quadEdges(geo, maxBend: float = 35.0, maxSkew: float = 40.0) -> np.ndarray:
+    """
+    The edges of a triangulated geometry as quads, for a readable wireframe: the triangles are paired along an edge
+    when together they make a convex, nearly flat quad with corners near right angles (best pairs first), and the
+    diagonals of the pairs are left out. Faces that are not triangles keep all their edges. Cached with the topology.
+
+    Args:
+        maxBend: the largest angle in degrees between the normals of two paired triangles.
+        maxSkew: the largest mean deviation in degrees of the corners of a quad from a right angle.
+
+    Returns:
+        the edges (m, 2) to draw.
+    """
+    def compute():
+        edges = geo.edges()
+        counts = np.asarray(geo.faceCounts)
+        starts = np.r_[0, np.cumsum(counts)[:-1]].astype(np.int64)
+        # The triangle faces only (the edges of other faces are all kept)
+        starts = starts[counts == 3]
+        if not len(starts):
+            return edges
+        indices = np.asarray(geo.faceIndices)
+        vertices = np.asarray(geo.vertices, np.float64)
+        triangles = np.c_[indices[starts], indices[starts + 1], indices[starts + 2]]
+        count = len(triangles)
+        # The interior edges and their two triangles: each triangle edge (sorted) with the vertex opposite to it
+        pairs = np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1)
+        opposite = np.concatenate([triangles[:, 2], triangles[:, 0], triangles[:, 1]])
+        owner = np.tile(np.arange(count), 3)
+        order = np.lexsort((pairs[:, 1], pairs[:, 0]))
+        pairs, opposite, owner = pairs[order], opposite[order], owner[order]
+        same = np.all(pairs[1:] == pairs[:-1], axis=1)
+        first = np.nonzero(same)[0]
+        # Only the edges with exactly two triangles
+        first = first[(first + 2 >= len(pairs)) | ~np.r_[same, False][first + 1]]
+        first = first[(first == 0) | ~np.r_[False, same][first]]
+        if not len(first):
+            return edges
+        a, b = vertices[pairs[first, 0]], vertices[pairs[first, 1]]
+        c, d = vertices[opposite[first]], vertices[opposite[first + 1]]
+        corner = vertices[triangles[:, 0]]
+        normals = np.cross(vertices[triangles[:, 1]] - corner, vertices[triangles[:, 2]] - corner)
+        normals /= np.maximum(np.linalg.norm(normals, axis=1), 1e-30)[:, None]
+        cosine = np.abs(np.sum(normals[owner[first]] * normals[owner[first + 1]], axis=1))
+        bend = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+
+        def angle(at, p, q):
+            u, v = p - at, q - at
+            cosine = np.sum(u * v, axis=1) / np.maximum(np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1), 1e-30)
+            return np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+        # The quad c, a, d, b: its corners (a and b are split by the diagonal: their two angles add up)
+        corners = np.stack([angle(c, a, b), angle(d, a, b), angle(a, c, b) + angle(a, d, b),
+                            angle(b, c, a) + angle(b, d, a)], axis=1)
+        skew = np.mean(np.abs(corners - 90.0), axis=1)
+        # Convex: c and d on both sides of the diagonal a-b, and a and b on both sides of c-d
+        ab, cd = b - a, d - c
+        convex = (np.sum(np.cross(ab, c - a) * np.cross(ab, d - a), axis=1) < 0) & \
+                 (np.sum(np.cross(cd, a - c) * np.cross(cd, b - c), axis=1) < 0)
+        good = convex & (bend <= maxBend) & (skew <= maxSkew)
+        used = np.zeros(count, bool)
+        diagonals = []
+        for k in np.nonzero(good)[0][np.argsort((skew + bend)[good], kind="stable")]:
+            t1, t2 = owner[first[k]], owner[first[k] + 1]
+            if not used[t1] and not used[t2]:
+                used[t1] = used[t2] = True
+                diagonals.append(pairs[first[k]])
+        if not diagonals:
+            return edges
+        diagonals = np.array(diagonals)
+        # The edges that are not a diagonal (rows compared as single values)
+        key = edges[:, 0].astype(np.int64) * (len(vertices) + 1) + edges[:, 1]
+        return edges[~np.isin(key, diagonals[:, 0].astype(np.int64) * (len(vertices) + 1) + diagonals[:, 1])]
+    topology = getattr(geo, "topology", None)
+    return topology._cached(("quadEdges", maxBend, maxSkew), compute) if topology is not None else compute()
 
 
 def _inFrontEdges(edges: np.ndarray, inFront: np.ndarray, maxEdges: int) -> np.ndarray:

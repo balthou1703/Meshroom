@@ -174,6 +174,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                      "its vertices), the landmarks, or nothing."),
         desc.FloatParam(name="opacity", label="Opacity", value=0.6, range=(0.0, 1.0, 0.01),
                         description="Opacity of the face drawn over the plate."),
+        desc.BoolParam(name="showSurfaceTracks", label="Show Surface Tracks", value=True, invalidate=False,
+                       description="Some of the points followed on the head by 'Follow Head Surface' at the frame (one in "
+                                   "ten): green where they fit the head pose, red where they were rejected."),
         desc.StringParam(name="faceTrack", label="Face Track", value="", semantic="faceTrack", visible=False,
                          advanced=True, description="The landmarks of each frame (JSON, written by 'Track Face')."),
         desc.StringParam(name="tracks", label="Landmark Tracks", value="[]", semantic="autoTracks",
@@ -261,6 +264,35 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 self._SHAPED.clear()
             shaped = self._SHAPED[key] = scene3d.GeoData(base.vertices + offsets, name=base.name, topology=base.topology)
         return shaped
+
+    def drawSurfaceTracks(self, ctx, rgba, image):
+        """ The points followed on the surface of the head at the frame (Follow Head Surface), in place. """
+        try:
+            faces, trackFormat = self._parsedFaces(ctx)
+        except ValueError:
+            return
+        points = (faces.get(ctx.frame) or {}).get("surface")
+        if points is None or not len(points):
+            return
+        xy = points[:, :2].copy()
+        if trackFormat and tuple(trackFormat) != (image.width, image.height):
+            xy *= [image.width / float(trackFormat[0]), image.height / float(trackFormat[1])]
+        fits = points[:, 2] > 0.5
+        scene3d.drawPoints(rgba, image.bbox, xy[fits], (0.3, 1.0, 0.3), 1.0, 3)
+        scene3d.drawPoints(rgba, image.bbox, xy[~fits], (1.0, 0.25, 0.2), 1.0, 3)
+
+    # The last face track parsed for display: (its text, (faces, format))
+    _displayedTrack = (None, ({}, None))
+
+    @classmethod
+    def _parsedFaces(cls, ctx):
+        """ The faces and format of the "faceTrack" parameter, parsed once for the frames displayed. """
+        from meshroom.live import face
+        text = ctx.value("faceTrack")
+        entry = cls._displayedTrack
+        if entry[0] != text:
+            entry = cls._displayedTrack = (text, face.parseFaces(text))
+        return entry[1]
 
     def faces(self, ctx):
         from meshroom.live import face
@@ -541,7 +573,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 from meshroom.live import gpu
                 geoRender.drawGeometry(rgba, image.bbox, geo, self.camera(ctx), width, height, display,
                                        (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
-                                       vertexColors=self.pinReachColors(ctx, image.info, len(geo.vertices)))
+                                       vertexColors=self.pinReachColors(ctx, image.info, len(geo.vertices)), quads=True)
+        if ctx.value("showSurfaceTracks"):
+            self.drawSurfaceTracks(ctx, rgba, image)
         # The pins: where the face puts their point, linked to where they are (the error)
         geo = ctx.ownData("geoOutput", ctx.frame)
         points, positions = self.pinsAt(self.pins(ctx, image.info), ctx.frame)
@@ -1008,7 +1042,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 from meshroom.live import gpu
                 camera = self.viewCamera(ctx, view)
                 geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
-                                       (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx))
+                                       (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx), quads=True)
         return image.withRGBA(rgba)
 
     # Actions
