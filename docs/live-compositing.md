@@ -423,7 +423,8 @@ rendue pour une région n'est réutilisée que pour une région qu'elle couvre.
 **In / out** : les bornes de la timeline sont enregistrées avec le graphe. Sans valeur entrée,
 elles suivent le premier Read du graphe (celui créé quand il n'y en avait aucun ; les Reads créés
 ensuite ne les changent pas) ; entrées à la main, elles restent (le bouton lien les fait suivre le
-Read à nouveau) (`meshroom/live/frameRange.py`).
+Read à nouveau) (`meshroom/live/frameRange.py`). La frame courante est aussi enregistrée à la sauvegarde
+(`currentFrame` du header, pas dans un template) et retrouvée à l'ouverture du projet.
 
 **Evaluate Compare** : le menu d'un nœud s'ouvre avec « Evaluate » sous le curseur ;
 « Evaluate Compare » en fait la vue 2 : les touches 1 / 2 (pavé numérique aussi) passent de la vue 1

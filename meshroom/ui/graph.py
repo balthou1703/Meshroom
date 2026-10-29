@@ -504,6 +504,9 @@ class UIGraph(QObject):
         self._updateFrameRange()
         # The range loaded with the graph (its change was emitted before this connection)
         self._onFrameRangeChanged()
+        # The frame the project was saved at
+        if self._graph.currentFrame is not None:
+            self._live.currentFrame = self._graph.currentFrame
         self._watchChapters()
         self._taskManager.update(self._graph)
 
@@ -585,6 +588,13 @@ class UIGraph(QObject):
         if len(self._subGraphStack):
             return self._subGraphStack.commitAll(self._graph)
         return self._graph
+
+    def _savedGraph(self) -> Graph:
+        """ The project graph to save, with the frame of the viewer (compositing workspace) in its header. """
+        graph = self._projectGraph()
+        if graph.workspaceMode == "compositing":
+            graph.setCurrentFrame(self._live.currentFrame)
+        return graph
 
     @Slot(QObject, result=bool)
     def isSubGraphNode(self, node) -> bool:
@@ -908,7 +918,7 @@ class UIGraph(QObject):
         else:
             localFile = url.toLocalFile()
         localFile = withExtension(localFile, extension)
-        self._projectGraph().save(localFile, setupProjectFile=setupProjectFile, template=template)
+        self._savedGraph().save(localFile, setupProjectFile=setupProjectFile, template=template)
         self._undoStack.setClean()
         # saving file on disk impacts cache folder location
         # => force re-evaluation of monitored status files paths
@@ -921,12 +931,12 @@ class UIGraph(QObject):
 
     @Slot()
     def save(self):
-        self._projectGraph().save()
+        self._savedGraph().save()
         self._undoStack.setClean()
 
     @Slot()
     def saveAsNewVersion(self):
-        self._projectGraph().saveAsNewVersion()
+        self._savedGraph().saveAsNewVersion()
         self._undoStack.setClean()
 
     @Slot()

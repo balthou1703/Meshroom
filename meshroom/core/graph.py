@@ -288,6 +288,19 @@ class Graph(BaseObject):
         self.frameRangeChanged.emit()
 
     @property
+    def currentFrame(self) -> Optional[int]:
+        """ The frame shown in the viewer when the graph was saved (compositing), None if not set. """
+        value = self.header.get(GraphIO.Keys.CurrentFrame)
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    def setCurrentFrame(self, frame: Optional[int]):
+        """ Set the frame saved with the graph (see currentFrame); None to unset it. Not an edit of the graph. """
+        if frame is None:
+            self.header.pop(GraphIO.Keys.CurrentFrame, None)
+        else:
+            self.header[GraphIO.Keys.CurrentFrame] = int(frame)
+
+    @property
     def isLoading(self):
         """ Return True if the graph is currently being loaded. """
         return self._loading

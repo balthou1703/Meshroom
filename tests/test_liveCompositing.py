@@ -1668,6 +1668,22 @@ class TestRound8:
         graph.save(path)
         assert loadGraph(path).frameRange == {"first": 5, "last": 8, "source": ""}
 
+    def test_currentFrameSavedWithTheGraph(self, tmp_path):
+        graph = Graph("")
+        graph.addNewNode("Read")
+        assert graph.currentFrame is None
+        graph.setCurrentFrame(1029)
+        path = str(tmp_path / "frame.mg")
+        graph.save(path)
+        assert loadGraph(path).currentFrame == 1029
+        # Not kept in a template
+        templatePath = str(tmp_path / "frame.mgt")
+        graph.save(templatePath, setupProjectFile=False, template=True)
+        assert loadGraph(templatePath).currentFrame is None
+        graph.setCurrentFrame(None)
+        graph.save(path)
+        assert loadGraph(path).currentFrame is None
+
     def test_cameraTrackerPreviewAndMask(self):
         from meshroom.live import camera
         rng = np.random.default_rng(3)

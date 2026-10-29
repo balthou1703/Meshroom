@@ -31,6 +31,8 @@ class GraphIO:
         # Frame range of the timeline (compositing): {"first", "last", "source"}, "source" being the Read
         # node it follows ("" when entered by the user); absent when not set
         FrameRange = "frameRange"
+        # Frame shown in the viewer when the project was saved (compositing); absent when not set
+        CurrentFrame = "currentFrame"
 
     class Features(Enum):
         """File Features."""
@@ -104,6 +106,8 @@ class GraphSerializer:
             header[GraphIO.Keys.WorkspaceMode] = self._graph.workspaceMode
         if self._graph.frameRange:
             header[GraphIO.Keys.FrameRange] = dict(self._graph.frameRange)
+        if self._graph.currentFrame is not None:
+            header[GraphIO.Keys.CurrentFrame] = self._graph.currentFrame
         if self._graph._hasExplicitCacheDir:
             # We store the absolute but also the relative cacheDir path (to the scene file)
             # to make sure that if we move the scene+cacheDir we can still retrieve the cache
@@ -139,6 +143,8 @@ class TemplateGraphSerializer(GraphSerializer):
     def serializeHeader(self) -> dict:
         header = super().serializeHeader()
         header[GraphIO.Keys.Template] = True
+        # The frame of a session is not part of a template
+        header.pop(GraphIO.Keys.CurrentFrame, None)
         return header
 
     def serializeNode(self, node: Node) -> dict:
