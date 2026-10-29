@@ -48,9 +48,11 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   scene3d.py: cameras / geometries (Topology shared across frames) / matrices and 3D files,
 │   │                           #   geoRender.py: shaded / edges / wireframe display with hidden lines, bake.py: Disconnect and Bake,
 │   │                           #   face.py: FaceTracker (MediaPipe landmarks, non-rigid face fit on a MediaPipe-topology mesh),
-│   │                           #   faceRig.py: the face rig (jaw, brows, lids, lips, cheeks) fitted by the FaceTracker,
+│   │                           #   faceRig.py: the face rigs fitted by the FaceTracker (BlendshapeRig: the 51 ARKit
+│   │                           #   expression shapes; FaceRig: jaw, brows, lids, lips, cheeks controls),
 │   │                           #   data/: faceHead.npz, the MediaPipe face with ears, skull and neck (ICT-FaceKit, MIT)
-│   │                           #   of the FaceTracker and FaceBuilder, built by data/buildFaceHead.py)
+│   │                           #   of the FaceTracker and FaceBuilder, built by data/buildFaceHead.py; faceExpressions.npz,
+│   │                           #   its ARKit shapes transferred from ICT-FaceKit by data/buildFaceExpressions.py)
 │   ├── nodes/                  # Concrete node types, grouped by category (e.g. general/, compositing/, subgraph/, houdini/)
 │   ├── submitters/             # Built-in render-farm submitters (drive meshroom_submit; e.g. localFarm)
 │   ├── ui/                     # User Interface layer (PySide6 / QML-based components)

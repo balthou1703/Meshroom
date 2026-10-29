@@ -336,8 +336,8 @@ class SyntheticFacePlate(_desc.ImageOpNode):
 import pytest  # noqa: E402
 
 
-@pytest.mark.parametrize("followSurface", [True, False])
-def test_faceTrackerFollowsTheHeadSurface(followSurface):
+@pytest.mark.parametrize("followSurface, model", [(True, "arkit"), (False, "arkit"), (True, "rig")])
+def test_faceTrackerFollowsTheHeadSurface(followSurface, model):
     """ Track Face (flow) with "Follow Head Surface": the pose of each frame from the surface, kept with the frame. """
     from tests.utils import registerNodeDesc, unregisterNodeDesc
     from meshroom.live import geotrack
@@ -349,7 +349,7 @@ def test_faceTrackerFollowsTheHeadSurface(followSurface):
         graph = Graph("surface")
         plate = graph.addNewNode("SyntheticFacePlate")
         tracker = graph.addNewNode("FaceTracker", trackWith="flow", temporalSmoothing=0.0, smoothing=0.0,
-                                   meshType="face", followSurface=followSurface)
+                                   meshType="face", followSurface=followSurface, deformModel=model)
         graph.addEdge(plate.output, tracker.input)
         xy, _ = geotrack.projectPoints(_plateHeadPose(0), canonical.vertices, width, height,
                                        camera.focalPixels(width))
@@ -362,6 +362,8 @@ def test_faceTrackerFollowsTheHeadSurface(followSurface):
         result = tracker.nodeDesc.runAction("trackFaceForward", context)
         faces, _ = face.parseFaces(result["faceTrack"])
         assert (faces[14]["pose"] is not None) == followSurface
+        # Some of the points followed on the surface kept for display
+        assert (faces[14].get("surface") is not None) == followSurface
         tracker.faceTrack.value = result["faceTrack"]
         graph.update()
         plan = buildPlan(tracker)
@@ -369,5 +371,9 @@ def test_faceTrackerFollowsTheHeadSurface(followSurface):
         solved, _ = geotrack.projectPoints(np.linalg.inv(head), canonical.vertices, width, height, camera.focalPixels(width))
         truth, _ = geotrack.projectPoints(_plateHeadPose(14), canonical.vertices, width, height, camera.focalPixels(width))
         assert np.median(np.hypot(*(solved - truth).T)) < 1.5
+        # The face (no expression on the plate): the rig keeps it near the truth
+        geo = Evaluator().data(plan, plan.target, "geoOutput", 14)
+        fitted, _, _ = camera.project(geo.vertices[:face.MESH_VERTICES], width, height)
+        assert np.median(np.hypot(*(fitted - truth).T)) < 1.5
     finally:
         unregisterNodeDesc(SyntheticFacePlate)

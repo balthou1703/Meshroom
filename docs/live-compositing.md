@@ -632,7 +632,28 @@ mais comme une surface lisse passant par eux (moindres carrés pondérés + lapl
 repondérés de façon robuste) : un point faux (dérive, détection ratée) est ignoré, les points masqués suivent leurs
 voisins, le maillage ne se replie pas ; 0 : chaque sommet exactement sur son point. Pendant le suivi par le flot, le
 visage ainsi ajusté est ce qui est suivi d'une frame à l'autre (il reste un visage).
-« Non Rigid Model » : rig (par défaut, `meshroom/live/faceRig.py`) : comme le modèle de tête de KeenTools
+« Non Rigid Model » : arkit (par défaut, `faceRig.BlendshapeRig`) : le visage est déformé par les 51 formes
+d'expression d'ARKit (eyeBlinkLeft, jawOpen, mouthSmileRight… : les noms d'ARKit, de MediaPipe et des rigs faciaux de
+Maya, Unreal Live Link, Blender ; tongueOut en moins), chacune pondérée de 0 à 1. Les formes viennent d'ICT-FaceKit
+(MIT), transférées sur la tête du FaceTracker par `meshroom/live/data/buildFaceExpressions.py` →
+`data/faceExpressions.npz` : tête ICT alignée (similitude sur les 68 points) puis déformée sur le visage MediaPipe
+(thin plate spline sur les 68 points et les contours des paupières et des lèvres intérieures, appariés par abscisse
+curviligne entre leurs coins) ; chaque sommet prend les déplacements de son point le plus proche sur la tête ICT
+déformée, du même côté des fentes des yeux et de la bouche (un sommet de paupière haute suit la paupière haute) ;
+lissage léger sur notre maillage, contours gardés ; les clignements sont mis à l'échelle pour fermer nos yeux (l'œil
+canonique de MediaPipe est plus ouvert) ; les sommets de la tête sur l'ovale suivent leur arête. Côtés : Left = gauche
+du visage (+X). Sur une autre forme de repos (l'acteur : FaceBuilder, Fit Shape), les déplacements sont mis à
+l'échelle de la largeur du visage. Même ajustement que le rig ci-dessous (`fitRig`, généralisé : jacobien, limites
+et coûts fournis par le rig) : poids bornés à [0, 1], formes surtout en profondeur (cheekPuff, pucker, roll) plus
+coûteuses ; le contrôle de repliement ignore les triangles dégénérés et ceux qui traversent les yeux et la bouche
+(fermés par blink / mouthClose), et seuls les triangles vraiment retournés atténuent l'expression.
+« MediaPipe Expressions » (0,1 par défaut) : sur les frames trouvées par MediaPipe, ses scores de blendshapes
+(mêmes noms) guident les formes en plus des points (`BlendshapeRig.fromMediaPipe` ; à 1, autant que les points) ;
+gauche et droite de MediaPipe sont moyennées (son côté n'est pas fiable), les points les distinguent.
+Suivi (flow → rig → shape) : pendant le suivi par le flot, c'est le visage du rig (sans la déformation locale des
+pins : `report["rigWorld"]`) qui est suivi à la frame suivante ; la correction locale des pins reste propre à sa
+frame et ne dérive pas.
+rig (`meshroom/live/faceRig.py`, `FaceRig`) : comme le modèle de tête de KeenTools
 FaceTracker, le visage est déformé par un rig construit sur la topologie MediaPipe (axes tirés du visage : menton →
 front, un côté à l'autre) : la mâchoire (rotation ouverture / latérale de la partie sous la ligne des lèvres autour
 d'une charnière près des oreilles), sourcils intérieur / extérieur, paupières haute / basse (la haute ne bouge pas

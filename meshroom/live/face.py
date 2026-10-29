@@ -703,6 +703,18 @@ def headVertexCount() -> int:
     return MESH_VERTICES + len(headData()["vertices"])
 
 
+def isRigModel(model: str) -> bool:
+    """ Whether a non rigid model ("Non Rigid Model") is a rig: "rig" (faceRig.FaceRig) or "arkit" (its ARKit shapes). """
+    from .faceRig import RIG_MODELS
+    return model in RIG_MODELS
+
+
+def rigFor(mesh: scene3d.GeoData, model: str = "rig"):
+    """ The rig of a face (or head) mesh for a rig model ("rig", "arkit"), its rest shape the mesh. """
+    from . import faceRig
+    return faceRig.rigOf(mesh.vertices, model, head=isHead(mesh))
+
+
 def isHead(mesh: Optional[scene3d.GeoData]) -> bool:
     """ Whether a mesh has the head topology (the face, then the ears, skull and neck). """
     return mesh is not None and len(mesh.vertices) == headVertexCount()
@@ -958,8 +970,9 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     neighboring vertices kept alike, `regularizedShifts`): a wrong landmark (drift, occlusion) is ignored, the hidden
     ones follow their neighbors, the mesh does not fold; 0: each vertex exactly on its landmark.
     `model` "rig": the face moved by its rig instead (faceRig.py: jaw, brows, lids, lips, cheeks; the rigid parts stay
-    rigid). Without pins, the head pose and the rig are fitted together. With pins, MediaPipe tells the expression
-    and the pins where the head is: the expression is that of the face fitted on the landmarks alone; the head pose is
+    rigid); "arkit": by the 51 ARKit expression shapes (faceRig.BlendshapeRig, each weighted in [0, 1]; `prior`: e.g.
+    the scores of MediaPipe). Without pins, the head pose and the rig are fitted together. With pins, MediaPipe tells
+    the expression and the pins where the head is: the expression is that of the face fitted on the landmarks alone; the head pose is
     then fitted alone with it, from the rigid pins and the landmarks of the rigid parts; the expression pins then move
     the rig from that expression (the pose kept), then, with `exactPins`, what the rig cannot do is done by a local
     warp around the expression pins (exact at the pins, over `pinRadius`) on the parts the rig moves only. `pins` may have a third element: for each
@@ -967,7 +980,7 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
     a pin is an expression pin where the rig moves the face, a rigid one elsewhere. The landmarks of a frame with pins
     weigh less (the pins are placed where MediaPipe is wrong); `stiffness` keeps the
     controls near the rest shape, `prior` / `priorWeight` near other parameters (e.g. the previous frame). `report`
-    (a dict) receives the "rigParams".
+    (a dict) receives the "rigParams" and "rigWorld" (the face the rig makes, without the warp of the pins).
 
     Args:
         mesh: the face (vertex i: landmark i), its shape the neutral face, in its own space.
@@ -998,21 +1011,20 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         pinPixels = np.asarray(pins[1], dtype=np.float64).reshape(-1, 2)
         if len(pins) > 2 and pins[2] is not None:
             expression = np.asarray(pins[2], dtype=bool).reshape(-1)
-        elif deform and model == "rig":
+        elif deform and isRigModel(model):
             # Not told: an expression pin where the rig moves the face
-            from . import faceRig
-            mobility = faceRig.rigOf(mesh.vertices).mobility
+            mobility = rigFor(mesh, model).mobility
             triangles = mesh.triangles()
             expression = np.array([float(w @ mobility[triangles[t]]) >= 0.5 for t, w in locations], dtype=bool)
         else:
             expression = np.ones(len(locations), dtype=bool)
         # Placed by hand: together, as much as the rigid landmarks (they orient the head where MediaPipe is wrong); the
         # rigid pins only when there are some
-        placing = ~expression if (deform and model == "rig" and (~expression).any()) else np.ones(len(locations), bool)
+        placing = ~expression if (deform and isRigModel(model) and (~expression).any()) else np.ones(len(locations), bool)
         repeat = max(3, int(np.ceil(len(rigid) / float(placing.sum()))))
         fitPoints = np.r_[fitPoints, np.repeat(pinPoints[placing], repeat, axis=0)]
         fitPixels = np.r_[fitPixels, np.repeat(pinPixels[placing], repeat, axis=0)]
-    rigidPinCount = int((~expression).sum()) if (deform and model == "rig") else len(locations)
+    rigidPinCount = int((~expression).sum()) if (deform and isRigModel(model)) else len(locations)
     poseKept = pose is not None and rigidPinCount == 0
     if poseKept:
         cameraToFace = scene3d.toMatrix4(pose)
@@ -1020,11 +1032,11 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
         error = float(np.sqrt(np.mean(np.sum((xy - pixels[rigid]) ** 2, axis=1)))) if len(rigid) else 0.0
     else:
         cameraToFace, _, error = robustPose(fitPoints, fitPixels, width, height, focal, start)
-    if deform and model == "rig":
+    if deform and isRigModel(model):
         from . import faceRig
         weights = np.ones(count)
         weights[[i for i in hidden if i < count]] = 0.0
-        rig = faceRig.rigOf(mesh.vertices)
+        rig = rigFor(mesh, model)
         triangles = mesh.triangles()
         rigidPins = [i for i in range(len(locations)) if not expression[i]]
         expressionPins = [i for i in range(len(locations)) if expression[i]]
@@ -1060,9 +1072,11 @@ def solveFace(mesh: scene3d.GeoData, pixels: np.ndarray, camera: scene3d.CameraD
                 # Rigid pins only: the head placed by them, with the expression MediaPipe sees
                 params = expressionSeen
                 local = rig.deform(params)
+        head = camera.matrix @ np.linalg.inv(cameraToFace)
         if report is not None:
             report["rigParams"] = params
-        head = camera.matrix @ np.linalg.inv(cameraToFace)
+            # The face the rig makes (without the warp of the pins): what tracking follows to the next frame
+            report["rigWorld"] = local @ head[:3, :3].T + head[:3, 3]
         if expressionPins and exactPins:
             # What the rig cannot do to reach the expression pins (a feature it has no control for, a stronger move):
             # a local smooth warp around each pin, exact at the pins (as the pins of KeenTools), on what the rig moves

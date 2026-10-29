@@ -10,6 +10,9 @@ from meshroom.live import scene3d
 from meshroom.live.gpu import gpuParam
 from meshroom.live.params import imageInput, maskParams, trackRangeParams
 
+# "MediaPipe Expressions" of 1: the scores of MediaPipe weigh about as much as the landmarks in the fit of the shapes
+EXPRESSION_PRIOR_SCALE = 50.0
+
 _COLOR = "#6E9E8A"
 
 
@@ -115,11 +118,18 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                      "the viewer: a rigid pin (cyan, the default) only places the head (rotation, "
                                      "position); an expression pin (magenta, toggled in the viewer) deforms the face "
                                      "(rig model: its controls, then a local warp with 'Exact Pins')."),
-        desc.ChoiceParam(name="deformModel", label="Non Rigid Model", value="rig", values=["rig", "surface"],
-                         description="rig: the face moved by a rig (jaw, brows, eyelids, lips, mouth corners, cheeks), "
-                                     "as the head model of KeenTools FaceTracker: the rigid parts (forehead, skull, nose "
-                                     "bridge, temples) stay rigid, the pins move the controls. surface: every vertex "
-                                     "free, a smooth surface through the landmarks (finer, less plausible)."),
+        desc.ChoiceParam(name="deformModel", label="Non Rigid Model", value="arkit", values=["arkit", "rig", "surface"],
+                         description="arkit: the face moved by the 51 expression shapes of ARKit (eyeBlinkLeft, "
+                                     "jawOpen, mouthSmileRight...; from ICT-FaceKit), each weighted from 0 to 1: only "
+                                     "expressions a face can make, the skull and nose bridge rigid; the pins move the "
+                                     "shapes. rig: a simpler rig of a few controls placed on the features (jaw, brows, "
+                                     "eyelids, lips, mouth corners, cheeks). surface: every vertex free, a smooth "
+                                     "surface through the landmarks (finer, less plausible)."),
+        desc.FloatParam(name="expressionPrior", label="MediaPipe Expressions", value=0.1, range=(0.0, 1.0, 0.01),
+                        enabled=lambda node: node.deformModel.value == "arkit",
+                        description="With the arkit model: how much the expressions MediaPipe reads (its blendshape "
+                                    "scores, frames found by MediaPipe) guide the shapes, besides the landmarks. 0: "
+                                    "the landmarks only."),
         desc.FloatParam(name="stiffness", label="Stiffness", value=0.3, range=(0.0, 5.0, 0.05),
                         description="With 'Non Rigid': rig: how much the controls stay at rest (less: stronger "
                                     "expressions, more noise). surface: how much the face keeps a smooth shape (0: "
@@ -364,21 +374,21 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if not (ctx.value("showPinReach") and ctx.value("deform")):
             return None
         # The expression pins of this frame (a keyframe): the others do not move the face here, the rigid ones never
-        pins = [pin for pin in self.pins(ctx, info) if self.isExpressionPin(pin) or ctx.value("deformModel") != "rig"]
+        pins = [pin for pin in self.pins(ctx, info)
+                if self.isExpressionPin(pin) or not face.isRigModel(ctx.value("deformModel"))]
         points, _ = self.pinsAt(pins, ctx.frame)
         if not len(points):
             return None
         mesh = self.mesh(ctx)
         locations = face.pinLocations(self.baseMesh(ctx), points)
         triangles = mesh.triangles()
-        if ctx.value("deformModel") == "rig":
-            # The areas of the controls under each pin (what the pin moves; a pin on a rigid part moves none)
-            from meshroom.live import faceRig
+        if face.isRigModel(ctx.value("deformModel")):
+            # The areas of the controls (or shapes) under each pin (what the pin moves; a pin on a rigid part moves none)
             try:
-                rig = faceRig.rigOf(mesh.vertices)
+                rig = face.rigFor(mesh, ctx.value("deformModel"))
             except ValueError:
                 return None
-            areas = np.c_[rig.weights, rig.jawWeight]
+            areas = rig.areas
             reach = np.zeros(len(mesh.vertices))
             for t, w in locations:
                 share = w @ areas[triangles[t]]
@@ -444,14 +454,30 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             solvePins = (face._onSurface(rest.vertices, rest.triangles(), face.pinLocations(neutral, solvePins[0])),
                          solvePins[1], solvePins[2])
         camera = self.camera(ctx, frame)
+        prior, priorWeight = self.expressionPrior(ctx, rest, tracked)
         geo, head, _, _ = face.solveFace(rest, pixels, camera, info.width, info.height, initial=initial,
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (), pins=solvePins,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
                                          model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"),
-                                         pose=(faces.get(frame) or {}).get("pose"))
+                                         pose=(faces.get(frame) or {}).get("pose"), prior=prior, priorWeight=priorWeight)
         inverse = np.linalg.inv(head)
         return geo.vertices @ inverse[:3, :3].T + inverse[:3, 3], head
+
+    @staticmethod
+    def expressionPrior(ctx, rest, tracked):
+        """ (the ARKit shapes MediaPipe read on a tracked frame, their weight) for face.solveFace: (None, 0) without
+        (another model, a frame followed by the flow, "MediaPipe Expressions" at 0). """
+        from meshroom.live import face
+        weight = float(ctx.value("expressionPrior"))
+        if ctx.value("deformModel") != "arkit" or weight <= 0 or not (tracked or {}).get("blendshapes"):
+            return None, 0.0
+        try:
+            prior = face.rigFor(rest, "arkit").fromMediaPipe(tracked["blendshapes"])
+        except ValueError:
+            return None, 0.0
+        # 1: as much as the landmarks (the prior is one row per shape, the landmarks 468 points)
+        return (prior, weight * EXPRESSION_PRIOR_SCALE) if prior is not None else (None, 0.0)
 
     def rawSolve(self, ctx, frame):
         """
@@ -817,15 +843,21 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         deform, stiffness = ctx.value("deform"), max(float(ctx.value("stiffness")), 0.05)
         pins = self.pins(ctx)
 
-        def regularize(frame, landmarks, hidden, pose=None):
+        def regularize(frame, landmarks, hidden, pose=None, blendshapes=None):
             camera = self.camera(ctx, frame)
             pixels = face.toPixels(landmarks, width, height)
+            report = {}
+            prior, priorWeight = self.expressionPrior(ctx, mesh, {"blendshapes": blendshapes})
             geo, _, _, _ = face.solveFace(mesh, pixels, camera, width, height, rigid=face.RIGID_LANDMARKS,
                                           deform=deform, hidden=hidden, stiffness=stiffness,
                                           pins=self.solvePinsAt(pins, frame),
                                           pinRadius=ctx.value("pinRadius"), model=ctx.value("deformModel"),
-                                          exactPins=ctx.value("exactPins"), pose=pose)
-            xy, _, _ = camera.project(geo.vertices, width, height)
+                                          exactPins=ctx.value("exactPins"), pose=pose, report=report,
+                                          prior=prior, priorWeight=priorWeight)
+            # A rig: the face it makes is followed to the next frame (flow -> rig), not the warp of the pins (a local
+            # correction of this frame only: it would drift from frame to frame)
+            followed = report.get("rigWorld")
+            xy, _, _ = camera.project(followed if followed is not None else geo.vertices, width, height)
             count = min(len(xy), len(landmarks))
             fitted = landmarks.copy()
             fitted[:count, 0] = xy[:count, 0] / width

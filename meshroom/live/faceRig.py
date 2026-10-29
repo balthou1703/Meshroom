@@ -141,19 +141,186 @@ class FaceRig:
         translations = params[:3 * self.controlCount].reshape(self.controlCount, 3) * self.unit
         return vertices + self.weights @ translations
 
+    @property
+    def areas(self) -> np.ndarray:
+        """ (n, controls + 1): how much each control (and the jaw) moves each vertex, in [0, 1]. """
+        return np.c_[self.weights, self.jawWeight]
+
+    def limits(self) -> Tuple[np.ndarray, np.ndarray]:
+        """ (low, high) soft limits of the parameters: each control its own (in parameter units: a tenth of the face
+        width), the jaw its angles. """
+        limits = np.array([controlLimit(name) for name, *_ in CONTROLS[:self.controlCount]])
+        perControl = np.repeat(limits[:, 0] / 0.1, 3)
+        return (np.r_[-perControl, [limit[0] for limit in JAW_LIMITS]],
+                np.r_[perControl, [limit[1] for limit in JAW_LIMITS]])
+
+    def costs(self) -> np.ndarray:
+        """ The cost of each parameter (times the stiffness): its control's, the moves toward the camera more. """
+        limits = np.array([controlLimit(name) for name, *_ in CONTROLS[:self.controlCount]])
+        forward = np.abs(self.axes[2])
+        return np.r_[np.tile(1.0 + (DEPTH_COST - 1.0) * forward, self.controlCount) * np.repeat(np.sqrt(limits[:, 1]), 3),
+                     np.ones(JAW_PARAMS)]
+
+    def vertexJacobian(self, params: np.ndarray) -> np.ndarray:
+        """ d vertices / d parameters (n, 3, paramCount) in face space. """
+        params = np.asarray(params, dtype=np.float64)
+        n, controls = len(self.rest), self.controlCount
+        jacobian = np.zeros((n, 3, self.paramCount))
+        for axis in range(3):
+            # Control c moves along the face axis `axis`
+            jacobian[:, axis, axis:3 * controls:3] = self.weights * self.unit
+        vertices = self.deform(params)
+        for j in range(JAW_PARAMS):
+            step = np.zeros(len(params))
+            step[3 * controls + j] = 1e-6
+            jacobian[:, :, 3 * controls + j] = (self.deform(params + step) - vertices) / 1e-6
+        return jacobian
+
+
+# The slits of the MediaPipe face (its triangles cross them, from one lid or lip to the other): (lower, upper) contours
+SLITS = (([33, 7, 163, 144, 145, 153, 154, 155, 133], [33, 246, 161, 160, 159, 158, 157, 173, 133]),
+         ([263, 249, 390, 373, 374, 380, 381, 382, 362], [263, 466, 388, 387, 386, 385, 384, 398, 362]),
+         ([78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308], [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308]))
+
+
+def acrossSlits(triangles: np.ndarray) -> np.ndarray:
+    """ Whether each triangle crosses an eye or the mouth (a corner on each lid or lip): closing them turns it. """
+    across = np.zeros(len(triangles), dtype=bool)
+    for lower, upper in SLITS:
+        onLower = np.isin(triangles, lower[1:-1]).any(axis=1)
+        onUpper = np.isin(triangles, upper[1:-1]).any(axis=1)
+        corners = np.isin(triangles, [lower[0], lower[-1]]).any(axis=1)
+        across |= (onLower & onUpper) | (corners & (onLower | onUpper) & np.isin(triangles, lower + upper).all(axis=1))
+    return across
+
+
+# Within this move (centimeters on the canonical head), a vertex moved by an expression shape counts as fully mobile
+BLENDSHAPE_MOBILE_MOVE = 0.5
+
+
+class BlendshapeRig:
+    """
+    The ARKit rig of the face (data/faceExpressions.npz: 51 expression shapes of the head of the FaceTracker,
+    transferred from ICT-FaceKit): the face is its rest shape plus the moves of the shapes, each weighted in [0, 1]
+    (eyeBlinkLeft, jawOpen, mouthSmileRight...: the names of ARKit, of MediaPipe, of the face rigs of Maya, Unreal and
+    Blender add-ons). The moves are made for the canonical head: on another rest shape (the actor's), they are scaled
+    by the width of its face. Same interface as FaceRig (fitRig).
+    """
+
+    # The shapes are made by hand: some triangles of the lips nearly fold in a wide open mouth, which is fine; only the
+    # triangles turned over (more than ~105 degrees) tone the expression down
+    foldLimit = -0.25
+    # The eyes and the mouth close (the triangles across them are not checked)
+    slitsClose = True
+
+    def __init__(self, rest: np.ndarray, head: bool = False):
+        rest = np.asarray(rest, dtype=np.float64)
+        self.rest = rest
+        names, deltas = expressionShapes()
+        self.names = list(names)
+        count = len(rest)
+        faceCount = 468
+        if count < faceCount or (head and count != deltas.shape[1]):
+            raise ValueError("The ARKit face rig needs the MediaPipe face topology (or the head of the FaceTracker).")
+        moves = np.zeros((len(names), count, 3))
+        if head:
+            moves[:] = deltas
+        else:
+            # A face mesh (468, or 478 with the irises: they do not move)
+            moves[:, :faceCount] = deltas[:, :faceCount]
+        canonical = _canonicalWidth(deltas)
+        width = float(np.linalg.norm(rest[LANDMARK["sideR"]] - rest[LANDMARK["sideL"]]))
+        self.scale = width / canonical if canonical > 0 else 1.0
+        self.width = width
+        # (n, 3, shapes)
+        self._jacobian = np.ascontiguousarray(np.transpose(moves * self.scale, (1, 2, 0)))
+        self._flat = self._jacobian.reshape(-1, len(names))
+        lengths = np.linalg.norm(moves, axis=2)
+        self._areas = (lengths / np.maximum(lengths.max(axis=1, keepdims=True), 1e-9)).T
+        self.mobility = np.clip(lengths.max(axis=0) / BLENDSHAPE_MOBILE_MOVE, 0.0, 1.0)
+        # Shapes moving mostly in depth (toward the camera: puffs, puckers, rolls) are poorly seen: they cost more
+        depth = np.sqrt((moves[:, :, 2] ** 2).sum(1) / np.maximum((lengths ** 2).sum(1), 1e-12))
+        self._costs = 1.0 + (DEPTH_COST - 1.0) * depth
+
+    @property
+    def paramCount(self) -> int:
+        return len(self.names)
+
+    @property
+    def areas(self) -> np.ndarray:
+        """ (n, shapes): how much each shape moves each vertex, in [0, 1] of its largest move. """
+        return self._areas
+
+    def deform(self, params: np.ndarray) -> np.ndarray:
+        params = np.asarray(params, dtype=np.float64)
+        return self.rest + (self._flat @ params).reshape(-1, 3)
+
+    def limits(self) -> Tuple[np.ndarray, np.ndarray]:
+        return np.zeros(self.paramCount), np.ones(self.paramCount)
+
+    def costs(self) -> np.ndarray:
+        return self._costs
+
+    def vertexJacobian(self, params: np.ndarray) -> np.ndarray:
+        return self._jacobian
+
+    def fromMediaPipe(self, blendshapes: dict) -> Optional[np.ndarray]:
+        """
+        The parameters MediaPipe sees (its blendshape scores, ARKit names), None without any. The two sides are
+        averaged (left and right of MediaPipe are not reliably those of the face): the landmarks tell them apart.
+        """
+        if not blendshapes:
+            return None
+        params = np.array([float(blendshapes.get(name, 0.0)) for name in self.names])
+        for k, name in enumerate(self.names):
+            for side, other in (("Left", "Right"), ("Right", "Left")):
+                if name.endswith(side):
+                    mirrored = name[:-len(side)] + other
+                    if mirrored in blendshapes:
+                        params[k] = 0.5 * (float(blendshapes.get(name, 0.0)) + float(blendshapes[mirrored]))
+        return np.clip(params, 0.0, 1.0)
+
+
+_EXPRESSIONS = {}
+
+
+def expressionShapes() -> Tuple[np.ndarray, np.ndarray]:
+    """ (names (51,), moves (51, head vertices, 3) in centimeters) of the ARKit shapes of the canonical head. """
+    if not _EXPRESSIONS:
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "faceExpressions.npz")
+        with np.load(path) as data:
+            _EXPRESSIONS["names"] = np.array(data["names"]).astype(str)
+            _EXPRESSIONS["deltas"] = np.array(data["deltas"], dtype=np.float64)
+    return _EXPRESSIONS["names"], _EXPRESSIONS["deltas"]
+
+
+def _canonicalWidth(deltas: np.ndarray) -> float:
+    """ The width of the canonical face (sideR to sideL) the shapes were made on. """
+    if "width" not in _EXPRESSIONS:
+        from . import face
+        vertices = face.canonicalHead().vertices
+        _EXPRESSIONS["width"] = float(np.linalg.norm(vertices[LANDMARK["sideR"]] - vertices[LANDMARK["sideL"]]))
+    return _EXPRESSIONS["width"]
+
+
+# The rig models: "rig" (FaceRig: controls placed on the features), "arkit" (BlendshapeRig: the ARKit shapes)
+RIG_MODELS = ("rig", "arkit")
+
 
 _RIGS = {}
 
 
-def rigOf(rest: np.ndarray) -> FaceRig:
-    """ The rig of a rest shape (cached by its values). """
+def rigOf(rest: np.ndarray, model: str = "rig", head: bool = False):
+    """ The rig of a rest shape (cached by its values): a FaceRig ("rig"), or a BlendshapeRig ("arkit"; `head`: the
+    rest shape is the head of the FaceTracker, not only the face). """
     rest = np.asarray(rest, dtype=np.float64)
-    key = (rest.shape, hash(rest.tobytes()))
+    key = (model, head, rest.shape, hash(rest.tobytes()))
     rig = _RIGS.get(key)
     if rig is None:
         if len(_RIGS) > 8:
             _RIGS.clear()
-        rig = _RIGS[key] = FaceRig(rest)
+        rig = _RIGS[key] = BlendshapeRig(rest, head) if model == "arkit" else FaceRig(rest)
     return rig
 
 
@@ -195,17 +362,10 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
     pinTargets = np.c_[pinTargets[:, 0] - width / 2.0, -(pinTargets[:, 1] - height / 2.0)] if len(pinLocations) else pinTargets
     pinRoots = np.sqrt(np.clip(np.broadcast_to(np.asarray(pinWeight, dtype=np.float64), (len(pinLocations),)), 0.0, None))
 
-    controls = rig.controlCount
     regularization = np.sqrt(stiffness) * 10.0
-    # The cost of each parameter (the translations along the forward axis of the face cost more)
-    forward = np.abs(rig.axes[2])
-    # Each control: its own limit (in parameter units: a tenth of the face width) and cost
-    limits = np.array([controlLimit(name) for name, *_ in CONTROLS[:controls]])
-    perControl = np.repeat(limits[:, 0] / 0.1, 3)
-    costs = np.r_[np.tile(1.0 + (DEPTH_COST - 1.0) * forward, controls) * np.repeat(np.sqrt(limits[:, 1]), 3),
-                  np.ones(JAW_PARAMS)]
-    low = np.r_[-perControl, [limit[0] for limit in JAW_LIMITS]]
-    high = np.r_[perControl, [limit[1] for limit in JAW_LIMITS]]
+    # The cost of each parameter (e.g. the moves toward the camera, poorly seen, cost more) and its limits
+    costs = rig.costs()
+    low, high = rig.limits()
     normals = _vertexNormals(rig.rest, triangles) if triangles is not None else None
     priorScale = np.sqrt(priorWeight) * 10.0 if priorWeight > 0 else 0.0
 
@@ -241,13 +401,8 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
         dCamera[:, 0, 1], dCamera[:, 2, 1] = pz, -px
         dCamera[:, 0, 2], dCamera[:, 1, 2] = -py, px
         dCamera[:, 0, 3] = dCamera[:, 1, 4] = dCamera[:, 2, 5] = 1.0
-        for axis in range(3):
-            # Control c moves along the face axis `axis`: rotation[:, axis] in the camera
-            dCamera[:, :, 6 + axis:6 + 3 * controls:3] = (rig.weights * rig.unit)[:, None, :] * rotation[:, axis][None, :, None]
-        for j in range(JAW_PARAMS):
-            step = np.zeros(len(params))
-            step[3 * controls + j] = 1e-6
-            dCamera[:, :, 6 + 3 * controls + j] = ((rig.deform(params + step) - vertices) / 1e-6) @ rotation.T
+        # The moves of the rig (face space) in the camera
+        dCamera[:, :, 6:] = np.einsum("ij,njk->nik", rotation, rig.vertexJacobian(params))
         # d projection / d camera point (n, 2, 3)
         dProjection = np.zeros((n, 2, 3))
         dProjection[:, 0, 0] = dProjection[:, 1, 1] = focal / z
@@ -319,7 +474,10 @@ def fitRig(rig: FaceRig, pixels: np.ndarray, weights: np.ndarray, width: int, he
     # triangle turns over)
     params = np.clip(x[6:], low, high)
     if triangles is not None:
-        params = params * unfoldedFraction(lambda t: rig.deform(params * t), rig.rest, triangles)
+        # The triangles across the eyes and the mouth turn when they close (BlendshapeRig: blinks, mouthClose)
+        checked = triangles[~acrossSlits(triangles)] if getattr(rig, "slitsClose", False) else triangles
+        params = params * unfoldedFraction(lambda t: rig.deform(params * t), rig.rest, checked,
+                                           limit=getattr(rig, "foldLimit", 0.15))
     return matrix, params, rig.deform(params)
 
 
@@ -328,19 +486,24 @@ def triangleNormals(vertices: np.ndarray, triangles: np.ndarray) -> np.ndarray:
     return normals / np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
 
 
-def unfoldedFraction(deformed, rest: np.ndarray, triangles: np.ndarray, steps: int = 8) -> float:
+def unfoldedFraction(deformed, rest: np.ndarray, triangles: np.ndarray, steps: int = 8, limit: float = 0.15) -> float:
     """
     The largest fraction t in [0, 1] of a deformation (`deformed(t)`: the vertices) for which no triangle turns over
-    (or nearly: its normal more than ~80 degrees from its `rest` one), by bisection; 1 when the whole deformation is
-    fine. The triangles already turned at t = 0 are left out.
+    (or nearly: the cosine of its normal with its `rest` one below `limit`, 0.15: more than ~80 degrees), by bisection;
+    1 when the whole deformation is fine. The triangles already turned at t = 0 are left out, and the degenerate ones
+    (nearly no area: e.g. along the face oval of a head), whose normal turns for any move.
     """
+    rest = np.asarray(rest, dtype=np.float64)
     reference = triangleNormals(rest, triangles)
+    corners = rest[triangles]
+    areas = np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
     # The triangles already turned at t = 0 (e.g. by another step) are not counted
-    counted = (triangleNormals(deformed(0.0), triangles) * reference).sum(1) >= 0.15
+    counted = ((triangleNormals(deformed(0.0), triangles) * reference).sum(1) >= limit) & \
+        (areas > 1e-3 * max(float(np.median(areas)), 1e-30))
 
     def folded(t):
         # Turned over, or nearly (more than ~80 degrees from its rest orientation)
-        return bool((((triangleNormals(deformed(t), triangles) * reference).sum(1) < 0.15) & counted).any())
+        return bool((((triangleNormals(deformed(t), triangles) * reference).sum(1) < limit) & counted).any())
     if not folded(1.0):
         return 1.0
     low, high = 0.0, 1.0
