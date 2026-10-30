@@ -20,12 +20,18 @@ def _torch():
 
 
 def _tensor(values: np.ndarray, device):
+    from . import profiling
     torch, _ = _torch()
-    return torch.from_numpy(np.ascontiguousarray(values, dtype=np.float32)).to(device)
+    values = np.ascontiguousarray(values, dtype=np.float32)
+    profiling.uploaded(values.nbytes)
+    return torch.from_numpy(values).to(device)
 
 
 def _numpy(tensor) -> np.ndarray:
-    return tensor.detach().to("cpu").numpy().astype(np.float32, copy=False)
+    from . import profiling
+    result = tensor.detach().to("cpu").numpy().astype(np.float32, copy=False)
+    profiling.downloaded(result.nbytes)
+    return result
 
 
 # Blur (ops.blur): separable gaussian, three box blurs for the large sizes; the result grows by the blur radius

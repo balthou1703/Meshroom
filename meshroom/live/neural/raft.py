@@ -65,6 +65,9 @@ def computeFlow(image, target, factor: int, device, cancel=None) -> np.ndarray:
             flows = model(first, second, num_flow_updates=12)
             # The last refinement, (1, 2, H, W): x to the right, y down, in pixels
             small = flows[-1][0, :, :sh, :sw].permute(1, 2, 0).to("cpu").numpy().astype(np.float32)
+        from .. import profiling
+        profiling.uploaded(a.nbytes + b.nbytes)
+        profiling.downloaded(small.nbytes)
     except NeuralUnavailable:
         raise
     except RuntimeError as e:

@@ -47,6 +47,8 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   Nuke script import, color management: OCIO or builtin colorspaces, Python expressions of the Switch,
 │   │                           #   scene3d.py: cameras / geometries (Topology shared across frames) / matrices and 3D files,
 │   │                           #   geoRender.py: shaded / edges / wireframe display with hidden lines, bake.py: Disconnect and Bake,
+│   │                           #   profiling.py: per node time / memory / GPU transfers (Evaluator.profiler),
+│   │                           #   benchmark.py: python -m meshroom.live.benchmark project.mg (cold / warm passes, per node table),
 │   │                           #   face.py: FaceTracker (MediaPipe landmarks, non-rigid face fit on a MediaPipe-topology mesh),
 │   │                           #   faceRig.py: the face rigs fitted by the FaceTracker (BlendshapeRig: the 51 ARKit
 │   │                           #   expression shapes; FaceRig: jaw, brows, lids, lips, cheeks controls),

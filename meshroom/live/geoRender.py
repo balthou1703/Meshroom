@@ -99,7 +99,10 @@ def _torchFragments(device):
 
     def fragments(tu, tv, tz, c0, r0, c1, r1, size, width, indices):
         def tensor(values, dtype=torch.float32):
-            return torch.as_tensor(np.ascontiguousarray(values), dtype=dtype, device=device)
+            from . import profiling
+            values = np.ascontiguousarray(values)
+            profiling.uploaded(values.nbytes)
+            return torch.as_tensor(values, dtype=dtype, device=device)
         tu, tv, tz = tensor(tu), tensor(tv), tensor(tz)
         c0, r0, c1, r1 = (tensor(values, torch.int64) for values in (c0, r0, c1, r1))
         cells = torch.arange(size * size, device=device)

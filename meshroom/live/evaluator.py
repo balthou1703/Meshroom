@@ -574,6 +574,10 @@ class RenderContext:
     _token: Optional[CancelToken] = None
 
 
+def _nodeType(planNode: PlanNode) -> str:
+    return type(planNode.nodeDesc).__name__
+
+
 def _cropped(image: ImageBuffer, region: BBox) -> ImageBuffer:
     """ An image limited to a region of interest (its bbox intersected with the region). """
     from .ops import alignToBBox
@@ -639,6 +643,8 @@ class Evaluator:
         self._data: "OrderedDict[Tuple[str, str, int], object]" = OrderedDict()
         self._dataBytes = 0
         self._lock = threading.RLock()
+        # A profiling.Profiler recording the cost of each node (benchmark), or None
+        self.profiler = None
 
     # Camera / geo / matrix values kept in memory: number, and memory (MESHROOM_LIVE_DATA_CACHE_GB, 2 by default)
     DATA_CACHE_SIZE = 4096
@@ -900,6 +906,8 @@ class Evaluator:
             with self._lock:
                 self._layerNames[uid] = list(cached.layerNames)
             self._markSucceeded(plan, uid, frame)
+            if self.profiler is not None:
+                self.profiler.cacheHit(uid, plan.nodes[uid].name, _nodeType(plan.nodes[uid]))
             return cached
 
         planNode = plan.nodes[uid]
@@ -972,7 +980,11 @@ class Evaluator:
             raise EvaluationCancelled()
 
         self._setStatus(uid, frame, EvalStatus.RUNNING)
+        profiler = self.profiler
+        if profiler is not None:
+            profiler.started(uid, planNode.name, _nodeType(planNode))
         start = time.perf_counter()
+        result = None
         try:
             result = planNode.nodeDesc.render(ctx, inputs)
             if not isinstance(result, ImageBuffer):
@@ -993,6 +1005,9 @@ class Evaluator:
             message = str(e) or e.__class__.__name__
             self._setStatus(uid, frame, EvalStatus.ERROR, message)
             raise EvaluationError(planNode.name, message) from e
+        finally:
+            if profiler is not None:
+                profiler.finished(uid, frame, result.nbytes if isinstance(result, ImageBuffer) else 0)
         elapsed = time.perf_counter() - start
         logging.debug("[Live] %s frame %d rendered in %.3fs", planNode.name, frame, elapsed)
         with self._lock:

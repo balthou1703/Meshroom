@@ -839,6 +839,19 @@ export MESHROOM_MODELS_PATH=/chemin/partage/meshroom-models
 Les noyaux GPU sont testés contre leurs versions CPU sur le device « cpu » de PyTorch (`tests/test_gpu.py`, sautés
 sans PyTorch).
 
+### Mesure des performances
+
+`python -m meshroom.live.benchmark projet.mg` (`meshroom/live/benchmark.py`) : rend les branches des Write du projet
+(dans les subgraphs aussi : `compositing_1`), ou les nœuds donnés (`--node compositing_1/Merge_1`, répétable), sur
+`--frames` (`1001-1010`, `1001,1005`, `1001-1100x10` ; par défaut dix frames depuis le début de la timeline), une fois
+avec un cache vide (« cold » : tout calculé) puis à nouveau (« warm » : ce que donne le cache). Tableau par nœud, du
+plus cher au moins cher : rendus, rendus pris dans le cache, temps propre (ses entrées exclues, aussi pour les nœuds
+temporels qui rendent leurs entrées eux-mêmes), temps par rendu, part, taille des images produites, octets envoyés au
+GPU et ramenés (`gpuOps`, `geoRender`, RAFT : `profiling.uploaded / downloaded`) ; `--memory` : mémoire allouée par
+chaque nœud au-delà de ce qui était déjà tenu (tracemalloc, plus lent) et pic de VRAM (PyTorch) ; `--python-profile N` :
+les N fonctions Python les plus chères (cProfile) ; `--no-gpu`, `--proxy`, `--cache-gb`, `--json` (tout : temps par
+frame, nœuds, pics). Le profileur (`profiling.Profiler`) se pose sur n'importe quel `Evaluator` (`evaluator.profiler`).
+
 ## 5. Import `.nk` (P4, fait)
 
 File > « Import Nuke Script... », ou glisser un `.nk` sur le graphe : les nœuds du script sont
