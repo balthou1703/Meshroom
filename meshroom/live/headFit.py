@@ -207,9 +207,9 @@ def contourConstraints(vertices: np.ndarray, triangles: np.ndarray, view: FitVie
                        mobility: np.ndarray, search: float) -> list:
     """
     The constraints of the outlines of the head in a view: the vertices on its outline (between the triangles facing
-    the camera and the others, nothing of the head beyond them) of the ears and the neck moved, along the normal of the outline in the image, onto the
-    nearest border of the skin within `search` pixels; those of the skull outside the head area moved in onto its
-    border. Units: centimeters at the vertex (pixels times its depth / focal).
+    the camera and the others, nothing of the head beyond them) of the ears and the neck moved, along the normal of
+    the outline in the image, onto the nearest border of the skin within `search` pixels; those of the skull outside
+    the head area moved in onto its border. Units: centimeters at the vertex (pixels times its depth / focal).
     """
     width, height = view.size
     camera = view.camera
