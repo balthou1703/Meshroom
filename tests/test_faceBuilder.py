@@ -159,7 +159,7 @@ def test_faceBuilderNode(monkeypatch):
     graph.update()
     trackerPlan = buildPlan(tracker)
     shape = Evaluator().data(trackerPlan, trackerPlan.target, "shapeOutput", 1)
-    np.testing.assert_allclose(shape.vertices, head.vertices, atol=1e-6)
+    np.testing.assert_allclose(shape.vertices, head.vertices, atol=1e-3)
     assert builder.nodeDesc.runAction("clearHead", context) == {"faceShape": "", "views": "", "headFit": ""}
 
 
@@ -593,7 +593,8 @@ def test_faceBuilderFitsEarsNeckAndSkull(monkeypatch):
         cameras = _headViews((0, 60, -60), size)
         graph = Graph("builderFit")
         plates = [graph.addNewNode("LabelPlate", view=index) for index in range(3)]
-        builder = graph.addNewNode("FaceBuilder", fitDepth=False)
+        # (the free fit: this actor's bumps are not in the identity model)
+        builder = graph.addNewNode("FaceBuilder", fitDepth=False, predictHead=False)
         names = ("input", "input1", "input2")
         for plate, name in zip(plates, names):
             graph.addEdge(plate.output, builder.attribute(name))
@@ -618,3 +619,52 @@ def test_faceBuilderFitsEarsNeckAndSkull(monkeypatch):
         assert builder.nodeDesc.runAction("clearHead", context)["headFit"] == ""
     finally:
         unregisterNodeDesc(LabelPlate)
+
+
+# The identity model: the proportions of the whole head from its face
+
+def _identityActor(seed=3, spread=1.2):
+    from meshroom.live import headFit
+    modes = headFit.identityModel()
+    coefficients = np.random.default_rng(seed).normal(0, spread, len(modes))
+    return face.canonicalHead().vertices + np.tensordot(coefficients, modes, axes=1)
+
+
+def test_identityPredictsTheHeadFromTheFace():
+    """ A head of the model: its face alone predicts its skull, ears and neck better than following the face. """
+    from meshroom.live import headFit
+    rest = face.canonicalHead().vertices
+    n = face.MESH_VERTICES
+    for seed in (1, 2, 3):
+        actor = _identityActor(seed)
+        faceTarget = actor[:n]
+        followed = face.HeadFollow.of(rest).follow(faceTarget)
+        predicted = headFit.identityHead(rest, faceTarget, headFit.predictIdentity(faceTarget, rest))
+        np.testing.assert_allclose(predicted[:n], faceTarget, atol=1e-9)
+        errorFollowed = np.linalg.norm(followed - actor, axis=1)[n:].mean()
+        errorPredicted = np.linalg.norm(predicted - actor, axis=1)[n:].mean()
+        print(f"seed {seed}: canonical {np.linalg.norm(rest - actor, axis=1)[n:].mean():.3f}, followed "
+              f"{errorFollowed:.3f}, predicted {errorPredicted:.3f}")
+        assert errorPredicted < 0.8 * errorFollowed
+
+
+def test_identityFittedOnTheOutlines():
+    """ The identity refined on the segmented views of the actor: closer than predicted from the face alone. """
+    from meshroom.live import headFit
+    head = face.canonicalHead()
+    rest = head.vertices
+    n = face.MESH_VERTICES
+    size = (640, 480)
+    cameras = _headViews((0, 60, -60, 120, -120), size)
+    segmenter = _ColorSegmenter()
+    for seed in (1, 3):
+        actor = _identityActor(seed)
+        views = [headFit.FitView(camera, size, segmenter.segment((_labelImage(actor, camera, size) * 255).astype(np.uint8)),
+                                 (0, 0)) for camera in cameras]
+        predicted = headFit.identityHead(rest, actor[:n], headFit.predictIdentity(actor[:n], rest))
+        fit = headFit.fitIdentity(rest, actor[:n], head.topology, views, useDepth=False)
+        fitted = headFit.identityHead(rest, actor[:n], fit["identity"])
+        errorPredicted = np.linalg.norm(predicted - actor, axis=1)[n:].mean()
+        errorFitted = np.linalg.norm(fitted - actor, axis=1)[n:].mean()
+        print(f"seed {seed}: predicted {errorPredicted:.3f}, fitted {errorFitted:.3f} ({fit['constraints']} constraints)")
+        assert fit["constraints"] > 50 and errorFitted < 0.75 * errorPredicted

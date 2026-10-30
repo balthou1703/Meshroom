@@ -440,3 +440,115 @@ def fitHead(head: scene3d.GeoData, views: List[FitView], radius: float = 3.0, it
             break
     return {"radius": radius, "centers": [int(c) for c in centers],
             "weights": [[round(float(v), 5) for v in w] for w in weights], "constraints": used}
+
+
+# The identity model: the proportions of the whole head from its face, refined on the outlines
+
+# Prior of the identity coefficients (centimeters squared per standard deviation squared), and their limit
+IDENTITY_PRIOR = 1.0
+IDENTITY_LIMIT = 3.0
+_IDENTITY = {}
+
+
+def identityModel() -> np.ndarray:
+    """ The identity modes of the head of the FaceBuilder (data/faceIdentity.npz: ICT-FaceKit PCA modes transferred,
+    each one standard deviation): (modes, head vertices, 3), centimeters. """
+    if "deltas" not in _IDENTITY:
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "faceIdentity.npz")
+        with np.load(path) as data:
+            _IDENTITY["deltas"] = np.array(data["deltas"], dtype=np.float64)
+    return _IDENTITY["deltas"]
+
+
+def hasIdentityModel(rest: np.ndarray) -> bool:
+    """ Whether the identity model applies to a head (the topology of the head of the FaceBuilder). """
+    return len(rest) == identityModel().shape[1]
+
+
+def predictIdentity(faceTarget: np.ndarray, rest: np.ndarray, prior: float = IDENTITY_PRIOR) -> np.ndarray:
+    """
+    The identity coefficients (standard deviations) whose face best matches `faceTarget` (468, 3: the face fitted on
+    the landmarks, in the space of the `rest` head), regularized toward the average head: the proportions of the skull,
+    ears and neck that go with this face.
+    """
+    modes = identityModel()
+    count = face.MESH_VERTICES
+    A = modes[:, :count].reshape(len(modes), -1).T
+    residual = (np.asarray(faceTarget, dtype=np.float64)[:count] - rest[:count]).ravel()
+    coefficients = np.linalg.solve(A.T @ A + prior * np.eye(len(modes)), A.T @ residual)
+    return np.clip(coefficients, -IDENTITY_LIMIT, IDENTITY_LIMIT)
+
+
+def identityHead(rest: np.ndarray, faceTarget: np.ndarray, coefficients) -> np.ndarray:
+    """
+    The head of identity `coefficients` whose face is exactly `faceTarget`: the model head (rest + modes), its face
+    replaced by the fitted one, the difference followed by the head (face.HeadFollow: affine, then fading out).
+    """
+    rest = np.asarray(rest, dtype=np.float64)
+    modes = identityModel()
+    coefficients = np.asarray(coefficients, dtype=np.float64)[:len(modes)]
+    model = rest + np.tensordot(coefficients, modes[:len(coefficients)], axes=1)
+    follow = face.HeadFollow.of(rest)
+    faceTarget = np.asarray(faceTarget, dtype=np.float64)[:face.MESH_VERTICES]
+    return model + follow.follow(faceTarget) - follow.follow(model[:face.MESH_VERTICES])
+
+
+def fitIdentity(rest: np.ndarray, faceTarget: np.ndarray, topology, views: List[FitView],
+                regularization: float = 0.1, iterations: int = 8, search: float = 40.0, useDepth: bool = True,
+                cancel: Optional[Callable[[], None]] = None, progress: Optional[Callable[[float], None]] = None) -> dict:
+    """
+    The identity coefficients of a head whose face is `faceTarget`, refined on the views: the outlines of the ears and
+    neck on the skin, the skull inside the head, the depth of the ears (contourConstraints, depthConstraints), all the
+    views together, robust, regularized toward the proportions the face predicts (predictIdentity): a few coefficients
+    for the whole head, so a wrong border cannot bend it, the result always a human head.
+
+    Returns:
+        {"identity": [coefficients], "constraints": count used}.
+    """
+    rest = np.asarray(rest, dtype=np.float64)
+    predicted = predictIdentity(faceTarget, rest)
+    modes = len(predicted)
+    origin = identityHead(rest, faceTarget, np.zeros(modes))
+    # The head is linear in the coefficients (the follow of the face is): its Jacobian (n, 3, modes)
+    jacobian = np.stack([identityHead(rest, faceTarget, np.eye(modes)[k]) - origin for k in range(modes)], axis=2)
+    geo = scene3d.GeoData(origin, topology=topology)
+    triangles = geo.triangles()
+    regions = headRegions(geo)
+    mobility = face.headMobility(geo)
+    coefficients = predicted.copy()
+    used = 0
+    for iteration in range(iterations):
+        if cancel:
+            cancel()
+        current = origin + jacobian @ coefficients
+        constraints = []
+        for view in views:
+            constraints += contourConstraints(current, triangles, view, regions, mobility,
+                                              view.search if view.search else search)
+            if useDepth:
+                constraints += depthConstraints(current, triangles, view, regions, mobility)
+        used = len(constraints)
+        if not constraints:
+            break
+        counts = {}
+        for constraint in constraints:
+            counts[constraint[3]] = counts.get(constraint[3], 0) + 1
+        outlines = max(counts.get("contour", 0) + counts.get("neck", 0) + counts.get("skull", 0), 1)
+        rows = np.zeros((len(constraints), modes))
+        rhs = np.zeros(len(constraints))
+        for k, (vertex, row, wanted, kind) in enumerate(constraints):
+            robust = 1.0 / np.sqrt(1.0 + (wanted / (3.0 * ROBUST_SCALE[kind])) ** 2)
+            share = KIND_WEIGHT[kind] * (outlines / counts[kind] if kind == "depth" else 1.0)
+            root = np.sqrt(share) * robust
+            rows[k] = root * (row @ jacobian[vertex])
+            rhs[k] = root * wanted
+        # Gauss-Newton step, regularized toward the proportions of the face (more with more constraints)
+        damping = regularization * max(1.0, len(constraints) / 50.0)
+        step = np.linalg.solve(rows.T @ rows + damping * np.eye(modes), rows.T @ rhs - damping * (coefficients - predicted))
+        coefficients = np.clip(coefficients + step, -IDENTITY_LIMIT, IDENTITY_LIMIT)
+        if progress:
+            progress((iteration + 1) / float(iterations))
+        if np.abs(step).max() < 1e-3:
+            break
+    return {"identity": [round(float(c), 5) for c in coefficients], "constraints": used}

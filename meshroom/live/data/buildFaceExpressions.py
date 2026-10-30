@@ -17,6 +17,9 @@ ICT names the sides "_L" / "_R" and splits browInnerUp and cheekPuff: the shapes
 (eyeBlinkLeft, ...; the left of the face, +X), the split ones summed. ARKit's tongueOut has no ICT shape.
 
 Saved: "names" (51,) and "deltas" (51, vertices, 3) float16, centimeters, in the space of the canonical head.
+
+Also faceIdentity.npz: the identity model of ICT (its first 50 PCA modes, each one standard deviation: the shape of the
+whole head of a person, face, skull, ears and neck together), transferred the same way: "deltas" (50, vertices, 3).
 """
 
 import json
@@ -142,13 +145,15 @@ def slitSides(points, face):
     return sides
 
 
-def build(ictFolder):
+def transfer(ictFolder):
+    """
+    The transfer of the moves of the ICT head onto our head: function(names of ICT shape files) -> (k, our vertices,
+    3) moves (aligned, mapped on the closest points, smoothed, the oval kept closed).
+    """
     from scipy import sparse
     from scipy.interpolate import RBFInterpolator
     from scipy.spatial import cKDTree
     from meshroom.live import face as faceModule
-    with open(os.path.join(ictFolder, "vertex_indices.json")) as f:
-        ictNames = json.load(f)["expressions"]
     count = buildFaceHead.ICT_HEAD_VERTICES
     neutral, polygons = buildFaceHead.readObj(os.path.join(ictFolder, "generic_neutral_mesh.obj"))
     neutral = neutral[:count]
@@ -157,8 +162,6 @@ def build(ictFolder):
     scale, rotation, translation = buildFaceHead.similarity(neutral[buildFaceHead.ICT_68[17:]],
                                                             face[buildFaceHead.MEDIAPIPE_68[17:]])
     aligned = (scale * (rotation @ neutral.T)).T + translation
-    ictDeltas = np.stack([(scale * (rotation @ (readVertices(os.path.join(ictFolder, f"{name}.obj"), count) - neutral).T)).T
-                          for name in ictNames])
     triangles = buildFaceHead.triangulate(polygons[:buildFaceHead.ICT_HEAD_POLYGONS])
     loops = buildFaceHead.boundaryLoops(triangles)
 
@@ -199,7 +202,6 @@ def build(ictFolder):
         corners[i], weights[i] = triangles[candidates[k]], w[k]
     for vertex, (a, b, w) in onContour.items():
         corners[vertex], weights[vertex] = (a, b, b), (1.0 - w, w, 0.0)
-    deltas = np.einsum("vj,kvjd->kvd", weights, ictDeltas[:, corners])
 
     # Smoothed over our mesh (its triangles are coarser than the ICT ones), the contours kept
     edges = head.edges()
@@ -209,23 +211,39 @@ def build(ictFolder):
     adjacency.data[:] = 1.0
     average = sparse.diags(1.0 / np.maximum(np.asarray(adjacency.sum(1)).ravel(), 1.0)) @ adjacency
     kept = sorted(contourVertices)
-    for k in range(len(deltas)):
-        moves = deltas[k]
-        for _ in range(SMOOTHING_STEPS):
-            smoothed = 0.5 * moves + 0.5 * (average @ moves)
-            smoothed[kept] = moves[kept]
-            moves = smoothed
-        deltas[k] = moves
+    data = faceModule.headData()
+
+    def moves(names):
+        ictDeltas = np.stack([(scale * (rotation @ (readVertices(os.path.join(ictFolder, f"{name}.obj"), count)
+                                                     - neutral).T)).T for name in names])
+        deltas = np.einsum("vj,kvjd->kvd", weights, ictDeltas[:, corners])
+        for k in range(len(deltas)):
+            shape = deltas[k]
+            for _ in range(SMOOTHING_STEPS):
+                smoothed = 0.5 * shape + 0.5 * (average @ shape)
+                smoothed[kept] = shape[kept]
+                shape = smoothed
+            deltas[k] = shape
+        # The head vertices on the face oval stay on their oval edge
+        for vertex, (a, b), w in zip(data["hole"], data["holeEdges"], data["holeWeights"]):
+            deltas[:, faceModule.MESH_VERTICES + vertex] = (1 - w) * deltas[:, a] + w * deltas[:, b]
+        return deltas
+    return moves
+
+
+def build(ictFolder):
+    """ The ARKit shapes of our head: {"names", "deltas"}. """
+    from meshroom.live import face as faceModule
+    with open(os.path.join(ictFolder, "vertex_indices.json")) as f:
+        ictNames = json.load(f)["expressions"]
+    vertices = faceModule.canonicalHead().vertices
+    deltas = transfer(ictFolder)(ictNames)
     # The blinks close our eyes: the middle of the upper lid down to the height of the lower one
     for name, up, low in BLINKS:
         k = ictNames.index(name)
         opening = vertices[up, 1] - vertices[low, 1]
         closing = deltas[k][low, 1] - deltas[k][up, 1]
         deltas[k] *= opening / max(closing, 1e-6)
-    # The head vertices on the face oval stay on their oval edge
-    data = faceModule.headData()
-    for vertex, (a, b), w in zip(data["hole"], data["holeEdges"], data["holeWeights"]):
-        deltas[:, faceModule.MESH_VERTICES + vertex] = (1 - w) * deltas[:, a] + w * deltas[:, b]
 
     # The ARKit shapes
     shapes = {}
@@ -238,10 +256,23 @@ def build(ictFolder):
     return {"names": np.array(ARKIT), "deltas": np.stack([shapes[name] for name in ARKIT]).astype(np.float16)}
 
 
+# The identity modes kept (of 100: the last ones move the head by less than a tenth of a millimeter)
+IDENTITY_MODES = 50
+
+
+def buildIdentity(ictFolder, modes: int = IDENTITY_MODES):
+    """ The identity model of our head (ICT PCA modes, each one standard deviation): {"deltas"} (modes, vertices, 3). """
+    deltas = transfer(ictFolder)([f"identity{index:03d}" for index in range(modes)])
+    return {"deltas": deltas.astype(np.float16)}
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(__doc__)
+    folder = os.path.dirname(os.path.abspath(__file__))
     result = build(sys.argv[1])
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faceExpressions.npz")
-    np.savez_compressed(path, **result)
-    print(f"{path}: {len(result['names'])} shapes of {result['deltas'].shape[1]} vertices")
+    np.savez_compressed(os.path.join(folder, "faceExpressions.npz"), **result)
+    print(f"faceExpressions.npz: {len(result['names'])} shapes of {result['deltas'].shape[1]} vertices")
+    identity = buildIdentity(sys.argv[1])
+    np.savez_compressed(os.path.join(folder, "faceIdentity.npz"), **identity)
+    print(f"faceIdentity.npz: {identity['deltas'].shape[0]} identity modes")

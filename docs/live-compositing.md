@@ -697,6 +697,16 @@ recalculé depuis les nouveaux contours (5 itérations), les déplacements régu
 de contrôle et leurs déplacements), appliqué avant les pins. Modèles : `python -m meshroom.live.neural.download
 headsegmenter depthanything` (Apache-2.0). Sur des vues synthétiques : erreur des oreilles, du cou et du crâne
 divisée par ~2 avec les contours, par ~2,5 avec la profondeur.
+« Head From Face » (FaceBuilder, activé par défaut) : la tête entière prend les proportions qui vont avec le visage
+ajusté, via le modèle d'identité d'ICT-FaceKit (MIT ; 50 modes PCA appris sur des scans de têtes entières, transférés
+sur notre topologie par `meshroom/live/data/buildFaceExpressions.py` → `faceIdentity.npz`). Les coefficients sont
+prédits par moindres carrés régularisés sur le visage (`headFit.predictIdentity`) ; la tête est
+`identityHead` = repos + modes·c, corrigée pour que le visage soit exactement celui ajusté. « Fit Ears, Neck And
+Skull » n'ajuste alors plus des déplacements libres mais ces ~50 coefficients (`headFit.fitIdentity`, Gauss-Newton
+sur les mêmes contraintes de contour et de profondeur, ramené vers la prédiction) : le résultat reste une tête humaine
+même quand la segmentation se trompe, et « Head Fit » stocke les coefficients. Sur des têtes synthétiques du modèle :
+erreur hors visage −30 à 50 % par la prédiction (contre le simple suivi du visage), encore −35 % par l'ajustement.
+Sans « Head From Face » : l'ancien comportement (la tête suit le visage, ajustement libre avec « Fit Radius »).
 
 « Fit Shape » (bouton du nœud et du viewer, `face.fitShape`) : la forme du visage de l'acteur, comme la tête de
 KeenTools FaceBuilder, trouvée sur les frames trackées de la plage (40 au plus, réparties, toutes les keyframes

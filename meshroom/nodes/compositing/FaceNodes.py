@@ -901,7 +901,9 @@ canonical face of MediaPipe with ears, skull and neck following it) warped onto 
   all the views at once, each with its head pose and expression (the face rig) and its focal length (estimated, or
   "Focal Length"). The views from different angles give the depth one view does not. "Fit Again" fits on the stored
   landmarks again (e.g. after changing "Smoothness").
-- The ears, skull and neck are not seen by the landmarks: they follow the face (its size and proportions). Pins
+- The ears, skull and neck are not seen by the landmarks: with "Head From Face", they take the proportions that go
+  with the face (a statistical model of whole heads, ICT-FaceKit); "Fit Ears, Neck And Skull" refines them on the
+  outlines of the views (and their depth). Pins
   place them, as in KeenTools FaceBuilder: in the viewer (the view shown, "Show View"), "Add a pin", click on the head
   (an ear, the top or the back of the skull, the jaw line...), then drag the pin onto its place in the photo. The head
   follows live, a smooth move around each pin ("Pin Radius"); pins near each other in several views move it in 3D,
@@ -950,14 +952,19 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
           for index, pinsName in enumerate(_VIEW_PINS.values())],
         desc.PushButtonParam(name="buildHead", label="Build Head", semantic="liveAction",
                              description="Find the face in each view and fit the head on all of them."),
+        desc.BoolParam(name="predictHead", label="Head From Face", value=True,
+                       description="The skull, ears and neck take the proportions that go with the face (the identity "
+                                   "model of ICT-FaceKit: 50 modes learned on scans of whole heads, the face fitted on "
+                                   "the landmarks); off: they only follow the face (stretched with it)."),
         desc.PushButtonParam(name="fitHeadContours", label="Fit Ears, Neck And Skull", semantic="liveAction",
                              description="After 'Build Head': fit the ears, the neck and the skull on the views, as "
                                          "the pins would (MediaPipe segmentation: the outlines of the ears and neck "
                                          "on the skin, the skull inside the hair; with 'Use Depth', the depth of the "
                                          "Depth Anything network). The pins still apply after it."),
         desc.FloatParam(name="fitRadius", label="Fit Radius", value=3.0, range=(1.0, 10.0, 0.1), invalidate=False,
-                        description="'Fit Ears, Neck And Skull': how smooth the move is (centimeters around each "
-                                    "control point; more: smoother, less detail)."),
+                        enabled=lambda node: not node.predictHead.value,
+                        description="'Fit Ears, Neck And Skull' without 'Head From Face': how smooth the move is "
+                                    "(centimeters around each control point; more: smoother, less detail)."),
         desc.BoolParam(name="fitDepth", label="Use Depth", value=True, invalidate=False,
                        description="'Fit Ears, Neck And Skull' also uses the depth of the views (Depth Anything V2: "
                                    "pip install transformers, python -m meshroom.live.neural.download depthanything); "
@@ -1063,17 +1070,46 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         except ValueError as e:
             raise RuntimeError(str(e)) from e
         original = self.original(ctx)
-        if offsets is None or len(offsets) != len(base.vertices):
-            fitted = original
-        elif ctx.value("meshType") != "head":
-            fitted = scene3d.GeoData(base.vertices + offsets, name="face", topology=base.topology)
-        else:
+        hasShape = offsets is not None and len(offsets) == len(base.vertices)
+        if ctx.value("meshType") != "head":
+            fitted = scene3d.GeoData(base.vertices + offsets, name="face", topology=base.topology) if hasShape else original
+        elif self.usesIdentity(ctx, original):
+            # The proportions of the whole head from its face (the identity model), or fitted on the views
+            from meshroom.live import headFit
+            faceTarget = base.vertices + offsets if hasShape else original.vertices[:face.MESH_VERTICES]
+            coefficients = self.storedIdentity(ctx) if withFit else None
+            if coefficients is None:
+                coefficients = headFit.predictIdentity(faceTarget, original.vertices)
+            fitted = scene3d.GeoData(headFit.identityHead(original.vertices, faceTarget, coefficients), name="head",
+                                     topology=original.topology)
+        elif hasShape:
             fitted = scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(base.vertices + offsets), name="head",
                                      topology=original.topology)
+        else:
+            fitted = original
         if not withFit:
             return fitted
         fitted = self.headFitted(ctx, fitted)
         return self.pinned(ctx, fitted, original)
+
+    @staticmethod
+    def usesIdentity(ctx, original) -> bool:
+        """ Whether the head comes from the identity model ("Head From Face"; a head of the FaceBuilder topology). """
+        from meshroom.live import face, headFit
+        return bool(ctx.value("predictHead")) and face.isHead(original) and headFit.hasIdentityModel(original.vertices)
+
+    @staticmethod
+    def storedIdentity(ctx):
+        """ The identity coefficients fitted on the views ("Fit Ears, Neck And Skull"), or None. """
+        import json
+        text = ctx.value("headFit")
+        if not text:
+            return None
+        try:
+            identity = json.loads(text).get("identity")
+        except (ValueError, AttributeError):
+            return None
+        return np.asarray(identity, dtype=np.float64) if identity else None
 
     def headFitted(self, ctx, head):
         """ The head with its ears, neck and skull fitted on the views ("Fit Ears, Neck And Skull"), if done. """
@@ -1302,9 +1338,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             segmenter.close()
         if not views:
             raise RuntimeError("Fit Ears, Neck And Skull: the head is not in the views.")
-        fit = headFit.fitHead(head, views, radius=context.value("fitRadius"), useDepth=estimator is not None,
-                              cancel=context.checkCancelled,
-                              progress=lambda done: context.progress(0.6 + 0.4 * done, "Fit the head"))
+        original = self.original(ctx)
+        progress = lambda done: context.progress(0.6 + 0.4 * done, "Fit the head")  # noqa: E731
+        if self.usesIdentity(ctx, original):
+            # The proportions of the whole head (identity coefficients) fitted on the views: a human head whatever the
+            # segmentation does
+            fit = headFit.fitIdentity(original.vertices, head.vertices[:face.MESH_VERTICES], original.topology, views,
+                                      useDepth=estimator is not None, cancel=context.checkCancelled, progress=progress)
+        else:
+            fit = headFit.fitHead(head, views, radius=context.value("fitRadius"), useDepth=estimator is not None,
+                                  cancel=context.checkCancelled, progress=progress)
         if not fit["constraints"]:
             raise RuntimeError("Fit Ears, Neck And Skull: no outline of the ears, neck or skull found in the views.")
         import logging
