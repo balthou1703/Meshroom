@@ -133,7 +133,9 @@ def headRegions(head: scene3d.GeoData) -> dict:
     ear = isHeadPart & (np.abs(x) > 7.3) & (y > -4.0) & (y < 4.5) & (z > -6.0) & (z < 1.5)
     neck = isHeadPart & ~ear & (y < -7.0)
     skull = isHeadPart & ~ear & ~neck
-    _REGIONS[count] = {"ear": ear, "neck": neck, "skull": skull}
+    # The neck down to the collar (its lower part and the cut of the mesh are hidden by clothes, wrongly segmented)
+    upperNeck = neck & (y > -10.5)
+    _REGIONS[count] = {"ear": ear, "neck": neck, "skull": skull, "upperNeck": upperNeck}
     return _REGIONS[count]
 
 
@@ -222,7 +224,7 @@ def contourConstraints(vertices: np.ndarray, triangles: np.ndarray, view: FitVie
     for i in range(3):
         front[triangles[facing, i]] = True
         back[triangles[~facing, i]] = True
-    parts = regions["ear"] | regions["neck"] | regions["skull"]
+    parts = regions["ear"] | regions["upperNeck"] | regions["skull"]
     candidates = np.where(front & back & (mobility > 0.05) & (depth > 0) & parts)[0]
     if not len(candidates):
         return []
@@ -264,7 +266,8 @@ def contourConstraints(vertices: np.ndarray, triangles: np.ndarray, view: FitVie
         offset = float(offsets[np.argmin(np.abs(offsets))])
         scale = max(float(depth[vertex]), 1e-6) / max(focal, 1e-6)
         row = scale * (direction @ jacobians[vertex])
-        constraints.append((int(vertex), row, scale * offset, "skull" if isSkull else "contour"))
+        kind = "skull" if isSkull else "neck" if regions["neck"][vertex] else "contour"
+        constraints.append((int(vertex), row, scale * offset, kind))
     return constraints
 
 
@@ -311,7 +314,7 @@ def depthConstraints(vertices: np.ndarray, triangles: np.ndarray, view: FitView,
         return []
     forward = -camera.viewMatrix[2, :3]
     constraints = []
-    targets = np.where(visible & onSkin & (regions["ear"] | regions["neck"]) & (mobility > 0.05) &
+    targets = np.where(visible & onSkin & regions["ear"] & (mobility > 0.05) &
                        np.isfinite(disparity))[0]
     # Not on a depth edge (an ear rim before the skull): the depths around the vertex (3 pixels) must agree
     around = [view.disparityAt(xy[targets] + offset) for offset in ([3, 0], [-3, 0], [0, 3], [0, -3])]
@@ -360,13 +363,22 @@ def applyFit(head: scene3d.GeoData, fit: Optional[dict]) -> np.ndarray:
     if centers.max() >= len(vertices):
         return vertices
     moves = np.asarray(fit["weights"], dtype=np.float64).reshape(-1, 3)
-    return vertices + basis(vertices, centers, float(fit["radius"]), face.headMobility(head)) @ moves
+    return vertices + _capped(basis(vertices, centers, float(fit["radius"]), face.headMobility(head)) @ moves)
 
 
 # Robust scale of each kind of constraint (centimeters): beyond a few times this, a constraint barely counts
-ROBUST_SCALE = {"contour": 0.6, "skull": 0.6, "depth": 0.8}
+ROBUST_SCALE = {"contour": 0.6, "neck": 0.5, "skull": 0.6, "depth": 0.8}
 # How much each kind counts (the depth: all its constraints together, relative to all the outlines)
-KIND_WEIGHT = {"contour": 1.0, "skull": 1.0, "depth": 0.5}
+KIND_WEIGHT = {"contour": 1.0, "neck": 0.5, "skull": 1.0, "depth": 0.5}
+# The largest move of a vertex (centimeters): a head differs from the base by less (a wrong border cannot drag it far)
+MAX_MOVE = 2.5
+
+
+def _capped(moves: np.ndarray) -> np.ndarray:
+    """ Moves (n, 3) smoothly limited to MAX_MOVE. """
+    lengths = np.linalg.norm(moves, axis=1, keepdims=True)
+    factor = np.where(lengths > 1e-9, MAX_MOVE * np.tanh(lengths / MAX_MOVE) / np.maximum(lengths, 1e-9), 1.0)
+    return moves * factor
 
 
 def fitHead(head: scene3d.GeoData, views: List[FitView], radius: float = 3.0, iterations: int = 5,
@@ -394,7 +406,7 @@ def fitHead(head: scene3d.GeoData, views: List[FitView], radius: float = 3.0, it
     for iteration in range(iterations):
         if cancel:
             cancel()
-        current = vertices + phi @ weights
+        current = vertices + _capped(phi @ weights)
         constraints = []
         for view in views:
             constraints += contourConstraints(current, triangles, view, regions, mobility,
@@ -410,7 +422,7 @@ def fitHead(head: scene3d.GeoData, views: List[FitView], radius: float = 3.0, it
         counts = {}
         for constraint in constraints:
             counts[constraint[3]] = counts.get(constraint[3], 0) + 1
-        outlines = max(counts.get("contour", 0) + counts.get("skull", 0), 1)
+        outlines = max(counts.get("contour", 0) + counts.get("neck", 0) + counts.get("skull", 0), 1)
         for k, (vertex, row, wanted, kind) in enumerate(constraints):
             robust = 1.0 / np.sqrt(1.0 + (wanted / (3.0 * ROBUST_SCALE[kind])) ** 2)
             share = KIND_WEIGHT[kind] * (outlines / counts[kind] if kind == "depth" else 1.0)
