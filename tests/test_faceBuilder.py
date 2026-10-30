@@ -411,9 +411,24 @@ def test_headPinsWarpTheEarsAndSkull():
     warped = face.warpToPins(head, locations, np.array(targets), pinCameras, [size] * len(locations))
     before, after = np.linalg.norm(vertices - truth, axis=1), np.linalg.norm(warped - truth, axis=1)
     # The pinned points reach their place (seen from 3 views: in 3D), the ears and the skull follow, the face stays
-    assert after[picks].mean() < 0.1 * before[picks].mean()
-    assert after[ears].mean() < 0.6 * before[ears].mean() and after[top].mean() < 0.5 * before[top].mean()
-    assert np.linalg.norm(warped[:face.MESH_VERTICES] - vertices[:face.MESH_VERTICES], axis=1).max() < 0.2
+    # (but near its oval, where the head joins it)
+    assert after[picks].mean() < 0.01 * before[picks].mean()
+    assert after[ears].mean() < 0.3 * before[ears].mean() and after[top].mean() < 0.6 * before[top].mean()
+    oval = np.unique(np.asarray(face.headData()["holeEdges"]).ravel())
+    faceVertices = vertices[:face.MESH_VERTICES]
+    toOval = np.sqrt(((faceVertices[:, None] - vertices[oval][None]) ** 2).sum(-1)).min(axis=1)
+    assert np.abs(warped[:face.MESH_VERTICES][toOval > 2.0] - faceVertices[toOval > 2.0]).max() < 1e-9
+    # A pin dragged far in one view: reached, its surroundings moved along (no spike), the rest of the head not
+    camera = cameras[1]
+    xy, _, _ = camera.project(vertices[[picks[0]]], *size)
+    target = xy + [[-80.0, -60.0]]
+    moved = face.warpToPins(head, [face.surfaceLocation(vertices, head.triangles(), vertices[picks[0]])], target,
+                            [camera], [size], radius=4.0)
+    reached, _, _ = camera.project(moved[[picks[0]]], *size)
+    assert np.hypot(*(reached[0] - target[0])) < 0.5
+    shift = np.linalg.norm(moved - vertices, axis=1)
+    distance = np.linalg.norm(vertices - vertices[picks[0]], axis=1)
+    assert shift[distance < 1.0].min() > 0.8 * shift.max() and shift[distance > 15.0].max() < 0.01
     # No pin: the head as it is
     np.testing.assert_array_equal(face.warpToPins(head, [], np.zeros((0, 2)), [], []), vertices)
 

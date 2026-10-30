@@ -904,8 +904,8 @@ canonical face of MediaPipe with ears, skull and neck following it) warped onto 
 - The ears, skull and neck are not seen by the landmarks: they follow the face (its size and proportions). Pins
   place them, as in KeenTools FaceBuilder: in the viewer (the view shown, "Show View"), "Add a pin", click on the head
   (an ear, the top or the back of the skull, the jaw line...), then drag the pin onto its place in the photo. The head
-  follows live, a smooth deformation around the pins ("Pin Smoothness"), the face held by its landmarks. A pin placed
-  in two views or more is placed in 3D; in one view, it moves in that image.
+  follows live, a smooth move around each pin ("Pin Radius"); pins near each other in several views move it in 3D,
+  a pin in one view moves it across that view.
 
 Outputs: "Head" (the warped head, face space: centimeters, looking along +Z), "Original" (the base head), "Camera"
 (the camera of the view shown, the head at the origin) and the view shown with the head drawn over it. Connect "Head"
@@ -940,8 +940,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                         description="How much the change of shape stays symmetric."),
         desc.FloatParam(name="closeness", label="Stay Near Base", value=0.05, range=(0.0, 1.0, 0.01), invalidate=False,
                         description="How much the shape stays near the base face."),
-        desc.FloatParam(name="pinSmoothness", label="Pin Smoothness", value=10.0, range=(0.1, 100.0, 0.1),
-                        description="How wide the head moves around its pins (more: a wider, smoother move)."),
+        desc.FloatParam(name="pinRadius", label="Pin Radius", value=4.0, range=(0.5, 20.0, 0.1),
+                        description="How far around a pin the head moves (centimeters on the canonical head: an ear "
+                                    "is about 6 cm high). More: a wider, smoother move."),
         *[desc.StringParam(name=pinsName, label=f"Pins (View {index + 1})", value="[]", semantic="tracks",
                            advanced=True,
                            description=f"Pins of View {index + 1} (JSON): a point of the base head (\"point\") and "
@@ -1094,7 +1095,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if not views or all(text.strip() in ("", "[]") for text in texts):
             return fitted
         key = hashlib.sha1(np.ascontiguousarray(fitted.vertices).tobytes() + repr(
-            (texts, ctx.value("views"), ctx.value("pinSmoothness"))).encode()).hexdigest()
+            (texts, ctx.value("views"), ctx.value("pinRadius"))).encode()).hexdigest()
         cached = FaceBuilder._PINNED.get(key)
         if cached is None:
             locations, targets, cameras, sizes = [], [], [], []
@@ -1111,7 +1112,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             if not locations:
                 return fitted
             cached = face.warpToPins(fitted, locations, np.array(targets), cameras, sizes,
-                                     smoothness=max(float(ctx.value("pinSmoothness")), 1e-3))
+                                     radius=float(ctx.value("pinRadius")))
             if len(FaceBuilder._PINNED) > 16:
                 FaceBuilder._PINNED.clear()
             FaceBuilder._PINNED[key] = cached
