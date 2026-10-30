@@ -115,9 +115,10 @@ def _peakRss() -> int:
 
 
 def benchmark(node, frames: List[int], proxy: float = 1.0, cacheBytes: Optional[int] = None, warm: bool = True,
-              traceMemory: bool = False) -> dict:
+              traceMemory: bool = False, progress=None) -> dict:
     """
-    Render `frames` of a compositing node with an empty cache, then again (`warm`), profiled.
+    Render `frames` of a compositing node with an empty cache, then again (`warm`), profiled. `progress(pass name,
+    frame, seconds, error)` after each frame.
 
     Returns:
         {"node", "frames", "cold": [seconds per frame], "warm": [...], "nodes": [NodeStats.asDict() of the cold pass,
@@ -136,11 +137,14 @@ def benchmark(node, frames: List[int], proxy: float = 1.0, cacheBytes: Optional[
         try:
             for frame in frames:
                 start = time.perf_counter()
+                error = ""
                 try:
                     evaluator.render(plan, frame)
                 except EvaluationError as e:
-                    result["errors"][frame] = f"{e.nodeName}: {e.message}"
+                    error = result["errors"][frame] = f"{e.nodeName}: {e.message}"
                 result[passName].append(time.perf_counter() - start)
+                if progress:
+                    progress(passName, frame, result[passName][-1], error)
         finally:
             profiling.activate(None)
             evaluator.profiler = None
@@ -209,6 +213,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("No compositing node to measure in the project.", file=sys.stderr)
         return 1
     print(f"GPU: {gpu.status()}")
+    print(f"Measured: {', '.join(targets)}", flush=True)
     results = []
     for path, node in targets.items():
         frames = parseFrames(args.frames) if args.frames else defaultFrames(graph, node)
@@ -217,8 +222,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             import cProfile
             pythonProfile = cProfile.Profile()
             pythonProfile.enable()
+        print(f"\n{path}: {len(frames)} frames ({frames[0]}..{frames[-1]})", flush=True)
+
+        def progress(passName, frame, seconds, error):
+            print(f"  {passName} frame {frame}: {seconds:.2f} s{'  FAILED: ' + error if error else ''}", flush=True)
         result = benchmark(node, frames, proxy=args.proxy, cacheBytes=int(args.cache_gb * 1024 ** 3) or None,
-                           warm=not args.no_warm, traceMemory=args.memory)
+                           warm=not args.no_warm, traceMemory=args.memory, progress=progress)
         if pythonProfile is not None:
             import io
             import pstats
