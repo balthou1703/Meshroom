@@ -31,24 +31,25 @@ Item {
 
     // The Crop is viewed with "Reformat": the image shown is the box, its bottom-left corner at the origin
     readonly property bool reformatViewed: !!node && !!live && live.evaluatedNode === node && value("reformat")
-    readonly property real left: value("left")
-    readonly property real bottom: value("bottom")
+    // (not "left", "bottom"...: the anchor lines of an Item)
+    readonly property real boxLeft: value("left")
+    readonly property real boxBottom: value("bottom")
     // The width / height of the input format
-    readonly property real inputWidth: reformatViewed ? left + formatWidth : formatWidth
-    readonly property real inputHeight: reformatViewed ? bottom + formatHeight : formatHeight
-    readonly property real right: value("right") > 0 ? value("right") : inputWidth
-    readonly property real top: value("top") > 0 ? value("top") : inputHeight
+    readonly property real inputWidth: reformatViewed ? boxLeft + formatWidth : formatWidth
+    readonly property real inputHeight: reformatViewed ? boxBottom + formatHeight : formatHeight
+    readonly property real boxRight: value("right") > 0 ? value("right") : inputWidth
+    readonly property real boxTop: value("top") > 0 ? value("top") : inputHeight
     // Where the input pixel (0, 0) is on the canvas
-    readonly property real originX: reformatViewed ? -left : 0
-    readonly property real originY: reformatViewed ? -bottom : 0
+    readonly property real originX: reformatViewed ? -boxLeft : 0
+    readonly property real originY: reformatViewed ? -boxBottom : 0
 
     function screenX(x) { return canvasX + (x + originX) * zoom }
     function screenY(y) { return canvasY + (formatHeight - (y + originY)) * zoom }
 
-    readonly property real sLeft: screenX(left)
-    readonly property real sRight: screenX(right)
-    readonly property real sTop: screenY(top)
-    readonly property real sBottom: screenY(bottom)
+    readonly property real sLeft: screenX(boxLeft)
+    readonly property real sRight: screenX(boxRight)
+    readonly property real sTop: screenY(boxTop)
+    readonly property real sBottom: screenY(boxBottom)
 
     visible: !!node && formatWidth > 0 && formatHeight > 0
 
@@ -57,7 +58,7 @@ Item {
     property point startMouse
 
     function beginDrag(point) {
-        startBox = [left, bottom, right, top]
+        startBox = [boxLeft, boxBottom, boxRight, boxTop]
         startMouse = point
         for (var i = 0; i < names.length; ++i)
             scene.beginInteractiveEdit(attr(names[i]))
@@ -152,8 +153,8 @@ Item {
 
         Label {
             anchors.verticalCenter: parent.verticalCenter
-            readonly property int boxWidth: Math.round(root.right - root.left)
-            readonly property int boxHeight: Math.round(root.top - root.bottom)
+            readonly property int boxWidth: Math.round(root.boxRight - root.boxLeft)
+            readonly property int boxHeight: Math.round(root.boxTop - root.boxBottom)
             text: boxWidth + " x " + boxHeight + "  (" + (boxWidth / Math.max(1, boxHeight)).toFixed(2) + ")"
             color: root.handleColor
             font.pointSize: 9
