@@ -1228,6 +1228,19 @@ def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixel
 # Head pins (FaceBuilder): the parts of the head the landmarks do not see (ears, skull, neck) moved onto pins placed
 # in the views
 
+def headMobility(head: scene3d.GeoData, faceFade: float = 2.0) -> np.ndarray:
+    """ How much each vertex of a head moves with its ears, skull and neck (n,): 1 on them, 0 on the face, fading over
+    `faceFade` units inside the face oval (where the head joins it). All 1 for a face without head. """
+    vertices = np.asarray(head.vertices, dtype=np.float64)
+    mobility = np.ones(len(vertices))
+    if isHead(head):
+        oval = np.unique(np.asarray(headData()["holeEdges"]).ravel())
+        faceVertices = vertices[:MESH_VERTICES]
+        toOval = np.sqrt(((faceVertices[:, None, :] - vertices[oval][None, :, :]) ** 2).sum(-1)).min(axis=1)
+        mobility[:MESH_VERTICES] = np.clip(1.0 - toOval / max(float(faceFade), 1e-6), 0.0, 1.0)
+    return mobility
+
+
 def warpToPins(head: scene3d.GeoData, locations, targets: np.ndarray, cameras, sizes, radius: float = 4.0,
                iterations: int = 6, damping: float = 1e-4, faceFade: float = 2.0) -> np.ndarray:
     """
@@ -1257,14 +1270,9 @@ def warpToPins(head: scene3d.GeoData, locations, targets: np.ndarray, cameras, s
     centers = _onSurface(vertices, triangles, locations)
     radius = max(float(radius), 1e-3)
     # How much the pins of the head (not on the face) move each vertex: the head, and the face near its oval
-    mobility = np.ones(len(vertices))
+    mobility = headMobility(head, faceFade)
     onFace = np.zeros(count, dtype=bool)
     if isHead(head):
-        data = headData()
-        oval = np.unique(np.asarray(data["holeEdges"]).ravel())
-        face = vertices[:MESH_VERTICES]
-        toOval = np.sqrt(((face[:, None, :] - vertices[oval][None, :, :]) ** 2).sum(-1)).min(axis=1)
-        mobility[:MESH_VERTICES] = np.clip(1.0 - toOval / max(float(faceFade), 1e-6), 0.0, 1.0)
         onFace = np.array([triangles[t].max() < MESH_VERTICES for t, _ in locations])
     pinMobility = np.array([w @ mobility[triangles[t]] for t, w in locations])
 

@@ -682,6 +682,22 @@ densité du maillage, locale : un pin d'oreille ne déplace ni le cou ni l'autre
 plusieurs vues placent la surface en 3D), chacun exact. Un pin de la tête (oreilles, crâne, cou) ne bouge pas le visage
 (ses landmarks l'ont placé), sauf près de l'ovale où le mouvement s'estompe sur 2 cm ; un pin posé sur le visage le
 bouge. Quelques millisecondes : la tête suit le pin pendant qu'on le glisse.
+« Fit Ears, Neck And Skull » (FaceBuilder, `meshroom/live/headFit.py`) : après « Build Head », les oreilles, le cou
+et le crâne ajustés tout seuls sur les vues. Chaque vue (recadrée autour de la tête) est segmentée par le segmenteur
+multiclasse de MediaPipe (`selfie_multiclass_256x256` : cheveux, peau du visage, peau du corps, vêtements…) ; les
+sommets du contour extérieur de la tête (entre faces vues et cachées, rien de la tête au-delà) des oreilles et du cou
+sont amenés, le long de la normale du contour dans l'image, sur le bord de la peau le plus proche ; ceux du crâne,
+cachés par les cheveux, seulement ramenés dans la tête (cheveux ou peau) quand ils en sortent. Avec « Use Depth », la
+profondeur relative de Depth Anything V2 Small (transformers) est calée sur le visage visible (1 / profondeur = a ×
+disparité + b, robuste ; ignorée si elle ne suit pas le visage) et place en profondeur les oreilles et le cou vus sur
+la peau (pas sur un bord de profondeur) ; son poids total vaut la moitié de celui des contours. Le déplacement : des
+gaussiennes (« Fit Radius ») autour de points de contrôle répartis sur la tête (échantillonnage le plus éloigné), le
+visage gardé (sauf près de l'ovale, `face.headMobility`), contraintes robustes (Cauchy), toutes les vues ensemble,
+recalculé depuis les nouveaux contours (5 itérations), les déplacements régularisés. Stocké dans « Head Fit » (points
+de contrôle et leurs déplacements), appliqué avant les pins. Modèles : `python -m meshroom.live.neural.download
+headsegmenter depthanything` (Apache-2.0). Sur des vues synthétiques : erreur des oreilles, du cou et du crâne
+divisée par ~2 avec les contours, par ~2,5 avec la profondeur.
+
 « Fit Shape » (bouton du nœud et du viewer, `face.fitShape`) : la forme du visage de l'acteur, comme la tête de
 KeenTools FaceBuilder, trouvée sur les frames trackées de la plage (40 au plus, réparties, toutes les keyframes
 comprises et comptées 3 fois) : une seule forme de repos pour le plan, ajustée avec la pose et l'expression (le rig,

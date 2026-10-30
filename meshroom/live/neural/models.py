@@ -6,6 +6,8 @@ Weights are read from the folder of MESHROOM_MODELS_PATH (never downloaded while
     <models>/tapnet/                  BootsTAPIR checkpoint
     <models>/cotracker/               CoTracker3 checkpoint
     <models>/megapose/                MegaPose data folder (MEGAPOSE_DATA_DIR)
+    <models>/mediapipe/               MediaPipe Face Landmarker, multiclass selfie segmenter (FaceTracker, FaceBuilder)
+    <models>/depthanything/           Depth Anything V2 Small (transformers format): depth of the FaceBuilder views
 
 Fill it once, on a machine with internet access: python -m meshroom.live.neural.download --path <models> [names]
 """
@@ -61,6 +63,18 @@ MODELS = {
                                  "face_geometry/data/canonical_face_model.obj",
                                  "https://raw.githubusercontent.com/google/mediapipe/master/mediapipe/modules/"
                                  "face_geometry/data/canonical_face_model.obj"]}),
+    "headsegmenter": Model("headsegmenter", "MediaPipe multiclass selfie segmenter (FaceBuilder: hair, skin, clothes)",
+                           "mediapipe", "mediapipe", "Apache-2.0", ["mediapipe/selfie_multiclass_256x256.tflite"],
+                           {"mediapipe/selfie_multiclass_256x256.tflite":
+                            "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/"
+                            "float32/latest/selfie_multiclass_256x256.tflite"}),
+    "depthanything": Model("depthanything", "Depth Anything V2 Small (FaceBuilder: depth of the views)", "transformers",
+                           "transformers", "Apache-2.0",
+                           ["depthanything/config.json", "depthanything/model.safetensors",
+                            "depthanything/preprocessor_config.json"],
+                           {f"depthanything/{name}":
+                            f"https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf/resolve/main/{name}"
+                            for name in ("config.json", "model.safetensors", "preprocessor_config.json")}),
 }
 
 

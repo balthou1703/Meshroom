@@ -50,6 +50,7 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   profiling.py: per node time / memory / GPU transfers (Evaluator.profiler),
 │   │                           #   benchmark.py: python -m meshroom.live.benchmark project.mg (cold / warm passes, per node table),
 │   │                           #   face.py: FaceTracker (MediaPipe landmarks, non-rigid face fit on a MediaPipe-topology mesh),
+│   │                           #   headFit.py: FaceBuilder "Fit Ears, Neck And Skull" (segmentation outlines, depth),
 │   │                           #   faceRig.py: the face rigs fitted by the FaceTracker (BlendshapeRig: the 51 ARKit
 │   │                           #   expression shapes; FaceRig: jaw, brows, lids, lips, cheeks controls),
 │   │                           #   data/: faceHead.npz, the MediaPipe face with ears, skull and neck (ICT-FaceKit, MIT)

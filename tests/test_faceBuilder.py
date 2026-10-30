@@ -160,7 +160,7 @@ def test_faceBuilderNode(monkeypatch):
     trackerPlan = buildPlan(tracker)
     shape = Evaluator().data(trackerPlan, trackerPlan.target, "shapeOutput", 1)
     np.testing.assert_allclose(shape.vertices, head.vertices, atol=1e-6)
-    assert builder.nodeDesc.runAction("clearHead", context) == {"faceShape": "", "views": ""}
+    assert builder.nodeDesc.runAction("clearHead", context) == {"faceShape": "", "views": "", "headFit": ""}
 
 
 def test_rigidHeadFollowKeepsTheSkull():
@@ -471,3 +471,150 @@ def test_faceBuilderPins():
     assert np.hypot(*(moved[0] - target)) < 3.0
     # The face did not move
     assert np.abs(head.vertices[:face.MESH_VERTICES] - original[:face.MESH_VERTICES]).max() < 0.1
+
+
+# Fit of the ears, neck and skull on segmented views ("Fit Ears, Neck And Skull")
+
+def _actorHead():
+    """ The canonical head with wider ears and neck and a higher skull (smooth bumps; the face unchanged). """
+    from meshroom.live import headFit
+    head = face.canonicalHead()
+    vertices = head.vertices
+    regions = headFit.headRegions(head)
+    mobility = face.headMobility(head)
+
+    def bump(center, radius, move):
+        weight = np.exp(-((vertices - center) ** 2).sum(1) / radius ** 2) * mobility
+        return weight[:, None] * np.asarray(move, dtype=np.float64)[None]
+    actor = vertices.copy()
+    for side in (-1, 1):
+        sideMask = np.sign(vertices[:, 0]) == side
+        actor += bump(vertices[regions["ear"] & sideMask].mean(0), 3.0, (side * 1.0, 0, 0))
+        actor += bump(vertices[regions["neck"] & sideMask].mean(0), 4.0, (side * 0.8, 0, 0))
+    actor += bump(vertices[np.argmax(vertices[:, 1])], 6.0, (0, 0.8, 0))
+    return actor
+
+
+_LABEL_COLORS = {0: (0, 0, 0), 1: (1, 0, 0), 2: (0, 1, 0), 3: (0, 0, 1)}  # background, hair, body skin, face skin
+
+
+def _labelImage(vertices, camera, size):
+    """ The segmentation of a head seen by a camera, as colors (_LABEL_COLORS), rows from the top. """
+    from meshroom.live import geoRender, headFit
+    head = face.canonicalHead()
+    triangles = head.triangles()
+    regions = headFit.headRegions(head)
+    classes = np.full(len(triangles), headFit.HAIR)
+    classes[(triangles < face.MESH_VERTICES).all(1)] = headFit.FACE_SKIN
+    classes[(regions["ear"][triangles] | regions["neck"][triangles]).any(1)] = headFit.BODY_SKIN
+    width, height = size
+    xy, depth, _ = camera.project(vertices, width, height)
+    _, ids = geoRender.rasterize(xy[:, 0], height - xy[:, 1], depth, triangles, (height, width))
+    rgb = np.zeros((height, width, 3), np.float32)
+    covered = ids >= 0
+    rgb[covered] = np.array([_LABEL_COLORS[c] for c in range(4)], np.float32)[classes[ids[covered]]]
+    return rgb
+
+
+class _ColorSegmenter:
+    """ A segmenter reading the classes back from _LABEL_COLORS. """
+
+    def segment(self, rgb):
+        from meshroom.live import headFit
+        labels = np.zeros(rgb.shape[:2] + (6,), np.float32)
+        r, g, b = (rgb[:, :, i] > 127 for i in range(3))
+        labels[:, :, headFit.HAIR] = r & ~g & ~b
+        labels[:, :, headFit.BODY_SKIN] = g & ~r & ~b
+        labels[:, :, headFit.FACE_SKIN] = b & ~r & ~g
+        labels[:, :, headFit.BACKGROUND] = ~(r | g | b)
+        return labels
+
+    def close(self):
+        pass
+
+
+def test_headFitOnSegmentedViews():
+    """ The ears, neck and skull fitted on the segmentation of views of an actor (headFit.fitHead). """
+    from meshroom.live import headFit
+    head = face.canonicalHead()
+    actor = _actorHead()
+    size = (640, 480)
+    cameras = _headViews((0, 60, -60, 120, -120), size)
+    segmenter = _ColorSegmenter()
+    views = []
+    for camera in cameras:
+        rgb = _labelImage(actor, camera, size)
+        views.append(headFit.FitView(camera, size, segmenter.segment((rgb * 255).astype(np.uint8)), (0, 0)))
+    fit = headFit.fitHead(head, views, radius=3.0, useDepth=False)
+    fitted = headFit.applyFit(head, fit)
+    before = np.linalg.norm(head.vertices - actor, axis=1)[face.MESH_VERTICES:].mean()
+    after = np.linalg.norm(fitted - actor, axis=1)[face.MESH_VERTICES:].mean()
+    assert after < 0.65 * before
+    # The face itself does not move (its landmarks placed it), but near its oval
+    still = face.headMobility(head)[:face.MESH_VERTICES] == 0
+    assert np.abs(fitted[:face.MESH_VERTICES][still] - head.vertices[:face.MESH_VERTICES][still]).max() < 1e-9
+    # With the depth of the views (an inverse depth up to an affine map, as a monocular network gives it)
+    from meshroom.live import geoRender
+    depthViews = []
+    for view, camera in zip(views, cameras):
+        xy, depth, _ = camera.project(actor, *size)
+        zbuffer, _ = geoRender.rasterize(xy[:, 0], size[1] - xy[:, 1], depth, head.triangles(), (size[1], size[0]))
+        disparity = np.where(np.isfinite(zbuffer), 3.0 / np.where(np.isfinite(zbuffer), zbuffer, 1.0) - 0.01, 0.0)
+        depthViews.append(headFit.FitView(camera, size, view.labels, (0, 0), disparity.astype(np.float32)))
+    withDepth = headFit.applyFit(head, headFit.fitHead(head, depthViews, radius=3.0, useDepth=True))
+    assert np.linalg.norm(withDepth - actor, axis=1)[face.MESH_VERTICES:].mean() < 0.55 * before
+
+
+class LabelPlate(_desc.ImageOpNode):
+    """ The segmentation colors of the actor's head (_actorHead) seen by camera `view` of _headViews((0, 60, -60)). """
+    category = "Test"
+    inputs = [_desc.IntParam(name="view", label="View", value=0, range=(0, 2, 1), description="")]
+    outputs = [_desc.Image(name="output", label="Output", description="")]
+
+    def getInfo(self, ctx, inputsInfo):
+        return _ImageInfo(640, 480)
+
+    def render(self, ctx, inputs):
+        from meshroom.live import ImageBuffer
+        camera = _headViews((0, 60, -60), (640, 480))[ctx.value("view")]
+        rgb = _labelImage(_actorHead(), camera, (640, 480))
+        # Linear values: the display encoding (2.2) gives the colors back
+        return ImageBuffer.fromRGBA(np.dstack([rgb, np.ones(rgb.shape[:2], np.float32)]), (640, 480))
+
+
+def test_faceBuilderFitsEarsNeckAndSkull(monkeypatch):
+    from tests.utils import registerNodeDesc, unregisterNodeDesc
+    from meshroom.live import headFit
+    from meshroom.live.evaluator import RenderContext
+    registerNodeDesc(LabelPlate)
+    try:
+        monkeypatch.setattr(headFit, "headSegmenter", lambda: _ColorSegmenter())
+        size = (640, 480)
+        cameras = _headViews((0, 60, -60), size)
+        graph = Graph("builderFit")
+        plates = [graph.addNewNode("LabelPlate", view=index) for index in range(3)]
+        builder = graph.addNewNode("FaceBuilder", fitDepth=False)
+        names = ("input", "input1", "input2")
+        for plate, name in zip(plates, names):
+            graph.addEdge(plate.output, builder.attribute(name))
+        builder.views.value = json.dumps([{"input": name, "frame": 1, "still": True, "size": list(size),
+                                           "landmarks": [], "focal": 50.0,
+                                           "cameraToFace": [float(v) for v in camera.matrix.ravel()]}
+                                          for name, camera in zip(names, cameras)])
+        graph.update()
+        values = {attr.name: _snapshotValue(attr) for attr in builder.attributes
+                  if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+        context = ActionContext(values, Evaluator(), buildPlan(plates[0]), 1, nodePlan=buildPlan(builder),
+                                inputPlans={"input1": buildPlan(plates[1]), "input2": buildPlan(plates[2])})
+        result = builder.nodeDesc.runAction("fitHeadContours", context)
+        builder.headFit.value = result["headFit"]
+        graph.update()
+        plan = buildPlan(builder)
+        head = builder.nodeDesc.head(RenderContext(plan.nodes[plan.target], 1, Evaluator(), plan))
+        actor, original = _actorHead(), face.canonicalHead().vertices
+        n = face.MESH_VERTICES
+        assert np.linalg.norm(head.vertices - actor, axis=1)[n:].mean() < \
+            0.8 * np.linalg.norm(original - actor, axis=1)[n:].mean()
+        assert builder.nodeDesc.runAction("clearHead", context)["headFit"] == ""
+    finally:
+        unregisterNodeDesc(LabelPlate)

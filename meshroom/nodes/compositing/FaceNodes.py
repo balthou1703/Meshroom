@@ -950,6 +950,20 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
           for index, pinsName in enumerate(_VIEW_PINS.values())],
         desc.PushButtonParam(name="buildHead", label="Build Head", semantic="liveAction",
                              description="Find the face in each view and fit the head on all of them."),
+        desc.PushButtonParam(name="fitHeadContours", label="Fit Ears, Neck And Skull", semantic="liveAction",
+                             description="After 'Build Head': fit the ears, the neck and the skull on the views, as "
+                                         "the pins would (MediaPipe segmentation: the outlines of the ears and neck "
+                                         "on the skin, the skull inside the hair; with 'Use Depth', the depth of the "
+                                         "Depth Anything network). The pins still apply after it."),
+        desc.FloatParam(name="fitRadius", label="Fit Radius", value=3.0, range=(1.0, 10.0, 0.1), invalidate=False,
+                        description="'Fit Ears, Neck And Skull': how smooth the move is (centimeters around each "
+                                    "control point; more: smoother, less detail)."),
+        desc.BoolParam(name="fitDepth", label="Use Depth", value=True, invalidate=False,
+                       description="'Fit Ears, Neck And Skull' also uses the depth of the views (Depth Anything V2: "
+                                   "pip install transformers, python -m meshroom.live.neural.download depthanything); "
+                                   "without the network, only the outlines."),
+        desc.StringParam(name="headFit", label="Head Fit", value="", advanced=True,
+                         description="The fit of the ears, neck and skull (JSON: control points and their moves)."),
         desc.PushButtonParam(name="refitHead", label="Fit Again", semantic="liveAction",
                              description="Fit the head again on the landmarks found by 'Build Head' (after changing "
                                          "the parameters of the fit)."),
@@ -1039,8 +1053,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return face.facePart(source)
         return face.headOf(source)
 
-    def head(self, ctx):
-        """ The head of the actor: the base with the fitted shape (its ears, skull and neck following the face). """
+    def head(self, ctx, withFit=True):
+        """ The head of the actor: the base with the fitted shape (its ears, skull and neck following the face), then
+        the fit of its ears, neck and skull and its pins (`withFit`; without: the head the landmarks give). """
         from meshroom.live import face
         base = self.baseMesh(ctx)
         try:
@@ -1049,14 +1064,29 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             raise RuntimeError(str(e)) from e
         original = self.original(ctx)
         if offsets is None or len(offsets) != len(base.vertices):
-            return self.pinned(ctx, original, original)
-        shaped = base.vertices + offsets
-        if ctx.value("meshType") != "head":
-            fitted = scene3d.GeoData(shaped, name="face", topology=base.topology)
+            fitted = original
+        elif ctx.value("meshType") != "head":
+            fitted = scene3d.GeoData(base.vertices + offsets, name="face", topology=base.topology)
         else:
-            fitted = scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(shaped), name="head",
+            fitted = scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(base.vertices + offsets), name="head",
                                      topology=original.topology)
+        if not withFit:
+            return fitted
+        fitted = self.headFitted(ctx, fitted)
         return self.pinned(ctx, fitted, original)
+
+    def headFitted(self, ctx, head):
+        """ The head with its ears, neck and skull fitted on the views ("Fit Ears, Neck And Skull"), if done. """
+        import json
+        from meshroom.live import face, headFit
+        text = ctx.value("headFit")
+        if not text or not face.isHead(head):
+            return head
+        try:
+            fit = json.loads(text)
+        except ValueError as e:
+            raise RuntimeError(f"Invalid head fit: {e}") from e
+        return scene3d.GeoData(headFit.applyFit(head, fit), name=head.name, topology=head.topology)
 
     # Pins
 
@@ -1197,7 +1227,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         import json
         from meshroom.live import face
         if name == "clearHead":
-            return {"faceShape": "", "views": ""}
+            return {"faceShape": "", "views": "", "headFit": ""}
+        if name == "fitHeadContours":
+            return self.fitHeadContours(context)
         if name not in ("buildHead", "refitHead"):
             raise RuntimeError(f"Unknown action: {name}")
         if name == "buildHead":
@@ -1220,6 +1252,65 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             view["cameraToFace"] = [round(float(v), 6) for v in np.asarray(result["cameraToFace"]).ravel()]
             view["error"] = round(float(result["error"]), 3)
         return {"faceShape": face.dumpShape(offsets), "views": json.dumps(stored)}
+
+    def fitHeadContours(self, context):
+        """ "Fit Ears, Neck And Skull": each view segmented (and its depth estimated), then headFit.fitHead on all. """
+        import json
+        from meshroom.live import BBox, face, gpu, headFit
+        from meshroom.live.neural import NeuralUnavailable, displayRGB
+        stored = [view for view in self.storedViews(context) if view.get("cameraToFace")]
+        if not stored:
+            raise RuntimeError("Build the head first (Build Head): the ears, neck and skull are fitted on its views.")
+        ctx = context.nodeContext()
+        head = self.head(ctx, withFit=False)
+        if not face.isHead(head):
+            raise RuntimeError("Fit Ears, Neck And Skull: the mesh is a face only ('Mesh': head).")
+        try:
+            segmenter = headFit.headSegmenter()
+        except face.FaceUnavailable as e:
+            raise RuntimeError(f"Fit Ears, Neck And Skull: {e}") from e
+        estimator, depthMessage = None, ""
+        if context.value("fitDepth"):
+            try:
+                estimator = headFit.depthEstimator(gpu.availableDevice())
+            except NeuralUnavailable as e:
+                depthMessage = f" (without depth: {e})"
+        views = []
+        try:
+            for index, view in enumerate(stored):
+                context.checkCancelled()
+                context.progress(0.6 * index / len(stored), "Segment the views")
+                width, height = view["size"]
+                image = context.renderInput(view["input"], int(view["frame"]))
+                camera = self.viewCamera(ctx, view)
+                xy, _, _ = camera.project(head.vertices, width, height)
+                # The crop around the head (rows from the top), with room for the borders searched around it
+                x0, x1 = xy[:, 0].min(), xy[:, 0].max()
+                y0, y1 = height - xy[:, 1].max(), height - xy[:, 1].min()
+                size = max(x1 - x0, y1 - y0)
+                margin = 0.25 * size
+                left, top = int(max(0, x0 - margin)), int(max(0, y0 - margin))
+                right, bottom = int(min(width, x1 + margin)), int(min(height, y1 + margin))
+                if right - left < 16 or bottom - top < 16:
+                    continue
+                rgb = displayRGB(image, BBox.fromFormat(width, height))[top:bottom, left:right]
+                labels = segmenter.segment((rgb * 255).astype(np.uint8))
+                disparity = estimator.estimate(rgb) if estimator is not None else None
+                views.append(headFit.FitView(camera, (width, height), labels, (left, top), disparity,
+                                             search=float(np.clip(0.08 * size, 15, 150))))
+        finally:
+            segmenter.close()
+        if not views:
+            raise RuntimeError("Fit Ears, Neck And Skull: the head is not in the views.")
+        fit = headFit.fitHead(head, views, radius=context.value("fitRadius"), useDepth=estimator is not None,
+                              cancel=context.checkCancelled,
+                              progress=lambda done: context.progress(0.6 + 0.4 * done, "Fit the head"))
+        if not fit["constraints"]:
+            raise RuntimeError("Fit Ears, Neck And Skull: no outline of the ears, neck or skull found in the views.")
+        import logging
+        logging.info(f"[FaceBuilder] Head fitted on {len(views)} views, {fit['constraints']} constraints{depthMessage}")
+        fit.pop("constraints", None)
+        return {"headFit": json.dumps(fit)}
 
     def detectViews(self, context):
         """ The views of the connected inputs with a face: {input, frame, still, size, landmarks, hidden}. """
