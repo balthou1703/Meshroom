@@ -404,6 +404,20 @@ Panel {
             formatHeight: root.live ? root.live.imageHeight : 0
         }
 
+        // Box of the selected Crop node
+        CropGizmo {
+            anchors.fill: parent
+            readonly property var selected: _currentScene ? _currentScene.selectedNode : null
+            node: selected && selected.nodeType === "Crop" && root.hasImage ? selected : null
+            scene: _currentScene
+            live: root.live
+            canvasX: canvas.x
+            canvasY: canvas.y
+            zoom: canvas.zoom
+            formatWidth: root.live ? root.live.imageWidth : 0
+            formatHeight: root.live ? root.live.imageHeight : 0
+        }
+
         // Handles of the selected Ramp node
         RampGizmo {
             anchors.fill: parent

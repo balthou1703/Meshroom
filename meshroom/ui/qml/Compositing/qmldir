@@ -7,6 +7,7 @@ RamGauge 1.0 RamGauge.qml
 SequenceBrowser 1.0 SequenceBrowser.qml
 TransformGizmo 1.0 TransformGizmo.qml
 RampGizmo 1.0 RampGizmo.qml
+CropGizmo 1.0 CropGizmo.qml
 RotoGizmo 1.0 RotoGizmo.qml
 TrackerGizmo 1.0 TrackerGizmo.qml
 FrameRuler 1.0 FrameRuler.qml

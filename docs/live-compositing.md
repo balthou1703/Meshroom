@@ -215,6 +215,10 @@ nœud Dot.
   bras vertical (rotate) ; chaque glissé est une seule étape d'annulation ;
 - gizmo du Ramp : ses deux points (orientation et longueur du fondu), et le losange du milieu
   pour déplacer les deux ;
+- gizmo du Crop (`CropGizmo.qml`) : la boîte (extérieur assombri), sa taille et son rapport affichés, poignées sur
+  les bords et les coins (Maj sur un coin : rapport gardé), losange du milieu pour la déplacer, pixels entiers ;
+  boutons Full / 1:1 / 16:9 / 1.85 / 2.39 : ce rapport cadré dans le format (pleine largeur ou hauteur, centré) ;
+  le Crop affiché lui-même avec « Reformat » : l'image est la boîte, les poignées sur ses bords ;
 - édition en direct : les curseurs des nœuds de compositing (valeurs simples, valeurs 2D, couleurs)
   mettent l'image à jour pendant le glissé, une seule étape d'annulation par glissé ;
 - couleurs RGBA : pastille, valeurs, curseurs par canal et **pipette** : clic sur un pixel ou
