@@ -672,6 +672,15 @@ Garde-fous : les points du côté du visage tourné à l'opposé de la caméra (
 utilisés ; les contrôles ont des limites douces (translation : un cinquième de la largeur du visage ; mâchoire :
 -0.15 à 0.6 rad d'ouverture, ±0.25 latéral) ; leurs mouvements en profondeur (mal vus) coûtent trois fois plus.
 surface : chaque sommet libre (surface lisse, ci-dessus).
+Pins du FaceBuilder (comme KeenTools FaceBuilder) : les oreilles, le crâne et le cou, que les landmarks ne voient
+pas, sont placés par des pins posés dans les vues (un paramètre par vue, `pins` … `pins3` ; gizmo du viewer sur la vue
+affichée, « Show View ») : un pin est un point de la tête de base (clic sur la tête vue par la caméra de la vue) et sa
+position dans la photo (sa clé à la frame de la vue ; une photo : la clé la plus proche). `face.warpToPins` : un
+déplacement lisse de toute la tête (laplacien du déplacement × « Pin Smoothness »), le visage tenu (ses landmarks
+l'ont ajusté), le reste à peine : un pin sur une oreille déplace l'oreille et ses environs ; vu dans une vue il bouge
+dans cette image (profondeur lissée), dans deux vues ou plus il est placé en 3D. Gauss-Newton (3 itérations) ; la
+partie constante du système factorisée une fois par tête, chaque résolution une mise à jour de faible rang (Woodbury) :
+la tête suit le pin pendant qu'on le glisse.
 « Fit Shape » (bouton du nœud et du viewer, `face.fitShape`) : la forme du visage de l'acteur, comme la tête de
 KeenTools FaceBuilder, trouvée sur les frames trackées de la plage (40 au plus, réparties, toutes les keyframes
 comprises et comptées 3 fois) : une seule forme de repos pour le plan, ajustée avec la pose et l'expression (le rig,

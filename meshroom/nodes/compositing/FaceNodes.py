@@ -884,6 +884,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
 
 
 _VIEW_INPUTS = ("input", "input1", "input2", "input3")
+# The pins of each view (FaceBuilder)
+_VIEW_PINS = {"input": "pins", "input1": "pins1", "input2": "pins2", "input3": "pins3"}
 
 
 class FaceBuilder(desc.ImageOpNode):
@@ -899,7 +901,11 @@ canonical face of MediaPipe with ears, skull and neck following it) warped onto 
   all the views at once, each with its head pose and expression (the face rig) and its focal length (estimated, or
   "Focal Length"). The views from different angles give the depth one view does not. "Fit Again" fits on the stored
   landmarks again (e.g. after changing "Smoothness").
-- The ears, skull and neck are not seen by the landmarks: they follow the face (its size and proportions).
+- The ears, skull and neck are not seen by the landmarks: they follow the face (its size and proportions). Pins
+  place them, as in KeenTools FaceBuilder: in the viewer (the view shown, "Show View"), "Add a pin", click on the head
+  (an ear, the top or the back of the skull, the jaw line...), then drag the pin onto its place in the photo. The head
+  follows live, a smooth deformation around the pins ("Pin Smoothness"), the face held by its landmarks. A pin placed
+  in two views or more is placed in 3D; in one view, it moves in that image.
 
 Outputs: "Head" (the warped head, face space: centimeters, looking along +Z), "Original" (the base head), "Camera"
 (the camera of the view shown, the head at the origin) and the view shown with the head drawn over it. Connect "Head"
@@ -934,6 +940,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                         description="How much the change of shape stays symmetric."),
         desc.FloatParam(name="closeness", label="Stay Near Base", value=0.05, range=(0.0, 1.0, 0.01), invalidate=False,
                         description="How much the shape stays near the base face."),
+        desc.FloatParam(name="pinSmoothness", label="Pin Smoothness", value=10.0, range=(0.1, 100.0, 0.1),
+                        description="How wide the head moves around its pins (more: a wider, smoother move)."),
+        *[desc.StringParam(name=pinsName, label=f"Pins (View {index + 1})", value="[]", semantic="tracks",
+                           advanced=True,
+                           description=f"Pins of View {index + 1} (JSON): a point of the base head (\"point\") and "
+                                       "where it is in the view (its key). Edited in the viewer.")
+          for index, pinsName in enumerate(_VIEW_PINS.values())],
         desc.PushButtonParam(name="buildHead", label="Build Head", semantic="liveAction",
                              description="Find the face in each view and fit the head on all of them."),
         desc.PushButtonParam(name="refitHead", label="Fit Again", semantic="liveAction",
@@ -1035,12 +1048,110 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             raise RuntimeError(str(e)) from e
         original = self.original(ctx)
         if offsets is None or len(offsets) != len(base.vertices):
-            return original
+            return self.pinned(ctx, original, original)
         shaped = base.vertices + offsets
         if ctx.value("meshType") != "head":
-            return scene3d.GeoData(shaped, name="face", topology=base.topology)
-        return scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(shaped), name="head",
-                               topology=original.topology)
+            fitted = scene3d.GeoData(shaped, name="face", topology=base.topology)
+        else:
+            fitted = scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(shaped), name="head",
+                                     topology=original.topology)
+        return self.pinned(ctx, fitted, original)
+
+    # Pins
+
+    _PINNED = {}
+
+    def viewPins(self, ctx, view):
+        """ (points on the base head (k, 3), their positions (k, 2) in the view) of the pins of a stored view: their key
+        at its frame (a photo: the key nearest to it). """
+        from meshroom.live import tracking
+        try:
+            tracks = tracking.parseTracks(ctx.value(_VIEW_PINS.get(view["input"], "pins")))
+        except ValueError as e:
+            raise RuntimeError(f"Invalid pins: {e}") from e
+        tracks = tracking.scaleTracks(tracks, *view["size"])
+        points, positions = [], []
+        frame = int(view["frame"])
+        for track in tracks:
+            keys = track.get("keys") or {}
+            if not track.get("enabled", True) or len(track.get("point") or []) != 3 or not keys:
+                continue
+            key = keys.get(str(frame))
+            if key is None and view.get("still"):
+                key = keys[min(keys, key=lambda f: (abs(int(f) - frame), int(f)))]
+            if key is None:
+                continue
+            points.append(track["point"])
+            positions.append((float(key[0]), float(key[1])))
+        return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
+
+    def pinned(self, ctx, fitted, original):
+        """ The fitted head moved onto the pins of all the views (face.warpToPins), cached. """
+        import hashlib
+        from meshroom.live import face
+        views = [view for view in self.storedViews(ctx) if view.get("cameraToFace")]
+        texts = [ctx.value(name) or "" for name in _VIEW_PINS.values()]
+        if not views or all(text.strip() in ("", "[]") for text in texts):
+            return fitted
+        key = hashlib.sha1(np.ascontiguousarray(fitted.vertices).tobytes() + repr(
+            (texts, ctx.value("views"), ctx.value("pinSmoothness"))).encode()).hexdigest()
+        cached = FaceBuilder._PINNED.get(key)
+        if cached is None:
+            locations, targets, cameras, sizes = [], [], [], []
+            for view in views:
+                points, positions = self.viewPins(ctx, view)
+                if not len(points):
+                    continue
+                camera = self.viewCamera(ctx, view)
+                for location, position in zip(face.pinLocations(original, points), positions):
+                    locations.append(location)
+                    targets.append(position)
+                    cameras.append(camera)
+                    sizes.append(tuple(view["size"]))
+            if not locations:
+                return fitted
+            cached = face.warpToPins(fitted, locations, np.array(targets), cameras, sizes,
+                                     smoothness=max(float(ctx.value("pinSmoothness")), 1e-3))
+            if len(FaceBuilder._PINNED) > 16:
+                FaceBuilder._PINNED.clear()
+            FaceBuilder._PINNED[key] = cached
+        return scene3d.GeoData(cached, name=fitted.name, topology=fitted.topology)
+
+    def pickPoint(self, ctx, x, y):
+        """ The point of the base head under the image position (x, y) of the view shown (where the head is seen), or
+        None. """
+        from meshroom.live import face
+        view = self.viewAt(ctx)
+        if view is None or not view.get("cameraToFace"):
+            raise RuntimeError("Build the head first (Build Head): the pins are put on it, in the views.")
+        head = self.head(ctx)
+        width, height = view["size"]
+        origin, direction = self.viewCamera(ctx, view).ray(x, y, width, height)
+        hit = scene3d.raycast(head, origin, direction)
+        if hit is None:
+            return None
+        triangle, weights = face.surfaceLocation(head.vertices, head.triangles(), hit)
+        # The same place on the base head (the pins stay valid when the head is built again)
+        return self.original(ctx).vertices[head.triangles()[triangle]].T @ weights
+
+    def pinProjections(self, ctx, cachedData) -> dict:
+        """ {pin name: [x, y]}: where each pin of the view shown is seen on the head, in the pixels of the view. """
+        from meshroom.live import face, tracking
+        view = self.viewAt(ctx)
+        if view is None or not view.get("cameraToFace"):
+            return {}
+        try:
+            tracks = tracking.parseTracks(ctx.value(_VIEW_PINS[self.shownInput(ctx)]))
+        except ValueError:
+            return {}
+        tracks = [track for track in tracks if len(track.get("point") or []) == 3]
+        if not tracks:
+            return {}
+        head = self.head(ctx)
+        locations = face.pinLocations(self.original(ctx), np.array([track["point"] for track in tracks]))
+        onHead = face._onSurface(head.vertices, head.triangles(), locations)
+        xy, _, inFront = self.viewCamera(ctx, view).project(onHead, *view["size"])
+        return {track["name"]: [float(px), float(py)] for track, (px, py), front in zip(tracks, xy, inFront) if front}
 
     def viewCamera(self, ctx, view):
         """ The camera of a stored view, the head at the origin. """

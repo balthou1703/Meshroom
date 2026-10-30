@@ -34,8 +34,12 @@ Item {
 
     // Tracks shown but not edited (CameraTracker: the autotrack)
     property bool readOnly: false
-    // Pins of a Resection or a FaceTracker: tracks stuck to a point of its geometry ("point"), added by clicking on it
-    readonly property bool pinMode: !!node && (node.nodeType === "Resection" || node.nodeType === "FaceTracker")
+    // Pins of a Resection, a FaceTracker or a FaceBuilder: tracks stuck to a point of its geometry ("point"), added by
+    // clicking on it
+    readonly property bool pinMode: !!node && (node.nodeType === "Resection" || node.nodeType === "FaceTracker" ||
+                                               node.nodeType === "FaceBuilder")
+    // FaceBuilder only: the pins of the view shown (each view has its own), placing the ears, skull, neck...
+    readonly property bool builderMode: !!node && node.nodeType === "FaceBuilder"
     // Resection only: the geometry track (Track Geometry, Align, Refine)
     readonly property bool geoMode: !!node && node.nodeType === "Resection"
     // FaceTracker only: the face tracked by MediaPipe / the optical flow
@@ -52,8 +56,17 @@ Item {
         return tracks.find(function(t) { return t.name === name }) || null
     }
 
-    // The edited tracks: the pins of a FaceTracker ("tracks" are its landmarks), else "tracks"
-    readonly property var tracksAttribute: node ? node.attribute(node.hasAttribute("pins") ? "pins" : "tracks") : null
+    // The edited tracks: the pins of a FaceTracker ("tracks" are its landmarks), of the view shown of a FaceBuilder,
+    // else "tracks"
+    readonly property var tracksAttribute: {
+        if (!node)
+            return null
+        if (builderMode) {
+            var view = node.attribute("showView").value
+            return node.attribute({"input": "pins", "input1": "pins1", "input2": "pins2", "input3": "pins3"}[view] || "pins")
+        }
+        return node.attribute(node.hasAttribute("pins") ? "pins" : "tracks")
+    }
     // Width of the displayed image format: tracks made on another resolution are scaled to it
     property int formatWidth: 0
     // The tracks as stored (each in the format of the image it was tracked on)
@@ -569,7 +582,7 @@ Item {
                 checked: root.adding
                 enabled: !root.tracking
                 onClicked: root.adding = !root.adding
-                ToolTip.text: root.pinMode ? "Add a pin: click on the " + (root.geoMode ? "geometry" : "face") + ", then drag the pin onto its place in the plate"
+                ToolTip.text: root.pinMode ? "Add a pin: click on the " + (root.geoMode ? "geometry" : root.builderMode ? "head" : "face") + ", then drag the pin onto its place in the " + (root.builderMode ? "view" : "plate")
                                            : "Add a track: click on a feature to track"
             }
             MaterialToolButton {
@@ -592,7 +605,7 @@ Item {
                 text: MaterialIcons.fast_rewind
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
-                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
+                visible: !root.faceMode && !root.builderMode  // Pins of a FaceTracker / FaceBuilder are not tracked
                 onClicked: root.live.track(root.node, -1, root.selectedNames)
                 ToolTip.text: "Track backward from the current frame (selected " + root.itemName + "s, or all)"
             }
@@ -601,7 +614,7 @@ Item {
                 text: MaterialIcons.chevron_left
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
-                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
+                visible: !root.faceMode && !root.builderMode  // Pins of a FaceTracker / FaceBuilder are not tracked
                 onClicked: root.live.trackStep(root.node, -1, root.selectedNames)
                 ToolTip.text: "Track one frame backward (selected " + root.itemName + "s, or all)"
             }
@@ -617,7 +630,7 @@ Item {
                 text: MaterialIcons.chevron_right
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
-                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
+                visible: !root.faceMode && !root.builderMode  // Pins of a FaceTracker / FaceBuilder are not tracked
                 onClicked: root.live.trackStep(root.node, 1, root.selectedNames)
                 ToolTip.text: "Track one frame forward (selected " + root.itemName + "s, or all)"
             }
@@ -626,7 +639,7 @@ Item {
                 text: MaterialIcons.fast_forward
                 enabled: !root.tracking && root.tracks.length > 0
                          && !(root.live && root.live.actionProgress >= 0)
-                visible: !root.faceMode  // The pins of a FaceTracker are not tracked: the face is
+                visible: !root.faceMode && !root.builderMode  // Pins of a FaceTracker / FaceBuilder are not tracked
                 onClicked: root.live.track(root.node, 1, root.selectedNames)
                 ToolTip.text: "Track forward from the current frame (selected " + root.itemName + "s, or all)"
             }

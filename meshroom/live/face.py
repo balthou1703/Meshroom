@@ -1225,6 +1225,94 @@ def _followPins(inCamera: np.ndarray, mesh: scene3d.GeoData, locations, pinPixel
     return moved
 
 
+# Head pins (FaceBuilder): the parts of the head the landmarks do not see (ears, skull, neck) moved onto pins placed
+# in the views
+
+HEAD_PIN_WEIGHT = 10.0
+_PIN_FACTORS = {}
+
+
+def _pinRegularFactor(head: scene3d.GeoData, smoothness: float, faceStay: float, headStay: float):
+    """ The factorized smoothness + stay matrix of a head (n x n, the same for x, y and z), cached by topology. """
+    from scipy import sparse
+    from scipy.sparse.linalg import splu
+    n = len(head.vertices)
+    key = (id(head.topology), n, float(smoothness), float(faceStay), float(headStay))
+    cached = _PIN_FACTORS.get(key)
+    if cached is not None and cached[0] is head.topology:
+        return cached[1]
+    laplacian = _laplacian(head, n)
+    stay = np.full(n, float(headStay))
+    stay[:min(MESH_VERTICES, n)] = float(faceStay)
+    factor = splu((float(smoothness) * (laplacian.T @ laplacian) + sparse.diags(stay)).tocsc())
+    if len(_PIN_FACTORS) > 8:
+        _PIN_FACTORS.clear()
+    _PIN_FACTORS[key] = (head.topology, factor)
+    return factor
+
+
+def warpToPins(head: scene3d.GeoData, locations, targets: np.ndarray, cameras, sizes, smoothness: float = 10.0,
+               faceStay: float = 20.0, headStay: float = 1e-4, iterations: int = 3) -> np.ndarray:
+    """
+    The vertices of a head (face space) moved so that the pins are seen where they were placed in the views, as the
+    pins of KeenTools FaceBuilder: a smooth displacement of the whole surface (its Laplacian times `smoothness`: more
+    moves a wider area), the face held (`faceStay`: its landmarks fitted it) and the rest of the head (`headStay`) only
+    lightly, so that a pin on an ear moves the ear and its surroundings. A pin seen in one view moves in that image (its
+    depth kept smooth); in two views or more it is placed in 3D. The constant part of the system is factorized once per
+    head: each solve is a low rank update (Woodbury), fast enough to follow a dragged pin.
+
+    Args:
+        locations: the place of each pin on the head (triangle, barycentric coordinates), one per constraint.
+        targets: (k, 2) where each one is placed, Nuke pixels of its view.
+        cameras: the camera of the view of each one (its matrix: camera to face space).
+        sizes: (width, height) of the view of each one.
+
+    Returns:
+        the vertices (n, 3).
+    """
+    vertices = np.asarray(head.vertices, dtype=np.float64)
+    count = len(locations)
+    if count == 0:
+        return vertices
+    n = len(vertices)
+    triangles = head.triangles()
+    factor = _pinRegularFactor(head, smoothness, faceStay, headStay)
+
+    def solveRegular(columns):
+        """ R^-1 columns, columns (3n, m) in the vertex-major order (x, y, z of each vertex). """
+        m = columns.shape[1]
+        blocks = columns.reshape(n, 3 * m)
+        return factor.solve(blocks).reshape(3 * n, m)
+    displacement = np.zeros((n, 3))
+    for _ in range(iterations):
+        # The pin rows: (2k, 3n) dense on 9 columns each, kept dense (k is small)
+        pins = np.zeros((2 * count, 3 * n))
+        rhs = np.zeros(2 * count)
+        for k, ((t, weights), target, camera, (width, height)) in enumerate(zip(locations, targets, cameras, sizes)):
+            corners = triangles[t]
+            point = (vertices[corners] + displacement[corners]).T @ weights
+            xy, depth, _ = camera.project(point[None], width, height)
+            # Image plane units: centimeters at the point (pixels times its depth / focal)
+            scale = max(float(np.ravel(depth)[0]), 1e-6) / max(camera.focalPixels(width), 1e-6)
+            jacobian = np.zeros((2, 3))
+            for axis in range(3):
+                step = np.zeros(3)
+                step[axis] = 1e-3
+                moved, _, _ = camera.project((point + step)[None], width, height)
+                jacobian[:, axis] = (moved[0] - xy[0]) / 1e-3
+            root = np.sqrt(HEAD_PIN_WEIGHT) * scale
+            for corner, w in zip(corners, weights):
+                pins[2 * k:2 * k + 2, 3 * int(corner):3 * int(corner) + 3] += root * w * jacobian
+            rhs[2 * k:2 * k + 2] = root * (np.asarray(target, dtype=np.float64) - xy[0])
+        # The linearized pins: J (d + delta) = target - P(x + d) + J d; (R + P^T P)^-1 by Woodbury
+        b = pins.T @ (rhs + pins @ displacement.ravel())
+        rb = solveRegular(b[:, None])[:, 0]
+        rp = solveRegular(pins.T)
+        small = np.eye(2 * count) + pins @ rp
+        displacement = (rb - rp @ np.linalg.solve(small, pins @ rb)).reshape(n, 3)
+    return vertices + displacement
+
+
 # The shape of the actor ("Fit Shape"): one rest face for the whole shot, its expressions left to the rig
 
 def mirrorPairs(vertices: np.ndarray, right: np.ndarray, tolerance: float) -> np.ndarray:

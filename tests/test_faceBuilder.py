@@ -377,3 +377,82 @@ def test_faceTrackerFollowsTheHeadSurface(followSurface, model):
         assert np.median(np.hypot(*(fitted - truth).T)) < 1.5
     finally:
         unregisterNodeDesc(SyntheticFacePlate)
+
+
+def _headViews(yaws, size=(1280, 960)):
+    """ Cameras looking at the canonical head (60 cm away, turned by each yaw), camera to face space. """
+    cameras = []
+    for yaw in yaws:
+        matrix = scene3d.composeTRS((0, 0, 0), (0, yaw, 0)) @ scene3d.composeTRS((0, 1.0, 60.0), (0, 0, 0))
+        cameras.append(face.viewCamera(50.0, *size).copy(matrix=matrix))
+    return cameras
+
+
+def test_headPinsWarpTheEarsAndSkull():
+    """ Pins on the ears and the skull, placed where an actor with wider ears and a higher skull has them. """
+    head = face.canonicalHead()
+    vertices = head.vertices
+    index = np.arange(len(vertices))
+    ears = (np.abs(vertices[:, 0]) > 6.0) & (index >= face.MESH_VERTICES) & (vertices[:, 1] > -3) & (vertices[:, 1] < 5)
+    top = (vertices[:, 1] > 9.0) & (index >= face.MESH_VERTICES)
+    truth = vertices.copy()
+    truth[ears, 0] += np.sign(vertices[ears, 0]) * 1.0
+    truth[top, 1] += 0.8 * (vertices[top, 1] - 9.0) / (vertices[:, 1].max() - 9.0)
+    size = (1280, 960)
+    cameras = _headViews((0, 70, -70), size)
+    picks = list(np.where(ears)[0][::max(1, ears.sum() // 3)]) + list(np.where(top)[0][::max(1, top.sum() // 2)])
+    locations, targets, pinCameras = [], [], []
+    for camera in cameras:
+        xy, _, _ = camera.project(truth[picks], *size)
+        for k, vertex in enumerate(picks):
+            locations.append(face.surfaceLocation(vertices, head.triangles(), vertices[vertex]))
+            targets.append(xy[k])
+            pinCameras.append(camera)
+    warped = face.warpToPins(head, locations, np.array(targets), pinCameras, [size] * len(locations))
+    before, after = np.linalg.norm(vertices - truth, axis=1), np.linalg.norm(warped - truth, axis=1)
+    # The pinned points reach their place (seen from 3 views: in 3D), the ears and the skull follow, the face stays
+    assert after[picks].mean() < 0.1 * before[picks].mean()
+    assert after[ears].mean() < 0.6 * before[ears].mean() and after[top].mean() < 0.5 * before[top].mean()
+    assert np.linalg.norm(warped[:face.MESH_VERTICES] - vertices[:face.MESH_VERTICES], axis=1).max() < 0.2
+    # No pin: the head as it is
+    np.testing.assert_array_equal(face.warpToPins(head, [], np.zeros((0, 2)), [], []), vertices)
+
+
+def test_faceBuilderPins():
+    """ The pins of the views of a FaceBuilder: added on the head, dragged, the head follows. """
+    size = (1280, 960)
+    cameras = _headViews((0, 70), size)
+    graph = Graph("builderPins")
+    photos = [graph.addNewNode("Constant", width=size[0], height=size[1]) for _ in range(2)]
+    builder = graph.addNewNode("FaceBuilder")
+    for photo, name in zip(photos, ("input", "input1")):
+        graph.addEdge(photo.output, builder.attribute(name))
+    views = [{"input": name, "frame": 1, "still": True, "size": list(size), "landmarks": [], "focal": 50.0,
+              "cameraToFace": [float(v) for v in camera.matrix.ravel()]} for name, camera in zip(("input", "input1"), cameras)]
+    builder.views.value = json.dumps(views)
+    builder.showView.value = "input1"
+    graph.update()
+    plan = buildPlan(builder)
+    evaluator = Evaluator()
+    from meshroom.live.evaluator import RenderContext
+    ctx = RenderContext(plan.nodes[plan.target], 1, evaluator, plan)
+    original = face.canonicalHead().vertices
+    # The tip of the left ear (seen from the side view): picked where the head is seen
+    ear = int(np.argmax(original[:, 0] * (np.arange(len(original)) >= face.MESH_VERTICES)))
+    xy, _, _ = cameras[1].project(original[[ear]], *size)
+    point = builder.nodeDesc.pickPoint(ctx, *xy[0])
+    assert point is not None and np.linalg.norm(point - original[ear]) < 1.0
+    # Dragged 25 pixels to the left in that view
+    target = xy[0] + [-25.0, 0.0]
+    builder.pins1.value = json.dumps([{"name": "pin1", "enabled": True, "point": [float(v) for v in point],
+                                       "keys": {"1": [float(target[0]), float(target[1])]}, "format": list(size)}])
+    graph.update()
+    plan = buildPlan(builder)
+    ctx = RenderContext(plan.nodes[plan.target], 1, Evaluator(), plan)
+    head = builder.nodeDesc.head(ctx)
+    projections = builder.nodeDesc.pinProjections(ctx, lambda output: None)
+    assert np.hypot(*(np.array(projections["pin1"]) - target)) < 1.0
+    moved, _, _ = cameras[1].project(head.vertices[[ear]], *size)
+    assert np.hypot(*(moved[0] - target)) < 3.0
+    # The face did not move
+    assert np.abs(head.vertices[:face.MESH_VERTICES] - original[:face.MESH_VERTICES]).max() < 0.1
