@@ -584,7 +584,7 @@ def _cropped(image: ImageBuffer, region: BBox) -> ImageBuffer:
     bbox = image.bbox.intersection(region)
     if bbox == image.bbox or bbox.isEmpty:
         return image
-    return image.mapLayers(lambda pixels: alignToBBox(pixels, image.bbox, bbox), bbox=bbox)
+    return image.mapLayersDeferred(lambda pixels: alignToBBox(pixels, image.bbox, bbox), bbox=bbox)
 
 
 def scaleValue(value, scale: float, minimum=None):

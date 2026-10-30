@@ -103,6 +103,56 @@ def _freeze(pixels) -> np.ndarray:
     return pixels
 
 
+class LazyPixels:
+    """
+    The pixels of a layer computed on first use (read from its file, or derived from another layer): a layer nobody
+    looks at costs nothing (e.g. the other parts of a multi-part EXR while the viewer shows its beauty). Its shape is
+    known without computing it. Thread safe: computed once.
+    """
+
+    def __init__(self, shape: Tuple[int, int, int], load):
+        self.shape = tuple(int(v) for v in shape)
+        self.ndim = 3
+        self._load = load
+        self._pixels: Optional[np.ndarray] = None
+        import threading
+        self._lock = threading.Lock()
+
+    @property
+    def nbytes(self) -> int:
+        """ The memory of the pixels once computed (float32). """
+        return self.shape[0] * self.shape[1] * self.shape[2] * 4
+
+    @property
+    def loaded(self) -> bool:
+        return self._pixels is not None
+
+    def get(self) -> np.ndarray:
+        """ The pixels, computed now if they were not yet. """
+        if self._pixels is None:
+            with self._lock:
+                if self._pixels is None:
+                    pixels = np.asarray(self._load(), dtype=np.float32)
+                    if pixels.shape != self.shape:
+                        raise ValueError(f"Deferred layer of shape {pixels.shape}, expected {self.shape}.")
+                    self._pixels = _freeze(pixels)
+                    self._load = None
+        return self._pixels
+
+    def __repr__(self):
+        return f"LazyPixels({self.shape}, {'loaded' if self.loaded else 'not loaded'})"
+
+
+def deferred(func, pixels, shape: Tuple[int, int, int]) -> LazyPixels:
+    """ `func(pixels)` (a pure function) computed only when used; `pixels` may itself be deferred. """
+    return LazyPixels(shape, lambda: func(pixels.get() if isinstance(pixels, LazyPixels) else pixels))
+
+
+def resolved(pixels) -> np.ndarray:
+    """ The pixels of a layer, computing them if they were deferred. """
+    return pixels.get() if isinstance(pixels, LazyPixels) else pixels
+
+
 class ImageBuffer:
     """
     An image made of named layers (Nuke "layers", EXR "AOVs") sharing the same format and bbox.
@@ -114,6 +164,9 @@ class ImageBuffer:
     An ImageBuffer is immutable: its arrays are read-only since cached buffers are shared
     between nodes. Operations create new buffers (`withLayer`, `withRGBA`, `withPixels`, ...),
     which share the arrays of the layers they do not change.
+
+    A layer may be deferred (LazyPixels: read or computed when first used); `layer()`, `layers()` and `rgba()` give
+    its pixels, `rawLayers()` the layers as they are, deferred ones included (to pass them on without computing them).
     """
 
     def __init__(self, layers: "OrderedDict[str, Tuple[Sequence[str], np.ndarray]]",
@@ -124,7 +177,8 @@ class ImageBuffer:
         self._layers: "OrderedDict[str, Tuple[Tuple[str, ...], np.ndarray]]" = OrderedDict()
         shape = None
         for name, (channels, pixels) in layers.items():
-            pixels = _freeze(pixels)
+            if not isinstance(pixels, LazyPixels):
+                pixels = _freeze(pixels)
             if pixels.ndim != 3 or pixels.shape[2] != len(channels):
                 raise ValueError(f"Layer '{name}': {len(channels)} channel names for pixels of shape {pixels.shape}.")
             if shape is None:
@@ -191,14 +245,25 @@ class ImageBuffer:
 
     def layer(self, name: str) -> np.ndarray:
         """ Return the (read-only) pixels of a layer, of shape (bbox height, bbox width, nbChannels). """
-        return self._layers[name][1]
+        return resolved(self._layers[name][1])
 
     def layers(self) -> Iterable[Tuple[str, Tuple[str, ...], np.ndarray]]:
+        """ (name, channels, pixels) of each layer, the deferred ones computed as they come. """
+        for name, (channels, pixels) in self._layers.items():
+            yield name, channels, resolved(pixels)
+
+    def rawLayers(self) -> Iterable[Tuple[str, Tuple[str, ...], object]]:
+        """ (name, channels, pixels or LazyPixels) of each layer, without computing the deferred ones. """
         for name, (channels, pixels) in self._layers.items():
             yield name, channels, pixels
 
-    def arrays(self) -> List[np.ndarray]:
-        """ The pixel arrays of the layers (used to count the memory shared between images). """
+    def shape(self, name: str) -> Tuple[int, int, int]:
+        """ The shape of a layer's pixels (without computing a deferred layer). """
+        return tuple(self._layers[name][1].shape)
+
+    def arrays(self) -> list:
+        """ The pixel arrays of the layers, deferred ones as LazyPixels (used to count the memory shared between images:
+        a deferred layer counts as if it were computed). """
         return [pixels for _, pixels in self._layers.values()]
 
     def rgba(self) -> np.ndarray:
@@ -210,6 +275,7 @@ class ImageBuffer:
         out = np.zeros((self._bbox.height, self._bbox.width, 4), dtype=np.float32)
         if RGBA in self._layers:
             channels, pixels = self._layers[RGBA]
+            pixels = resolved(pixels)
             if channels == RGBA_CHANNELS:
                 out[:] = pixels
                 return out
@@ -262,8 +328,23 @@ class ImageBuffer:
             raise ValueError("Changing the bbox requires processing every layer.")
         layers = OrderedDict()
         for name, (channels, pixels) in self._layers.items():
-            layers[name] = (channels, func(pixels) if name in selected else pixels)
+            layers[name] = (channels, func(resolved(pixels)) if name in selected else pixels)
         return ImageBuffer(layers, self._format, bbox or self._bbox, self.metadata)
+
+    def mapLayersDeferred(self, func, bbox: Optional[BBox] = None) -> "ImageBuffer":
+        """
+        Like mapLayers on every layer, with `func(pixels) -> pixels` a pure function (no cancellation, no context):
+        the main layer now, the other layers when they are used (deferred). `bbox`: the new bbox, when `func` changes
+        the size of the pixels.
+        """
+        bbox = bbox or self._bbox
+        layers = OrderedDict()
+        for name, (channels, pixels) in self._layers.items():
+            if name == RGBA:
+                layers[name] = (channels, func(resolved(pixels)))
+            else:
+                layers[name] = (channels, deferred(func, pixels, (bbox.height, bbox.width, len(channels))))
+        return ImageBuffer(layers, self._format, bbox, self.metadata)
 
     def __repr__(self):
         return f"ImageBuffer(format={self.width}x{self.height}, bbox={tuple(self._bbox)}, layers={self.layerNames})"

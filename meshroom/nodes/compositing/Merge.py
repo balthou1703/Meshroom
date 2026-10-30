@@ -6,6 +6,7 @@ import numpy as np
 
 from meshroom.core import desc
 from meshroom.live import ImageInfo, RGBA, RGBA_CHANNELS
+from meshroom.live.imageBuffer import deferred
 from meshroom.live.ops import MERGE_IDENTITY_WITHOUT_A, MERGE_OPERATIONS
 from meshroom.live.params import maskParams
 
@@ -130,9 +131,15 @@ A mix of 0, or A not connected with an operation leaving B unchanged, passes B t
             return ops.mix(bBand, ops.merge(aBand, bBand, operation), amountBand)
         merged = ops.mapRows(band, [a, b, amount], 4, ctx.checkCancelled)
 
-        # The other layers of the base image follow the new bbox
+        # The other layers of the base image follow the new bbox (when they are used: deferred)
         layers = OrderedDict()
-        for name, channels, pixels in base.layers():
-            layers[name] = (channels, ops.alignToBBox(pixels, base.bbox, bbox))
+        for name, channels, pixels in base.rawLayers():
+            if name == RGBA:
+                # Its place kept (replaced below)
+                layers[name] = None
+                continue
+            layers[name] = (channels, pixels if tuple(base.bbox) == tuple(bbox) else
+                            deferred(lambda p, src=base.bbox: ops.alignToBBox(p, src, bbox), pixels,
+                                     (bbox.height, bbox.width, len(channels))))
         layers[RGBA] = (RGBA_CHANNELS, merged)
         return base.withPixels(layers, bbox)

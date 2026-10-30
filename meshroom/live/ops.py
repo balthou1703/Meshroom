@@ -613,11 +613,12 @@ def downscaleImage(image, factor: int):
     out = BBox(int(math.floor(bbox.x0 / factor)), int(math.floor(bbox.y0 / factor)),
                int(math.ceil(bbox.x1 / factor)), int(math.ceil(bbox.y1 / factor)))
     full = BBox(out.x0 * factor, out.y0 * factor, out.x1 * factor, out.y1 * factor)
-    layers = OrderedDict()
-    for name, channels, pixels in image.layers():
+    def reduce(pixels):
         aligned = alignToBBox(pixels, bbox, full)
         h, w, c = aligned.shape
-        layers[name] = (channels, aligned.reshape(h // factor, factor, w // factor, factor, c)
-                        .mean(axis=(1, 3), dtype=np.float32))
+        return aligned.reshape(h // factor, factor, w // factor, factor, c).mean(axis=(1, 3), dtype=np.float32)
     width, height = image.format
-    return image.withPixels(layers, out, (int(math.ceil(width / factor)), int(math.ceil(height / factor))))
+    # The layers other than the main one when they are used (deferred: e.g. the parts of an EXR not looked at)
+    reduced = image.mapLayersDeferred(reduce, bbox=out)
+    return reduced.withPixels(OrderedDict((name, (channels, pixels)) for name, channels, pixels in reduced.rawLayers()),
+                              out, (int(math.ceil(width / factor)), int(math.ceil(height / factor))))

@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from .color import linearToSrgb, srgbToLinear  # noqa: F401 (used by the viewer and the tests)
-from .imageBuffer import BBox, ImageBuffer, RGBA, RGBA_CHANNELS, splitChannelNames
+from .imageBuffer import BBox, ImageBuffer, LazyPixels, RGBA, RGBA_CHANNELS, splitChannelNames
 from .ops import alignToBBox
 
 try:
@@ -158,14 +158,15 @@ def convertColor(pixels: np.ndarray, colorMask, source: str, target: str, inPlac
     return out
 
 
-def _toWorkingSpace(raw: np.ndarray, names, colorspace: str) -> np.ndarray:
-    """ Float pixels of a file in the working space: the color channels converted from `colorspace`. """
+def _toWorkingSpace(raw: np.ndarray, names, colorspace: str, colorMask=None) -> np.ndarray:
+    """ Float pixels of a file in the working space: the color channels (`colorMask`, by default from the channel
+    `names`) converted from `colorspace`. """
     from . import color
     config = color.config()
     isIntegerFile = raw.dtype in (np.uint8, np.uint16)
     source = config.resolveForFile(colorspace, isIntegerFile)
     target = config.workingSpace()
-    colorMask = _colorChannels(names)
+    colorMask = _colorChannels(names) if colorMask is None else list(colorMask)
     if isIntegerFile:
         # A curve is baked in the integer lookup tables
         curve = None if config.isIdentity(source, target) else config.curve(source, target)
@@ -216,6 +217,11 @@ def readImage(path: str, colorspace: str = "auto") -> ImageBuffer:
 
 
 def _readWithOIIO(path: str, colorspace: str) -> ImageBuffer:
+    """
+    Read a file with OpenImageIO: its headers first (every part of a multi-part EXR), then the pixels of the main
+    layer; the other layers are deferred (LazyPixels): each is read from the file when it is used, alone (its part,
+    its channels), so that showing the beauty of a multi-part EXR does not read and convert all its parts.
+    """
     inp = oiio.ImageInput.open(path)
     if not inp:
         raise IOError(f"Cannot open '{path}': {oiio.geterror()}")
@@ -231,48 +237,73 @@ def _readWithOIIO(path: str, colorspace: str) -> ImageBuffer:
                 format = (fullWidth, fullHeight)
                 metadata = {attr.name: attr.value for attr in spec.extra_attribs}
             names = list(spec.channelnames)
-            # Read integer files in their own type: the conversion to float goes through a lookup table
-            basetype = spec.format.basetype
-            if basetype == oiio.UINT8:
-                raw = inp.read_image(subimage, 0, 0, spec.nchannels, "uint8")
-            elif basetype == oiio.UINT16:
-                raw = inp.read_image(subimage, 0, 0, spec.nchannels, "uint16")
-            else:
-                raw = inp.read_image(subimage, 0, 0, spec.nchannels, "float")
-            if raw is None:
-                raise IOError(f"Cannot read '{path}': {inp.geterror()}")
-            raw = np.asarray(raw).reshape(spec.height, spec.width, spec.nchannels)
-            pixels = _toWorkingSpace(raw, names, colorspace)
             # Data window in Nuke coordinates (y up, origin at the bottom-left of the display window)
             x0 = spec.x - spec.full_x
             y1 = (spec.full_y + fullHeight) - spec.y
             bbox = BBox(x0, y1 - spec.height, x0 + spec.width, y1)
             # Multi-part EXR: channels of a part may be unprefixed, the part name is then the layer name
             partName = (spec.getattribute("oiio:subimagename") or spec.getattribute("name")) if subimage > 0 else None
+            fileNames = list(names)
             if partName and not any("." in n for n in names):
                 names = [f"{partName}.{n}" for n in names]
-            parts.append((names, pixels, bbox))
+            parts.append((subimage, names, fileNames, bbox, spec.format.basetype, spec.width, spec.height))
             subimage += 1
         # The failed seek that ends the loop leaves an error to retrieve
         inp.geterror()
+
+        # Parts may have different data windows: use their union
+        bbox = parts[0][3]
+        for part in parts[1:]:
+            bbox = bbox.union(part[3])
+        layers = OrderedDict()
+        for subimage, names, fileNames, partBBox, basetype, width, height in parts:
+            # The colorspace applies to the color channels of the part (as when the whole part is converted)
+            colorMask = _colorChannels(fileNames)
+            for layerName, channels in splitChannelNames(names).items():
+                indices = [index for index, _ in channels]
+                layerName = _uniqueName(layerName, layers)
+                channelNames = tuple(c for _, c in channels)
+
+                def load(subimage=subimage, indices=indices, fileNames=fileNames, partBBox=partBBox, basetype=basetype,
+                         width=width, height=height, colorMask=colorMask, reader=None):
+                    return _readChannels(reader or path, subimage, indices, fileNames, colorMask, colorspace, basetype,
+                                         width, height, partBBox, bbox)
+                if not layers:
+                    # The main layer (the first of the file): read now, with the file already open
+                    layers[layerName] = (channelNames, load(reader=inp))
+                else:
+                    layers[layerName] = (channelNames, LazyPixels((bbox.height, bbox.width, len(indices)), load))
     finally:
         inp.close()
-
-    # Parts may have different data windows: use their union
-    bbox = parts[0][2]
-    for _, _, partBBox in parts[1:]:
-        bbox = bbox.union(partBBox)
-    layers = OrderedDict()
-    for names, pixels, partBBox in parts:
-        pixels = alignToBBox(pixels, partBBox, bbox)
-        groups = splitChannelNames(names)
-        for layerName, channels in groups.items():
-            indices = [index for index, _ in channels]
-            layerName = _uniqueName(layerName, layers)
-            # Avoid copying the pixels when the layer is the whole part
-            layerPixels = pixels if indices == list(range(pixels.shape[2])) else pixels[:, :, indices]
-            layers[layerName] = (tuple(c for _, c in channels), layerPixels)
     return ImageBuffer(layers, format, bbox, metadata)
+
+
+def _readChannels(source, subimage: int, indices, names, colorMask, colorspace: str, basetype, width: int, height: int,
+                  partBBox: BBox, bbox: BBox) -> np.ndarray:
+    """
+    Some channels (`indices`) of a part of a file, in the working space, placed in the image `bbox`. `source`: the path
+    of the file, or an open ImageInput.
+    """
+    inp = oiio.ImageInput.open(source) if isinstance(source, str) else source
+    if not inp:
+        raise IOError(f"Cannot open '{source}': {oiio.geterror()}")
+    try:
+        # Only the channels needed (a range: OpenImageIO reads channels from first to last)
+        first, last = min(indices), max(indices) + 1
+        # Read integer files in their own type: the conversion to float goes through a lookup table
+        type = "uint8" if basetype == oiio.UINT8 else "uint16" if basetype == oiio.UINT16 else "float"
+        raw = inp.read_image(subimage, 0, first, last, type)
+        if raw is None:
+            raise IOError(f"Cannot read '{source if isinstance(source, str) else ''}': {inp.geterror()}")
+    finally:
+        if isinstance(source, str):
+            inp.close()
+    raw = np.asarray(raw).reshape(height, width, last - first)
+    selected = [index - first for index in indices]
+    if selected != list(range(last - first)):
+        raw = raw[:, :, selected]
+    pixels = _toWorkingSpace(raw, [names[i] for i in indices], colorspace, [colorMask[i] for i in indices])
+    return alignToBBox(pixels, partBBox, bbox)
 
 
 def _uniqueName(name, existing):

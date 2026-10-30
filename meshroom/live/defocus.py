@@ -70,9 +70,10 @@ def _resizeCentered(values: np.ndarray, height: int, width: int) -> np.ndarray:
     r1, c1 = np.minimum(r0 + 1, h - 1), np.minimum(c0 + 1, w - 1)
     fr = (rows - r0).astype(np.float32)[:, np.newaxis, np.newaxis]
     fc = (columns - c0).astype(np.float32)[np.newaxis, :, np.newaxis]
-    top = values[r0][:, c0] * (1 - fc) + values[r0][:, c1] * fc
-    bottom = values[r1][:, c0] * (1 - fc) + values[r1][:, c1] * fc
-    return (top * (1 - fr) + bottom * fr).astype(np.float32)
+    values = np.asarray(values, dtype=np.float32)
+    # Separable: the columns first (on the few rows of the small image), then the rows
+    across = values[:, c0] * (1 - fc) + values[:, c1] * fc
+    return across[r0] * (1 - fr) + across[r1] * fr
 
 
 def _downsample(values: np.ndarray, factor: int) -> np.ndarray:

@@ -839,6 +839,16 @@ export MESHROOM_MODELS_PATH=/chemin/partage/meshroom-models
 Les noyaux GPU sont testés contre leurs versions CPU sur le device « cpu » de PyTorch (`tests/test_gpu.py`, sautés
 sans PyTorch).
 
+### Couches différées
+
+Une couche d'image peut être différée (`imageBuffer.LazyPixels` : lue ou calculée à sa première utilisation, une
+seule fois, thread-safe ; sa forme est connue sans la calculer). Le Read (OpenImageIO) lit les en-têtes de toutes les
+parts d'un EXR multipart puis seulement la couche principale ; chaque autre couche est lue quand un nœud s'en sert,
+seule (sa part, ses canaux : `_readChannels`). `layer()`, `layers()`, `rgba()` donnent les pixels (calculés au
+besoin), `rawLayers()` les couches telles quelles pour les transmettre sans les calculer ; `mapLayersDeferred(func)`
+applique une fonction pure à la couche principale tout de suite, aux autres plus tard (crop de la région d'intérêt,
+proxy, recadrage des couches de B par le Merge). Le cache compte une couche différée comme calculée.
+
 ### Mesure des performances
 
 `python -m meshroom.live.benchmark projet.mg` (`meshroom/live/benchmark.py`) : rend les branches des Write du projet
