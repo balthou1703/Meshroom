@@ -706,9 +706,7 @@ Skull » n'ajuste alors plus des déplacements libres mais ces ~50 coefficients 
 sur les mêmes contraintes de contour et de profondeur, ramené vers la prédiction) : le résultat reste une tête humaine
 même quand la segmentation se trompe, et « Head Fit » stocke les coefficients. Le cou : ses variations dans les scans
 viennent surtout de leur pose, l'identité s'y estompe vers sa base (25 %, `NECK_IDENTITY_BASE`) et l'ajustement ne
-l'utilise pas (la tête est rigide d'une vue à l'autre, le cou se plie différemment dans chacune). « Upright Neck » : dans chaque vue, le cou est plié pour
-descendre selon la verticale de la photo (le buste droit, la tête penchée dessus ; `headFit.bendNeck`, de rien en haut
-du cou à tout à sa base, 60° au plus) ; affichage et pins seulement, la sortie Head garde le cou droit. Sur des têtes synthétiques du modèle :
+l'utilise pas (la tête est rigide d'une vue à l'autre, le cou se plie différemment dans chacune). Sur des têtes synthétiques du modèle :
 erreur hors visage −30 à 50 % par la prédiction (contre le simple suivi du visage), encore −35 % par l'ajustement.
 Sans « Head From Face » : l'ancien comportement (la tête suit le visage, ajustement libre avec « Fit Radius »).
 

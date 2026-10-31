@@ -956,11 +956,6 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                        description="The skull, ears and neck take the proportions that go with the face (the identity "
                                    "model of ICT-FaceKit: 50 modes learned on scans of whole heads, the face fitted on "
                                    "the landmarks); off: they only follow the face (stretched with it)."),
-        desc.FloatParam(name="neckBend", label="Upright Neck", value=1.0, range=(0.0, 1.0, 0.05),
-                        description="In each view, the neck bent so that it goes down along the vertical of the photo "
-                                    "(the torso upright, the head bowed or tilted on it; the head is rigid from view to "
-                                    "view, not its pose on the body). Shown in the views only: the Head output keeps "
-                                    "the neck straight. 0: no bend."),
         desc.PushButtonParam(name="fitHeadContours", label="Fit Ears, Neck And Skull", semantic="liveAction",
                              description="After 'Build Head': fit the ears, the neck and the skull on the views, as "
                                          "the pins would (MediaPipe segmentation: the outlines of the ears and neck "
@@ -1196,7 +1191,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         view = self.viewAt(ctx)
         if view is None or not view.get("cameraToFace"):
             raise RuntimeError("Build the head first (Build Head): the pins are put on it, in the views.")
-        head = self.viewHead(ctx, view)
+        head = self.head(ctx)
         width, height = view["size"]
         origin, direction = self.viewCamera(ctx, view).ray(x, y, width, height)
         hit = scene3d.raycast(head, origin, direction)
@@ -1219,21 +1214,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         tracks = [track for track in tracks if len(track.get("point") or []) == 3]
         if not tracks:
             return {}
-        head = self.viewHead(ctx, view)
+        head = self.head(ctx)
         locations = face.pinLocations(self.original(ctx), np.array([track["point"] for track in tracks]))
         onHead = face._onSurface(head.vertices, head.triangles(), locations)
         xy, _, inFront = self.viewCamera(ctx, view).project(onHead, *view["size"])
         return {track["name"]: [float(px), float(py)] for track, (px, py), front in zip(tracks, xy, inFront) if front}
-
-    def viewHead(self, ctx, view, head=None):
-        """ The head as seen in a view: its neck bent on the body of the photo ("Upright Neck", headFit.bendNeck). """
-        from meshroom.live import headFit
-        head = head if head is not None else self.head(ctx)
-        amount = float(ctx.value("neckBend"))
-        if amount <= 0.0 or not view.get("cameraToFace"):
-            return head
-        return scene3d.GeoData(headFit.bendNeck(head.vertices, view["cameraToFace"], amount), name=head.name,
-                               topology=head.topology)
 
     def viewCamera(self, ctx, view):
         """ The camera of a stored view, the head at the origin. """
@@ -1266,7 +1251,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             else:
                 from meshroom.live import gpu
                 camera = self.viewCamera(ctx, view)
-                geoRender.drawGeometry(rgba, image.bbox, self.viewHead(ctx, view), camera, width, height, display,
+                geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
                                        (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx), quads=True)
         return image.withRGBA(rgba)
 
