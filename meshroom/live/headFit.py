@@ -500,6 +500,44 @@ def identityHead(rest: np.ndarray, faceTarget: np.ndarray, coefficients) -> np.n
 
 _NECK_WEIGHTS = {}
 NECK_IDENTITY_BASE = 0.25
+# The base of the neck of the head (ICT-FaceKit) widens toward the shoulders (trapezius): from this height (canonical
+# head, centimeters) down, straightNeck keeps it as wide as there
+NECK_FLARE_TOP = -10.25
+_NECK_STRAIGHT = {}
+
+
+def neckStraightFactors(count: int) -> np.ndarray:
+    """ Per vertex, the scale of its x (across the neck) that makes the neck of a head of the FaceBuilder straight below
+    NECK_FLARE_TOP (1 elsewhere). """
+    if count not in _NECK_STRAIGHT:
+        rest = face.canonicalHead().vertices
+        factors = np.ones(len(rest))
+        if len(rest) == count:
+            neck = headRegions(scene3d.GeoData(rest))["neck"]
+            y, x = rest[:, 1], np.abs(rest[:, 0])
+            # The half width of the neck along its height
+            levels = np.arange(y[neck].min() - 0.25, y[neck].max() + 0.5, 0.25)
+            widths = np.array([x[neck & (np.abs(y - level) < 0.3)].max(initial=0.0) for level in levels])
+            valid = widths > 0
+            levels, widths = levels[valid], widths[valid]
+            top = np.interp(NECK_FLARE_TOP, levels, widths)
+            below = neck & (y < NECK_FLARE_TOP)
+            factors[below] = np.minimum(1.0, top / np.maximum(np.interp(y[below], levels, widths), 1e-6))
+        _NECK_STRAIGHT[count] = factors
+    return _NECK_STRAIGHT[count]
+
+
+def straightNeck(vertices: np.ndarray) -> np.ndarray:
+    """ The head with the base of its neck as wide as above it (not widening toward the shoulders: a head on its own,
+    its neck down to the collar). """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    factors = neckStraightFactors(len(vertices))
+    if np.all(factors == 1.0):
+        return vertices
+    # Across the neck, about its middle (the plane of symmetry of the head, x = 0)
+    result = vertices.copy()
+    result[:, 0] *= factors
+    return result
 
 
 def neckIdentityWeight(rest: np.ndarray) -> np.ndarray:
@@ -577,3 +615,46 @@ def fitIdentity(rest: np.ndarray, faceTarget: np.ndarray, topology, views: List[
         if np.abs(step).max() < 1e-3:
             break
     return {"identity": [round(float(c), 5) for c in coefficients], "constraints": used}
+
+
+# Debugging the fit: MESHROOM_HEADFIT_DEBUG=<folder> writes, for each view, what the fit saw
+
+def debugImage(view: FitView, rgb: np.ndarray, heads, regions: dict) -> np.ndarray:
+    """
+    The crop of a view (rgb (h, w, 3) in [0, 1]) with its segmentation (hair red, face skin blue, body skin green) and
+    heads drawn as their vertices: `heads` [(vertices (n, 3), (r, g, b))]; the ears, neck and skull brighter.
+
+    Returns:
+        (h, w, 3) uint8.
+    """
+    image = np.clip(np.asarray(rgb, dtype=np.float32), 0, 1).copy()
+    labels = view.labels
+    tint = labels[:, :, HAIR, None] * np.array([1.0, 0.2, 0.2]) + labels[:, :, FACE_SKIN, None] * np.array([0.2, 0.3, 1.0]) \
+        + labels[:, :, BODY_SKIN, None] * np.array([0.2, 1.0, 0.3])
+    image = 0.6 * image + 0.4 * np.clip(tint, 0, 1)
+    h, w = image.shape[:2]
+    width, height = view.size
+    parts = regions["ear"] | regions["neck"] | regions["skull"]
+    for vertices, color in heads:
+        xy, depth, _ = view.camera.project(np.asarray(vertices, dtype=np.float64), width, height)
+        columns = np.round(xy[:, 0]).astype(np.int64) - view.origin[0]
+        rows = np.round(height - xy[:, 1]).astype(np.int64) - view.origin[1]
+        keep = (depth > 0) & (rows >= 0) & (rows < h) & (columns >= 0) & (columns < w)
+        shade = np.where(parts, 1.0, 0.5)[keep, None] * np.asarray(color, dtype=np.float32)[None]
+        image[rows[keep], columns[keep]] = shade
+    return (np.clip(image, 0, 1) * 255).astype(np.uint8)
+
+
+def writePng(path: str, pixels: np.ndarray):
+    """ An 8-bit RGB image (h, w, 3) written as a PNG (no dependency). """
+    import struct
+    import zlib
+    pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
+    h, w = pixels.shape[:2]
+    raw = b"".join(b"\x00" + pixels[row].tobytes() for row in range(h))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))

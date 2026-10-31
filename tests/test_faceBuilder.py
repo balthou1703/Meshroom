@@ -453,7 +453,8 @@ def test_faceBuilderPins():
     ctx = RenderContext(plan.nodes[plan.target], 1, evaluator, plan)
     original = face.canonicalHead().vertices
     # The tip of the left ear (seen from the side view): picked where the head is seen
-    ear = int(np.argmax(original[:, 0] * (np.arange(len(original)) >= face.MESH_VERTICES)))
+    from meshroom.live import headFit
+    ear = int(np.argmax(original[:, 0] * headFit.headRegions(face.canonicalHead())["ear"]))
     xy, _, _ = cameras[1].project(original[[ear]], *size)
     point = builder.nodeDesc.pickPoint(ctx, *xy[0])
     assert point is not None and np.linalg.norm(point - original[ear]) < 1.0
@@ -469,8 +470,9 @@ def test_faceBuilderPins():
     assert np.hypot(*(np.array(projections["pin1"]) - target)) < 1.0
     moved, _, _ = cameras[1].project(head.vertices[[ear]], *size)
     assert np.hypot(*(moved[0] - target)) < 3.0
-    # The face did not move
-    assert np.abs(head.vertices[:face.MESH_VERTICES] - original[:face.MESH_VERTICES]).max() < 0.1
+    # The face did not move (but near its oval, next to the ear)
+    far = np.linalg.norm(original[:face.MESH_VERTICES] - original[ear], axis=1) > 7.0
+    assert np.abs(head.vertices[:face.MESH_VERTICES] - original[:face.MESH_VERTICES])[far].max() < 0.1
 
 
 # Fit of the ears, neck and skull on segmented views ("Fit Ears, Neck And Skull")
@@ -582,7 +584,7 @@ class LabelPlate(_desc.ImageOpNode):
         return ImageBuffer.fromRGBA(np.dstack([rgb, np.ones(rgb.shape[:2], np.float32)]), (640, 480))
 
 
-def test_faceBuilderFitsEarsNeckAndSkull(monkeypatch):
+def test_faceBuilderFitsEarsNeckAndSkull(monkeypatch, tmp_path):
     from tests.utils import registerNodeDesc, unregisterNodeDesc
     from meshroom.live import headFit
     from meshroom.live.evaluator import RenderContext
@@ -607,7 +609,9 @@ def test_faceBuilderFitsEarsNeckAndSkull(monkeypatch):
                   if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
         context = ActionContext(values, Evaluator(), buildPlan(plates[0]), 1, nodePlan=buildPlan(builder),
                                 inputPlans={"input1": buildPlan(plates[1]), "input2": buildPlan(plates[2])})
+        monkeypatch.setenv("MESHROOM_HEADFIT_DEBUG", str(tmp_path))
         result = builder.nodeDesc.runAction("fitHeadContours", context)
+        assert (tmp_path / "fitDebug_2.png").read_bytes()[:4] == b"\x89PNG" and (tmp_path / "fit.json").exists()
         builder.headFit.value = result["headFit"]
         graph.update()
         plan = buildPlan(builder)
@@ -675,3 +679,17 @@ def test_identityFittedOnTheOutlines():
         assert fit["constraints"] > 50 and errorFitted < 1.05 * errorPredicted
         errors.append((errorPredicted, errorFitted))
     assert sum(e[1] for e in errors) < 0.9 * sum(e[0] for e in errors)
+
+
+def test_straightNeck():
+    """ The base of the neck no wider than its top: the head on its own (not widening toward the shoulders). """
+    from meshroom.live import headFit
+    head = face.canonicalHead()
+    neck = headFit.headRegions(head)["neck"]
+    straight = headFit.straightNeck(head.vertices)
+    y = head.vertices[:, 1]
+    top = neck & (np.abs(y - headFit.NECK_FLARE_TOP) < 0.3)
+    base = neck & (y < y[neck].min() + 0.5)
+    assert np.abs(head.vertices[base, 0]).max() > 1.4 * np.abs(head.vertices[top, 0]).max()
+    assert np.abs(straight[base, 0]).max() < 1.05 * np.abs(straight[top, 0]).max()
+    np.testing.assert_array_equal(straight[~neck], head.vertices[~neck])

@@ -1080,8 +1080,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             coefficients = self.storedIdentity(ctx) if withFit else None
             if coefficients is None:
                 coefficients = headFit.predictIdentity(faceTarget, original.vertices)
-            fitted = scene3d.GeoData(headFit.identityHead(original.vertices, faceTarget, coefficients), name="head",
-                                     topology=original.topology)
+            # (the neck straight: a head on its own, not widening toward the shoulders)
+            fitted = scene3d.GeoData(headFit.straightNeck(headFit.identityHead(original.vertices, faceTarget, coefficients)),
+                                     name="head", topology=original.topology)
         elif hasShape:
             fitted = scene3d.GeoData(face.HeadFollow.of(original.vertices).follow(base.vertices + offsets), name="head",
                                      topology=original.topology)
@@ -1289,6 +1290,30 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             view["error"] = round(float(result["error"]), 3)
         return {"faceShape": face.dumpShape(offsets), "views": json.dumps(stored)}
 
+    def _writeFitDebug(self, ctx, views, crops, head, fit):
+        """ With MESHROOM_HEADFIT_DEBUG=<folder>: for each view, its crop, segmentation, the head before the fit
+        (yellow) and after it (cyan), as fitDebug_<n>.png. """
+        import json
+        import logging
+        import os
+        from meshroom.live import face, headFit
+        folder = os.environ.get("MESHROOM_HEADFIT_DEBUG")
+        if not folder:
+            return
+        os.makedirs(folder, exist_ok=True)
+        original = self.original(ctx)
+        after = None
+        if "identity" in fit:
+            after = headFit.straightNeck(headFit.identityHead(original.vertices, head.vertices[:face.MESH_VERTICES],
+                                                              np.asarray(fit["identity"])))
+        regions = headFit.headRegions(head)
+        for index, (view, rgb) in enumerate(zip(views, crops)):
+            heads = [(head.vertices, (1.0, 0.9, 0.2))] + ([(after, (0.3, 0.9, 1.0))] if after is not None else [])
+            headFit.writePng(os.path.join(folder, f"fitDebug_{index}.png"), headFit.debugImage(view, rgb, heads, regions))
+        with open(os.path.join(folder, "fit.json"), "w") as f:
+            json.dump(fit, f)
+        logging.info(f"[FaceBuilder] Fit debug images written in {folder}")
+
     def fitHeadContours(self, context):
         """ "Fit Ears, Neck And Skull": each view segmented (and its depth estimated), then headFit.fitHead on all. """
         import json
@@ -1311,7 +1336,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 estimator = headFit.depthEstimator(gpu.availableDevice())
             except NeuralUnavailable as e:
                 depthMessage = f" (without depth: {e})"
-        views = []
+        views, crops = [], []
         try:
             for index, view in enumerate(stored):
                 context.checkCancelled()
@@ -1331,6 +1356,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                     continue
                 rgb = displayRGB(image, BBox.fromFormat(width, height))[top:bottom, left:right]
                 labels = segmenter.segment((rgb * 255).astype(np.uint8))
+                crops.append(rgb)
                 disparity = estimator.estimate(rgb) if estimator is not None else None
                 views.append(headFit.FitView(camera, (width, height), labels, (left, top), disparity,
                                              search=float(np.clip(0.08 * size, 15, 150))))
@@ -1348,6 +1374,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         else:
             fit = headFit.fitHead(head, views, radius=context.value("fitRadius"), useDepth=estimator is not None,
                                   cancel=context.checkCancelled, progress=progress)
+        self._writeFitDebug(ctx, views, crops, head, fit)
         if not fit["constraints"]:
             raise RuntimeError("Fit Ears, Neck And Skull: no outline of the ears, neck or skull found in the views.")
         import logging
