@@ -500,6 +500,57 @@ def identityHead(rest: np.ndarray, faceTarget: np.ndarray, coefficients) -> np.n
 
 _NECK_WEIGHTS = {}
 NECK_IDENTITY_BASE = 0.25
+_NECK_BEND = {}
+
+
+def neckBendWeights(count: int):
+    """ (weights (n,) of the bend: 0 at the top of the neck and above, 1 at its base, smooth; the top ring of the neck:
+    the pivot of the bend), for a head of the FaceBuilder of `count` vertices. """
+    if count not in _NECK_BEND:
+        rest = face.canonicalHead().vertices
+        neck = headRegions(scene3d.GeoData(rest))["neck"]
+        y = rest[:, 1]
+        top, bottom = y[neck].max(), y[neck].min()
+        t = np.clip((top - y) / max(top - bottom, 1e-6), 0.0, 1.0)
+        weights = np.where(neck, t * t * (3.0 - 2.0 * t), 0.0)
+        ring = np.where(neck & (y > top - 0.6))[0]
+        _NECK_BEND[count] = (weights, ring)
+    return _NECK_BEND[count]
+
+
+def bendNeck(vertices: np.ndarray, cameraToFace, amount: float = 1.0, maxDegrees: float = 60.0) -> np.ndarray:
+    """
+    The head with its neck bent so that it goes down along the vertical of the image of a view (the torso upright in
+    the photo, the head bowed or tilted on it): the head is the same in all the views, but not its pose on the body.
+    The bend grows from the top of the neck (none) to its base (all of it); `amount` 0: no bend.
+
+    Args:
+        vertices: the head (n, 3), in its space.
+        cameraToFace: the 4x4 camera matrix of the view in the space of the head.
+    """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    if amount <= 0.0 or len(vertices) != len(face.canonicalHead().vertices):
+        return vertices
+    matrix = np.asarray(cameraToFace, dtype=np.float64).reshape(4, 4)
+    up = matrix[:3, 1] / max(np.linalg.norm(matrix[:3, 1]), 1e-12)
+    rest = np.array([0.0, 1.0, 0.0])
+    axis = np.cross(rest, up)
+    sine, cosine = np.linalg.norm(axis), float(np.dot(rest, up))
+    angle = min(np.arctan2(sine, cosine), np.radians(maxDegrees)) * float(amount)
+    if sine < 1e-9 or angle < 1e-6:
+        return vertices
+    axis /= sine
+    weights, ring = neckBendWeights(len(vertices))
+    pivot = vertices[ring].mean(axis=0)
+    moved = np.where(weights > 0)[0]
+    # Rodrigues, per vertex angle
+    theta = angle * weights[moved][:, None]
+    offset = vertices[moved] - pivot
+    cos, sin = np.cos(theta), np.sin(theta)
+    rotated = offset * cos + np.cross(axis, offset) * sin + np.outer(offset @ axis, axis) * (1.0 - cos)
+    result = vertices.copy()
+    result[moved] = pivot + rotated
+    return result
 
 
 def neckIdentityWeight(rest: np.ndarray) -> np.ndarray:

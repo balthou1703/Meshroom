@@ -675,3 +675,29 @@ def test_identityFittedOnTheOutlines():
         assert fit["constraints"] > 50 and errorFitted < 1.05 * errorPredicted
         errors.append((errorPredicted, errorFitted))
     assert sum(e[1] for e in errors) < 0.9 * sum(e[0] for e in errors)
+
+
+def test_neckBentOnTheVerticalOfTheView():
+    """ A bowed head: the base of its neck goes down along the vertical of the image, the head itself unchanged. """
+    from meshroom.live import headFit
+    rest = face.canonicalHead().vertices
+    angle = np.radians(40.0)
+    # The camera up in the space of the head: the head bowed by 40 degrees (the camera vertical tilted backward)
+    up = np.array([0.0, np.cos(angle), -np.sin(angle)])
+    matrix = np.eye(4)
+    matrix[:3, 1] = up
+    matrix[:3, 2] = np.cross(np.array([1.0, 0.0, 0.0]), up)
+    bent = headFit.bendNeck(rest, matrix)
+    neck = headFit.headRegions(face.canonicalHead())["neck"]
+    np.testing.assert_array_equal(bent[~neck], rest[~neck])
+    weights, ring = headFit.neckBendWeights(len(rest))
+    base = weights > 0.99
+    pivot = rest[ring].mean(axis=0)
+    direction = bent[base].mean(axis=0) - pivot
+    direction /= np.linalg.norm(direction)
+    restDirection = rest[base].mean(axis=0) - pivot
+    restDirection /= np.linalg.norm(restDirection)
+    # Turned by the angle between the vertical of the head and that of the view, toward it
+    turned = np.degrees(np.arccos(np.clip(direction @ restDirection, -1, 1)))
+    assert 35.0 < turned < 45.0 and direction @ -up > restDirection @ -up
+    np.testing.assert_array_equal(headFit.bendNeck(rest, matrix, amount=0.0), rest)
