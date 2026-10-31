@@ -491,15 +491,38 @@ def identityHead(rest: np.ndarray, faceTarget: np.ndarray, coefficients) -> np.n
     model = rest + np.tensordot(coefficients, modes[:len(coefficients)], axes=1)
     follow = face.HeadFollow.of(rest)
     faceTarget = np.asarray(faceTarget, dtype=np.float64)[:face.MESH_VERTICES]
-    return model + follow.follow(faceTarget) - follow.follow(model[:face.MESH_VERTICES])
+    followed = follow.follow(faceTarget)
+    head = model + followed - follow.follow(model[:face.MESH_VERTICES])
+    # The neck of the scans varies with their pose more than with the identity: toward its base, it mostly follows
+    weight = neckIdentityWeight(rest)[:, None]
+    return followed + weight * (head - followed)
+
+
+_NECK_WEIGHTS = {}
+NECK_IDENTITY_BASE = 0.25
+
+
+def neckIdentityWeight(rest: np.ndarray) -> np.ndarray:
+    """ Per vertex, how much of the identity applies: 1, fading on the neck down to NECK_IDENTITY_BASE at its base. """
+    key = (len(rest), float(rest[:, 1].sum()))
+    if key not in _NECK_WEIGHTS:
+        neck = headRegions(scene3d.GeoData(rest))["neck"]
+        y = rest[:, 1]
+        weight = np.ones(len(rest))
+        if neck.any():
+            top, bottom = y[neck].max(), y[neck].min()
+            ramp = np.clip((y - bottom) / max(top - bottom, 1e-6), 0.0, 1.0)
+            weight[neck] = NECK_IDENTITY_BASE + (1.0 - NECK_IDENTITY_BASE) * ramp[neck]
+        _NECK_WEIGHTS[key] = weight
+    return _NECK_WEIGHTS[key]
 
 
 def fitIdentity(rest: np.ndarray, faceTarget: np.ndarray, topology, views: List[FitView],
                 regularization: float = 0.1, iterations: int = 8, search: float = 40.0, useDepth: bool = True,
                 cancel: Optional[Callable[[], None]] = None, progress: Optional[Callable[[float], None]] = None) -> dict:
     """
-    The identity coefficients of a head whose face is `faceTarget`, refined on the views: the outlines of the ears and
-    neck on the skin, the skull inside the head, the depth of the ears (contourConstraints, depthConstraints), all the
+    The identity coefficients of a head whose face is `faceTarget`, refined on the views: the outlines of the ears on
+    the skin (not the neck: its bend changes from view to view), the skull inside the head, the depth of the ears (contourConstraints, depthConstraints), all the
     views together, robust, regularized toward the proportions the face predicts (predictIdentity): a few coefficients
     for the whole head, so a wrong border cannot bend it, the result always a human head.
 
@@ -524,10 +547,12 @@ def fitIdentity(rest: np.ndarray, faceTarget: np.ndarray, topology, views: List[
         current = origin + jacobian @ coefficients
         constraints = []
         for view in views:
-            constraints += contourConstraints(current, triangles, view, regions, mobility,
-                                              view.search if view.search else search)
+            # Not the neck: it bends differently in each view (the head rigid in all of them)
+            constraints += [c for c in contourConstraints(current, triangles, view, regions, mobility,
+                                                          view.search if view.search else search) if c[3] != "neck"]
             if useDepth:
-                constraints += depthConstraints(current, triangles, view, regions, mobility)
+                constraints += [c for c in depthConstraints(current, triangles, view, regions, mobility)
+                                if not regions["neck"][c[0]]]
         used = len(constraints)
         if not constraints:
             break
