@@ -682,6 +682,12 @@ densité du maillage, locale : un pin d'oreille ne déplace ni le cou ni l'autre
 plusieurs vues placent la surface en 3D), chacun exact. Un pin de la tête (oreilles, crâne, cou) ne bouge pas le visage
 (ses landmarks l'ont placé), sauf près de l'ovale où le mouvement s'estompe sur 2 cm ; un pin posé sur le visage le
 bouge. Quelques millisecondes : la tête suit le pin pendant qu'on le glisse.
+Sur une tête, les pins sont d'abord résolus sur son modèle (`headFit.solvePins`, comme ceux de KeenTools) : les 50
+modes de l'identité (toute la tête, visage compris s'il y a des pins sur le visage ; sinon le visage est gardé), un
+déplacement de chaque oreille d'un bloc (`earWeights` : toute l'oreille, estompé autour), et une petite correction de
+la pose de la tête dans chaque vue (la caméra de la vue en tient compte : affichage, sortie Camera) ; régularisés
+(`PIN_*_WEIGHT` : un pin bouge la tête le moins possible, comme les têtes diffèrent). La déformation libre ci-dessus ne
+fait que le reste : plus d'oreilles tordues ni de front mou quand le modèle explique les pins.
 « Fit Ears, Neck And Skull » (FaceBuilder, `meshroom/live/headFit.py`) : après « Build Head », les oreilles, le cou
 et le crâne ajustés tout seuls sur les vues. Chaque vue (recadrée autour de la tête) est segmentée par le segmenteur
 multiclasse de MediaPipe (`selfie_multiclass_256x256` : cheveux, peau du visage, peau du corps, vêtements…) ; les

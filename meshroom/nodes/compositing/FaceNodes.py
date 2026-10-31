@@ -1060,7 +1060,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return face.facePart(source)
         return face.headOf(source)
 
-    def head(self, ctx, withFit=True):
+    def head(self, ctx, withFit=True, withPins=True):
         """ The head of the actor: the base with the fitted shape (its ears, skull and neck following the face), then
         the fit of its ears, neck and skull and its pins (`withFit`; without: the head the landmarks give). """
         from meshroom.live import face
@@ -1091,7 +1091,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if not withFit:
             return fitted
         fitted = self.headFitted(ctx, fitted)
-        return self.pinned(ctx, fitted, original)
+        return self.pinned(ctx, fitted, original) if withPins else fitted
 
     @staticmethod
     def usesIdentity(ctx, original) -> bool:
@@ -1154,36 +1154,63 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         return np.array(points, dtype=np.float64).reshape(-1, 3), np.array(positions, dtype=np.float64).reshape(-1, 2)
 
     def pinned(self, ctx, fitted, original):
-        """ The fitted head moved onto the pins of all the views (face.warpToPins), cached. """
+        """ The fitted head moved onto the pins of all the views (pinSolution), cached. """
+        vertices, _ = self.pinSolution(ctx, fitted, original)
+        if vertices is None:
+            return fitted
+        return scene3d.GeoData(vertices, name=fitted.name, topology=fitted.topology)
+
+    def pinSolution(self, ctx, fitted, original):
+        """
+        (vertices or None, {input: 4x4 move of the head in that view}): the head moved onto the pins of all the views,
+        first by its model (headFit.solvePins: its identity, its ears as a whole, its pose in each view: the way heads
+        differ), then the rest of the way by a smooth warp (face.warpToPins). Cached.
+        """
         import hashlib
-        from meshroom.live import face
+        from meshroom.live import face, headFit
         views = [view for view in self.storedViews(ctx) if view.get("cameraToFace")]
         texts = [ctx.value(name) or "" for name in _VIEW_PINS.values()]
         if not views or all(text.strip() in ("", "[]") for text in texts):
-            return fitted
+            return None, {}
         key = hashlib.sha1(np.ascontiguousarray(fitted.vertices).tobytes() + repr(
             (texts, ctx.value("views"), ctx.value("pinRadius"))).encode()).hexdigest()
         cached = FaceBuilder._PINNED.get(key)
         if cached is None:
-            locations, targets, cameras, sizes = [], [], [], []
+            locations, targets, cameras, sizes, viewOf, inputs = [], [], [], [], [], []
             for view in views:
                 points, positions = self.viewPins(ctx, view)
                 if not len(points):
                     continue
-                camera = self.viewCamera(ctx, view)
+                camera = self.baseCamera(view)
+                index = len(inputs)
+                inputs.append(view["input"])
                 for location, position in zip(face.pinLocations(original, points), positions):
                     locations.append(location)
                     targets.append(position)
                     cameras.append(camera)
                     sizes.append(tuple(view["size"]))
+                    viewOf.append(index)
             if not locations:
-                return fitted
-            cached = face.warpToPins(fitted, locations, np.array(targets), cameras, sizes,
-                                     radius=float(ctx.value("pinRadius")))
+                return None, {}
+            targets = np.array(targets)
+            vertices, poses = fitted.vertices, np.tile(np.eye(4), (len(inputs), 1, 1))
+            if face.isHead(fitted):
+                vertices, poses, _ = headFit.solvePins(fitted.vertices, fitted.triangles(), locations, targets, cameras,
+                                                       sizes, viewOf, len(inputs))
+            # The pins seen by the cameras of the views with the head moved there
+            posed = [camera.copy(matrix=np.linalg.inv(poses[view]) @ camera.matrix) for camera, view in zip(cameras, viewOf)]
+            vertices = face.warpToPins(scene3d.GeoData(vertices, name=fitted.name, topology=fitted.topology), locations,
+                                       targets, posed, sizes, radius=float(ctx.value("pinRadius")))
+            cached = (vertices, {name: poses[index] for index, name in enumerate(inputs)})
             if len(FaceBuilder._PINNED) > 16:
                 FaceBuilder._PINNED.clear()
             FaceBuilder._PINNED[key] = cached
-        return scene3d.GeoData(cached, name=fitted.name, topology=fitted.topology)
+        return cached
+
+    def viewPose(self, ctx, view):
+        """ The move of the head in a view from its pins (identity when it has none). """
+        poses = self.pinSolution(ctx, self.head(ctx, withPins=False), self.original(ctx))[1]
+        return poses.get(view["input"], np.eye(4))
 
     def pickPoint(self, ctx, x, y):
         """ The point of the base head under the image position (x, y) of the view shown (where the head is seen), or
@@ -1221,12 +1248,20 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         xy, _, inFront = self.viewCamera(ctx, view).project(onHead, *view["size"])
         return {track["name"]: [float(px), float(py)] for track, (px, py), front in zip(tracks, xy, inFront) if front}
 
-    def viewCamera(self, ctx, view):
-        """ The camera of a stored view, the head at the origin. """
+    def baseCamera(self, view):
+        """ The camera of a stored view, the head at the origin (as the landmarks placed it). """
         from meshroom.live import face
         width, height = view["size"]
         return face.viewCamera(view["focal"], width, height).copy(
             matrix=np.array(view["cameraToFace"], dtype=np.float64).reshape(4, 4))
+
+    def viewCamera(self, ctx, view):
+        """ The camera of a stored view, the head at the origin, corrected by its pins (viewPose). """
+        camera = self.baseCamera(view)
+        pose = self.viewPose(ctx, view)
+        if np.allclose(pose, np.eye(4)):
+            return camera
+        return camera.copy(matrix=np.linalg.inv(pose) @ camera.matrix)
 
     def computeData(self, ctx, outputName):
         if outputName == "geoOutput":

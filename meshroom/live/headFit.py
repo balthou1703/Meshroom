@@ -658,3 +658,127 @@ def writePng(path: str, pixels: np.ndarray):
     with open(path, "wb") as f:
         f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
                 + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+# The pins of the views solved on the model of the head (as the pins of KeenTools FaceBuilder: they move the head as
+# a whole, its proportions, its ears, its pose in each view; a free warp only for what is left)
+
+EAR_RADIUS = 3.5
+_EAR_WEIGHTS = {}
+
+
+def earWeights(count: int) -> np.ndarray:
+    """ (n, 2): how much each vertex of a head of the FaceBuilder follows the move of its right (x < 0) and left ear:
+    1 on the whole ear, fading out around it (gaussian, EAR_RADIUS), none on the face. """
+    if count not in _EAR_WEIGHTS:
+        head = face.canonicalHead()
+        rest = head.vertices
+        weights = np.zeros((len(rest), 2))
+        if len(rest) == count:
+            ear = headRegions(head)["ear"]
+            mobility = face.headMobility(head)
+            for side, sign in enumerate((-1.0, 1.0)):
+                mask = ear & (np.sign(rest[:, 0]) == sign)
+                center = rest[mask].mean(axis=0)
+                distance = np.linalg.norm(rest - center, axis=1)
+                reach = np.linalg.norm(rest[mask] - center, axis=1).max()
+                fade = np.exp(-np.maximum(distance - reach, 0.0) ** 2 / EAR_RADIUS ** 2)
+                weights[:, side] = np.where(np.sign(rest[:, 0]) == sign, fade, 0.0) * mobility
+        _EAR_WEIGHTS[count] = weights
+    return _EAR_WEIGHTS[count]
+
+
+def _rotation(vector: np.ndarray) -> np.ndarray:
+    angle = float(np.linalg.norm(vector))
+    if angle < 1e-12:
+        return np.eye(3)
+    k = vector / angle
+    cross = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(angle) * cross + (1 - np.cos(angle)) * cross @ cross
+
+
+def poseMatrix(parameters, pivot) -> np.ndarray:
+    """ The 4x4 move of the head (rotation vector, translation) about `pivot`. """
+    parameters = np.asarray(parameters, dtype=np.float64)
+    rotation = _rotation(parameters[:3])
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = np.asarray(pivot) - rotation @ np.asarray(pivot) + parameters[3:6]
+    return matrix
+
+
+# The weights of the prior of solvePins: pixels of a pin worth a unit of each kind of change
+PIN_IDENTITY_WEIGHT = 8.0   # per standard deviation of a mode of the identity
+PIN_EAR_WEIGHT = 4.0        # per centimeter of move of an ear
+PIN_ROTATION_WEIGHT = 250.0  # per radian of the head in a view
+PIN_TRANSLATION_WEIGHT = 10.0  # per centimeter of the head in a view
+
+
+def solvePins(vertices: np.ndarray, triangles: np.ndarray, locations, targets: np.ndarray, cameras, sizes,
+              viewOf, viewCount: int, iterations: int = 10):
+    """
+    The head moved onto pins by its model: the modes of the identity (the whole head, its face too), a move of each ear
+    as a whole, and a small correction of the pose of the head in each view (`viewOf`: the view of each pin, among
+    `viewCount`); robust to nothing (each pin is the user's), regularized (PIN_*_WEIGHT): a pin moves the head as little
+    as it can, the way heads differ. Without pins on the face, the face is kept (the identity changes the rest).
+
+    Returns:
+        (vertices (n, 3), poses (viewCount, 4, 4): the move of the head in each view, residuals (k,) in pixels).
+    """
+    vertices = np.asarray(vertices, dtype=np.float64)
+    modes = identityModel() if hasIdentityModel(vertices) else np.zeros((0, len(vertices), 3))
+    ears = earWeights(len(vertices))
+    pivot = vertices[:face.MESH_VERTICES].mean(axis=0)
+    corners = np.array([triangles[t] for t, _ in locations], dtype=np.int64)
+    weights = np.array([w for _, w in locations], dtype=np.float64)
+    viewOf = np.asarray(viewOf, dtype=np.int64)
+    targets = np.asarray(targets, dtype=np.float64).reshape(-1, 2)
+    if len(modes) and not (corners < face.MESH_VERTICES).all(1).any():
+        # No pin on the face: the landmarks placed it, the identity only changes the rest of the head
+        modes = modes * face.headMobility(scene3d.GeoData(vertices))[None, :, None]
+    nModes = len(modes)
+    # The pins as linear functions of the model: their points (k, 3) and changes per mode / per ear axis
+    base = (vertices[corners] * weights[:, :, None]).sum(1)
+    modeColumns = (modes[:, corners] * weights[None, :, :, None]).sum(2) if nModes else np.zeros((0, len(base), 3))
+    earColumns = (ears[corners] * weights[:, :, None]).sum(1)  # (k, 2)
+    size = nModes + 6 + 6 * viewCount
+    prior = np.r_[np.full(nModes, PIN_IDENTITY_WEIGHT), np.full(6, PIN_EAR_WEIGHT),
+                  np.tile(np.r_[np.full(3, PIN_ROTATION_WEIGHT), np.full(3, PIN_TRANSLATION_WEIGHT)], viewCount)]
+
+    def unpack(x):
+        return x[:nModes], x[nModes:nModes + 6].reshape(2, 3), x[nModes + 6:].reshape(viewCount, 6)
+
+    def residuals(x):
+        coefficients, earMoves, poses = unpack(x)
+        points = base + (np.tensordot(coefficients, modeColumns, axes=1) if nModes else 0.0) + earColumns @ earMoves
+        out = np.zeros((len(points), 2))
+        for view in range(viewCount):
+            mask = viewOf == view
+            if not mask.any():
+                continue
+            matrix = poseMatrix(poses[view], pivot)
+            moved = points[mask] @ matrix[:3, :3].T + matrix[:3, 3]
+            first = int(np.where(mask)[0][0])
+            # (the pins of a view share its camera)
+            xy, _, _ = cameras[first].project(moved, *sizes[first])
+            out[mask] = xy - targets[mask]
+        return out.ravel()
+
+    x = np.zeros(size)
+    for _ in range(iterations):
+        r = residuals(x)
+        jacobian = np.zeros((len(r), size))
+        for k in range(size):
+            step = np.zeros(size)
+            step[k] = 1e-4
+            jacobian[:, k] = (residuals(x + step) - r) / 1e-4
+        lhs = jacobian.T @ jacobian + np.diag(prior ** 2)
+        delta = np.linalg.solve(lhs, -(jacobian.T @ r) - prior ** 2 * x)
+        x = x + delta
+        if np.abs(delta).max() < 1e-4:
+            break
+    coefficients, earMoves, poses = unpack(x)
+    moved = vertices + ears @ earMoves
+    if nModes:
+        moved = moved + np.tensordot(coefficients, modes, axes=1)
+    return moved, np.array([poseMatrix(p, pivot) for p in poses]), np.abs(residuals(x).reshape(-1, 2)).max(axis=1)

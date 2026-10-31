@@ -468,10 +468,11 @@ def test_faceBuilderPins():
     head = builder.nodeDesc.head(ctx)
     projections = builder.nodeDesc.pinProjections(ctx, lambda output: None)
     assert np.hypot(*(np.array(projections["pin1"]) - target)) < 1.0
-    moved, _, _ = cameras[1].project(head.vertices[[ear]], *size)
+    # (seen by the camera of the view: the pins may correct the pose of the head there)
+    moved, _, _ = builder.nodeDesc.viewCamera(ctx, views[1]).project(head.vertices[[ear]], *size)
     assert np.hypot(*(moved[0] - target)) < 3.0
-    # The face did not move (but near its oval, next to the ear)
-    far = np.linalg.norm(original[:face.MESH_VERTICES] - original[ear], axis=1) > 7.0
+    # The face did not move (but near its oval, where the head joins it)
+    far = face.headMobility(face.canonicalHead())[:face.MESH_VERTICES] == 0.0
     assert np.abs(head.vertices[:face.MESH_VERTICES] - original[:face.MESH_VERTICES])[far].max() < 0.1
 
 
@@ -693,3 +694,32 @@ def test_straightNeck():
     assert np.abs(head.vertices[base, 0]).max() > 1.4 * np.abs(head.vertices[top, 0]).max()
     assert np.abs(straight[base, 0]).max() < 1.05 * np.abs(straight[top, 0]).max()
     np.testing.assert_array_equal(straight[~neck], head.vertices[~neck])
+
+
+def test_pinsSolvedOnTheModel():
+    """ Pins all shifted the same way in a view: the head moves in that view (its pose), its shape barely changes;
+    a pin on an ear moves the ear as a whole (not twisted). """
+    from meshroom.live import headFit
+    head = face.canonicalHead()
+    vertices, triangles = head.vertices, head.triangles()
+    size = (1280, 960)
+    cameras = _headViews((0, 60), size)
+    rng = np.random.default_rng(0)
+    picks = rng.choice(face.MESH_VERTICES, 6, replace=False)
+    locations = face.pinLocations(head, vertices[picks])
+    xy, _, _ = cameras[1].project(vertices[picks], *size)
+    targets = xy + [15.0, -10.0]
+    moved, poses, residuals = headFit.solvePins(vertices, triangles, locations, targets, [cameras[1]] * 6, [size] * 6,
+                                                [0] * 6, 1)
+    assert residuals.max() < 3.0
+    assert np.abs(moved - vertices).max() < 0.2
+    assert not np.allclose(poses[0], np.eye(4))
+    # An ear pin: the whole ear moves with it, about the same
+    ear = headFit.headRegions(head)["ear"] & (vertices[:, 0] > 0)
+    tip = int(np.argmax(vertices[:, 0] * ear))
+    location = face.pinLocations(head, vertices[[tip]])
+    xy, _, _ = cameras[0].project(vertices[[tip]], *size)
+    moved, poses, residuals = headFit.solvePins(vertices, triangles, location, xy + [20.0, 0.0], [cameras[0]], [size],
+                                                [0], 1)
+    shifts = (moved - vertices)[ear]
+    assert shifts[:, 0].mean() > 0.3 and shifts[:, 0].std() < 0.25 * shifts[:, 0].mean()
