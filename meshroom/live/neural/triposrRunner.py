@@ -182,8 +182,59 @@ def _load(TSR, name, torch):
         checkpoint = torch.load(weightPath, map_location="cpu", weights_only=True)
     except Exception:
         checkpoint = torch.load(weightPath, map_location="cpu", weights_only=False)
-    model.load_state_dict(checkpoint)
+    model.load_state_dict(remapCheckpoint(checkpoint, model.state_dict()))
     return model
+
+
+# The names of the ViT of transformers 4 (the checkpoint of TripoSR) in transformers 5
+_VIT_RENAMES = [
+    (r"\.encoder\.layer\.(\d+)\.", r".layers.\1."),
+    (r"\.attention\.attention\.query\.", ".attention.q_proj."),
+    (r"\.attention\.attention\.key\.", ".attention.k_proj."),
+    (r"\.attention\.attention\.value\.", ".attention.v_proj."),
+    (r"\.attention\.output\.dense\.", ".attention.o_proj."),
+    (r"\.intermediate\.dense\.", ".mlp.fc1."),
+    (r"\.output\.dense\.", ".mlp.fc2."),
+]
+
+
+def remapCheckpoint(checkpoint: dict, expected: dict) -> dict:
+    """
+    The checkpoint with the names the model expects (`expected`: its state_dict): the image encoder of TripoSR is the
+    ViT of transformers, whose module names changed in transformers 5 (encoder.layer.N.attention.attention.query ->
+    layers.N.attention.q_proj...). Known renames first, then what is left matched in order with the same shape.
+    SystemExit when some weights of the model are still missing.
+    """
+    import re
+    if all(key in checkpoint for key in expected):
+        return {key: checkpoint[key] for key in expected}
+    renamed = {}
+    for key, value in checkpoint.items():
+        new = key
+        if key not in expected:
+            for pattern, replacement in _VIT_RENAMES:
+                new = re.sub(pattern, replacement, new)
+            if new not in expected:
+                new = key
+        renamed[new] = value
+    missing = [key for key in expected if key not in renamed]
+    unused = [key for key in renamed if key not in expected]
+    # What is left (e.g. the embeddings or the last norm, named otherwise): in order, the same shape and kind
+    for key in missing:
+        for candidate in unused:
+            if tuple(renamed[candidate].shape) == tuple(expected[key].shape) and \
+                    candidate.rsplit(".", 1)[-1] == key.rsplit(".", 1)[-1] and \
+                    candidate.split(".", 1)[0] == key.split(".", 1)[0]:
+                renamed[key] = renamed.pop(candidate)
+                unused.remove(candidate)
+                break
+    missing = [key for key in expected if key not in renamed]
+    if missing:
+        raise SystemExit(f"triposrRunner: the checkpoint does not fit the model ({len(missing)} weights missing, "
+                         f"e.g. {missing[:3]}; unused: {unused[:3]})")
+    if unused:
+        print(f"[triposr] {len(unused)} weights of the checkpoint unused (e.g. {unused[:2]})", flush=True)
+    return {key: renamed[key] for key in expected}
 
 
 def main(argv=None):

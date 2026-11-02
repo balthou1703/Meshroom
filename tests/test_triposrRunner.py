@@ -48,3 +48,38 @@ def test_weightsFromTheModelsFolderOnly(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as error:
         triposrRunner.main([str(tmp_path / "image.png"), str(tmp_path / "head.npz")])
     assert "meshroom.live.neural.download triposr" in str(error.value) and "model.ckpt" in str(error.value)
+
+
+def test_checkpointOfTransformers4OnTransformers5():
+    """ The ViT names of the TripoSR checkpoint (transformers 4) mapped onto those of transformers 5. """
+    import pytest
+
+    def weights(names):
+        return {name: np.zeros(shape) for name, shape in names}
+    old = weights([("image_tokenizer.model.embeddings.cls_token", (1, 1, 8)),
+                   ("image_tokenizer.model.embeddings.patch_embeddings.projection.weight", (8, 3, 4, 4)),
+                   ("image_tokenizer.model.encoder.layer.0.attention.attention.query.weight", (8, 8)),
+                   ("image_tokenizer.model.encoder.layer.0.attention.attention.key.bias", (8,)),
+                   ("image_tokenizer.model.encoder.layer.0.attention.output.dense.weight", (8, 8)),
+                   ("image_tokenizer.model.encoder.layer.0.intermediate.dense.weight", (32, 8)),
+                   ("image_tokenizer.model.encoder.layer.0.output.dense.weight", (8, 32)),
+                   ("image_tokenizer.model.encoder.layer.0.layernorm_before.weight", (8,)),
+                   ("image_tokenizer.model.layernorm.weight", (8,)),
+                   ("decoder.layers.0.weight", (4, 4))])
+    new = weights([("image_tokenizer.model.embeddings.cls_token", (1, 1, 8)),
+                   ("image_tokenizer.model.embeddings.patch_embed.proj.weight", (8, 3, 4, 4)),
+                   ("image_tokenizer.model.layers.0.attention.q_proj.weight", (8, 8)),
+                   ("image_tokenizer.model.layers.0.attention.k_proj.bias", (8,)),
+                   ("image_tokenizer.model.layers.0.attention.o_proj.weight", (8, 8)),
+                   ("image_tokenizer.model.layers.0.mlp.fc1.weight", (32, 8)),
+                   ("image_tokenizer.model.layers.0.mlp.fc2.weight", (8, 32)),
+                   ("image_tokenizer.model.layers.0.layernorm_before.weight", (8,)),
+                   ("image_tokenizer.model.norm.weight", (8,)),
+                   ("decoder.layers.0.weight", (4, 4))])
+    old["image_tokenizer.model.encoder.layer.0.intermediate.dense.weight"][0, 0] = 7.0
+    mapped = triposrRunner.remapCheckpoint(old, new)
+    assert list(mapped) == list(new)
+    assert mapped["image_tokenizer.model.layers.0.mlp.fc1.weight"][0, 0] == 7.0
+    assert triposrRunner.remapCheckpoint(new, new).keys() == new.keys()
+    with pytest.raises(SystemExit):
+        triposrRunner.remapCheckpoint({"decoder.layers.0.weight": np.zeros((4, 4))}, new)
