@@ -30,9 +30,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # flash-attn when it is installed (setupTrellis2.sh FLASH_ATTN=1), xformers otherwise
+    if "ATTN_BACKEND" not in os.environ:
+        try:
+            import flash_attn  # noqa: F401
+        except ImportError:
+            os.environ["ATTN_BACKEND"] = "xformers"
     if args.root:
+        # (trellis2 from the clone; o_voxel is installed: its sources in the clone have no compiled extension)
         sys.path.insert(0, args.root)
-        sys.path.insert(0, os.path.join(args.root, "o-voxel"))
     import numpy as np
     from PIL import Image
     from trellis2.pipelines import Trellis2ImageTo3DPipeline, rembg

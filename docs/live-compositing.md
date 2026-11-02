@@ -724,10 +724,16 @@ du FaceBuilder. La vue est recadrée autour de la tête et détourée par la seg
 détourage de TRELLIS.2, dont le modèle RMBG-2.0 n'est pas chargé). TRELLIS.2 tourne dans son propre environnement
 Python (sa version de PyTorch, ses extensions CUDA), lancé par `meshroom/live/neural/trellis2Runner.py` :
 
-    git clone --recursive https://github.com/microsoft/TRELLIS.2 && cd TRELLIS.2
-    . ./setup.sh --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
-    export MESHROOM_TRELLIS2_PYTHON=$(conda run -n trellis2 which python)
-    export MESHROOM_TRELLIS2_ROOT=$PWD
+    git clone --recursive https://github.com/microsoft/TRELLIS.2
+    bash meshroom/live/neural/setupTrellis2.sh TRELLIS.2 ~/trellis2-env
+    export MESHROOM_TRELLIS2_PYTHON=~/trellis2-env/bin/python
+    export MESHROOM_TRELLIS2_ROOT=<chemin de TRELLIS.2>
+
+`setupTrellis2.sh` n'a besoin ni de root, ni de conda, ni de pip sur la machine (hors de l'environnement rez de
+Meshroom) : micromamba (un binaire dans `~/.local/bin`) crée l'environnement avec Python 3.10, le toolkit CUDA 12.4 et
+un compilateur (pour ses extensions CUDA : nvdiffrast, nvdiffrec, CuMesh, FlexGEMM, o-voxel, compilées pour le GPU de
+la machine), puis PyTorch 2.6 et xformers (`FLASH_ATTN=1` : flash-attn aussi). Meshroom lance le Python de cet
+environnement sans le sien (PYTHONPATH, PYTHONHOME retirés, ses bibliothèques d'abord).
 
 Les poids (`microsoft/TRELLIS.2-4B`, ou `MESHROOM_TRELLIS2_MODEL`) et les modèles auxiliaires sont téléchargés par
 Hugging Face au premier lancement (certains demandent d'accepter leur licence sur Hugging Face et `hf auth login`).

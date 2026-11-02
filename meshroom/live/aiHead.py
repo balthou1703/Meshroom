@@ -27,6 +27,22 @@ def runnerPath() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "neural", "trellis2Runner.py")
 
 
+def runnerEnvironment(python: str) -> dict:
+    """ The environment variables of the TRELLIS.2 Python: not the Python of Meshroom (rez: PYTHONPATH, PYTHONHOME), the
+    libraries of its environment first (CUDA of the toolkit installed with it: setupTrellis2.sh). """
+    environment = dict(os.environ)
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
+        environment.pop(name, None)
+    prefix = os.path.dirname(os.path.dirname(os.path.abspath(python)))
+    library = os.path.join(prefix, "lib")
+    if os.path.isdir(library):
+        environment["LD_LIBRARY_PATH"] = library + (os.pathsep + environment["LD_LIBRARY_PATH"]
+                                                    if environment.get("LD_LIBRARY_PATH") else "")
+    environment["PATH"] = os.path.join(prefix, "bin") + os.pathsep + environment.get("PATH", "")
+    environment.setdefault("CUDA_HOME", prefix)
+    return environment
+
+
 def generate(rgba: np.ndarray, output: str, python: Optional[str] = None, root: Optional[str] = None,
              pipeline: str = "1024_cascade", seed: int = 42, cancel=None, log=None) -> str:
     """
@@ -46,9 +62,7 @@ def generate(rgba: np.ndarray, output: str, python: Optional[str] = None, root: 
     command = [python, runnerPath(), imagePath, output, "--pipeline", pipeline, "--seed", str(int(seed))]
     if root:
         command += ["--root", root]
-    environment = dict(os.environ)
-    # The TRELLIS.2 environment has its own packages: not those of Meshroom's
-    environment.pop("PYTHONPATH", None)
+    environment = runnerEnvironment(python)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment)
     lines = []
     try:
