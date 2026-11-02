@@ -971,10 +971,15 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                    "without the network, only the outlines."),
         desc.StringParam(name="headFit", label="Head Fit", value="", advanced=True,
                          description="The fit of the ears, neck and skull (JSON: control points and their moves)."),
+        desc.ChoiceParam(name="aiModel", label="AI Model", value="triposr", values=["triposr", "trellis2"],
+                         invalidate=False,
+                         description="The image-to-3D model of 'Generate AI Head': TripoSR (light: 6 GB of GPU or the "
+                                     "CPU, in Meshroom's Python, MESHROOM_TRIPOSR_ROOT) or TRELLIS.2 (much finer, a 24 GB "
+                                     "GPU, its own environment: MESHROOM_TRELLIS2_PYTHON)."),
         desc.PushButtonParam(name="generateAiHead", label="Generate AI Head", semantic="liveAction",
-                             description="After 'Build Head': a whole head generated from the view shown by TRELLIS.2 "
-                                         "(an image-to-3D model, in its own Python environment: "
-                                         "MESHROOM_TRELLIS2_PYTHON), then 'Fit To AI Head'. Takes a minute or more."),
+                             description="After 'Build Head': a whole head generated from the view shown by the AI "
+                                         "model ('AI Model', in another process), then 'Fit To AI Head'. Takes a "
+                                         "minute or more."),
         desc.File(name="aiHeadFile", label="AI Head", value="", invalidate=False,
                   description="The generated head (.npz of 'Generate AI Head'), or any head mesh generated "
                               "elsewhere (.glb, as image-to-3D services export it, or .obj); then 'Fit To AI Head'."),
@@ -1444,7 +1449,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
 
     def generateAiHead(self, context):
         """ "Generate AI Head": the view shown, cropped around the head and cut out (the MediaPipe segmentation), given
-        to TRELLIS.2 (aiHead.generate); then "Fit To AI Head". """
+        to the AI model ("AI Model", aiHead.generate); then "Fit To AI Head". """
         import hashlib
         import os
         from meshroom.live import BBox, aiHead, face, headFit
@@ -1476,7 +1481,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         folder = os.environ.get("MESHROOM_AIHEAD_FOLDER") or os.path.join(os.path.expanduser("~"), ".cache", "meshroom",
                                                                           "aiHeads")
         digest = hashlib.sha1(np.ascontiguousarray((rgba * 255).astype(np.uint8)).tobytes()).hexdigest()[:16]
-        output = os.path.join(folder, f"aiHead_{digest}.npz")
+        model = context.value("aiModel")
+        output = os.path.join(folder, f"aiHead_{model}_{digest}.npz")
         if not os.path.exists(output):
             lines = [0]
 
@@ -1484,9 +1490,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 import logging
                 logging.info(f"[FaceBuilder] {line}")
                 lines[0] += 1
-                context.progress(min(0.05 + 0.01 * lines[0], 0.8), "TRELLIS.2: " + line[:60])
+                context.progress(min(0.05 + 0.01 * lines[0], 0.8), line[:70])
             try:
-                aiHead.generate(rgba, output, cancel=context.checkCancelled, log=log)
+                aiHead.generate(rgba, output, model=model, cancel=context.checkCancelled, log=log)
             except aiHead.AIHeadUnavailable as e:
                 raise RuntimeError(str(e)) from e
         result = self.fitAiHead(context, path=output, start=0.8)

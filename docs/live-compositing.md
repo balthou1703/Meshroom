@@ -718,10 +718,24 @@ seule jusqu'au col. Débogage : avec `MESHROOM_HEADFIT_DEBUG=<dossier>`, « Fit 
 vue `fitDebug_<n>.png` (le recadrage, la segmentation : cheveux en rouge, peau du visage en bleu, du corps en vert ;
 les sommets de la tête avant l'ajustement en jaune, après en cyan) et `fit.json`.
 
-Tête IA (FaceBuilder, `meshroom/live/aiHead.py`) : « Generate AI Head » génère une tête complète texturée depuis la
-vue affichée avec TRELLIS.2 (Microsoft, MIT, image vers 3D, ~24 Go de VRAM), puis « Fit To AI Head » y ajuste la tête
-du FaceBuilder. La vue est recadrée autour de la tête et détourée par la segmentation MediaPipe (l'alpha remplace le
-détourage de TRELLIS.2, dont le modèle RMBG-2.0 n'est pas chargé). TRELLIS.2 tourne dans son propre environnement
+Tête IA (FaceBuilder, `meshroom/live/aiHead.py`) : « Generate AI Head » génère une tête complète colorée depuis la
+vue affichée avec le modèle « AI Model ». TripoSR (Stability AI et Tripo AI, MIT ; par défaut) est léger : ~6 Go de
+GPU, ou le CPU (une à quelques minutes) quand le GPU est trop petit ou trop ancien pour PyTorch ; il tourne dans le
+Python de Meshroom (`meshroom/live/neural/triposrRunner.py`, un autre processus) avec son clone et quatre petits
+paquets ; la surface est extraite par le runner (marching tetrahedra en numpy, ou scikit-image s'il est là), sans les
+dépendances compilées de TripoSR :
+
+    git clone https://github.com/VAST-AI-Research/TripoSR
+    python -m pip install --no-deps --target <pylibs> einops omegaconf antlr4-python3-runtime==4.9.3 pyyaml \
+        huggingface_hub transformers safetensors tokenizers regex tqdm filelock fsspec requests packaging \
+        typing_extensions idna urllib3 certifi charset_normalizer
+    export MESHROOM_TRIPOSR_ROOT=<chemin de TripoSR>
+    export HF_HOME=<dossier avec de la place>   # ses poids (stabilityai/TripoSR, 1,7 Go) y sont téléchargés
+
+Ses têtes sont plus grossières que celles de TRELLIS.2 (surface lisse, oreilles peu détaillées). TRELLIS.2
+(Microsoft, MIT, image vers 3D, ~24 Go de VRAM) donne une tête texturée fine. « Generate AI Head » enchaîne sur
+« Fit To AI Head », qui y ajuste la tête du FaceBuilder. La vue est recadrée autour de la tête et détourée par la
+segmentation MediaPipe (l'alpha remplace le détourage des modèles : pour TRELLIS.2, dont le modèle RMBG-2.0 n'est pas chargé). TRELLIS.2 tourne dans son propre environnement
 Python (sa version de PyTorch, ses extensions CUDA), lancé par `meshroom/live/neural/trellis2Runner.py` :
 
     git clone --recursive https://github.com/microsoft/TRELLIS.2

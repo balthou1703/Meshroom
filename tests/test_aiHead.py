@@ -127,3 +127,39 @@ def test_readGlb(tmp_path):
     np.testing.assert_array_equal(readTriangles, triangles)
     np.testing.assert_allclose(colors[0], (1, 0, 0))
     np.testing.assert_allclose(colors[3], (0, 0, 1))
+
+
+def test_generateRunsItsRunner(tmp_path, monkeypatch):
+    """ aiHead.generate: the image written, the runner run in another process (Meshroom's Python for TripoSR), its
+    output read back; its failure reported with the end of its log. """
+    runner = tmp_path / "fakeRunner.py"
+    runner.write_text(
+        "import sys\n"
+        "import numpy as np\n"
+        "image, output = sys.argv[1], sys.argv[2]\n"
+        "assert sys.argv[3] == '--root'\n"
+        "print('[fake] generating', flush=True)\n"
+        "if 'fail' in output:\n"
+        "    print('[fake] out of memory', flush=True)\n"
+        "    sys.exit(3)\n"
+        "np.savez(output, vertices=np.zeros((3, 3), np.float32), faces=np.array([[0, 1, 2]], np.int32))\n")
+    monkeypatch.setattr(aiHead, "runnerPath", lambda model="trellis2": str(runner))
+    monkeypatch.setenv("MESHROOM_TRIPOSR_ROOT", str(tmp_path))
+    rgba = np.zeros((16, 16, 4))
+    rgba[4:12, 4:12] = (0.8, 0.5, 0.4, 1.0)
+    lines = []
+    output = aiHead.generate(rgba, str(tmp_path / "head.npz"), model="triposr", log=lines.append)
+    assert (tmp_path / "head_input.png").exists() and lines == ["[fake] generating"]
+    vertices, triangles, colors = aiHead.loadMesh(output)
+    assert vertices.shape == (3, 3) and triangles.shape == (1, 3) and colors.shape == (3, 3)
+    try:
+        aiHead.generate(rgba, str(tmp_path / "fail.npz"), model="triposr")
+        raise AssertionError("no error")
+    except aiHead.AIHeadUnavailable as e:
+        assert "out of memory" in str(e) and "TripoSR" in str(e)
+    monkeypatch.delenv("MESHROOM_TRIPOSR_ROOT")
+    try:
+        aiHead.generate(rgba, str(tmp_path / "other.npz"), model="triposr")
+        raise AssertionError("no error")
+    except aiHead.AIHeadUnavailable as e:
+        assert "MESHROOM_TRIPOSR_ROOT" in str(e)
