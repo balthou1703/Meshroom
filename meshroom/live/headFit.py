@@ -645,18 +645,24 @@ def debugImage(view: FitView, rgb: np.ndarray, heads, regions: dict) -> np.ndarr
     return (np.clip(image, 0, 1) * 255).astype(np.uint8)
 
 
+def writePngRGBA(path: str, pixels: np.ndarray):
+    """ An 8-bit RGBA image (h, w, 4) written as a PNG. """
+    writePng(path, pixels)
+
+
 def writePng(path: str, pixels: np.ndarray):
-    """ An 8-bit RGB image (h, w, 3) written as a PNG (no dependency). """
+    """ An 8-bit RGB (h, w, 3) or RGBA (h, w, 4) image written as a PNG (no dependency). """
     import struct
     import zlib
     pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
     h, w = pixels.shape[:2]
+    channels = pixels.shape[2]
     raw = b"".join(b"\x00" + pixels[row].tobytes() for row in range(h))
 
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
     with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6 if channels == 4 else 2, 0, 0, 0))
                 + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 

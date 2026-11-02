@@ -716,7 +716,32 @@ l'utilise pas (la tête est rigide d'une vue à l'autre, le cou se plie différe
 épaules (trapèzes) : avec « Head From Face », il est gardé aussi large qu'au-dessus (`headFit.straightNeck`), une tête
 seule jusqu'au col. Débogage : avec `MESHROOM_HEADFIT_DEBUG=<dossier>`, « Fit Ears, Neck And Skull » écrit pour chaque
 vue `fitDebug_<n>.png` (le recadrage, la segmentation : cheveux en rouge, peau du visage en bleu, du corps en vert ;
-les sommets de la tête avant l'ajustement en jaune, après en cyan) et `fit.json`. Sur des têtes synthétiques du modèle :
+les sommets de la tête avant l'ajustement en jaune, après en cyan) et `fit.json`.
+
+Tête IA (FaceBuilder, `meshroom/live/aiHead.py`) : « Generate AI Head » génère une tête complète texturée depuis la
+vue affichée avec TRELLIS.2 (Microsoft, MIT, image vers 3D, ~24 Go de VRAM), puis « Fit To AI Head » y ajuste la tête
+du FaceBuilder. La vue est recadrée autour de la tête et détourée par la segmentation MediaPipe (l'alpha remplace le
+détourage de TRELLIS.2, dont le modèle RMBG-2.0 n'est pas chargé). TRELLIS.2 tourne dans son propre environnement
+Python (sa version de PyTorch, ses extensions CUDA), lancé par `meshroom/live/neural/trellis2Runner.py` :
+
+    git clone --recursive https://github.com/microsoft/TRELLIS.2 && cd TRELLIS.2
+    . ./setup.sh --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+    export MESHROOM_TRELLIS2_PYTHON=$(conda run -n trellis2 which python)
+    export MESHROOM_TRELLIS2_ROOT=$PWD
+
+Les poids (`microsoft/TRELLIS.2-4B`, ou `MESHROOM_TRELLIS2_MODEL`) et les modèles auxiliaires sont téléchargés par
+Hugging Face au premier lancement (certains demandent d'accepter leur licence sur Hugging Face et `hf auth login`).
+Le maillage (.npz : sommets, triangles, couleur de la texture par sommet ; et .glb) est écrit dans
+`~/.cache/meshroom/aiHeads` (`MESHROOM_AIHEAD_FOLDER`), nommé d'après l'image (déjà généré : réutilisé) ; « AI Head »
+peut aussi pointer un .obj généré ailleurs. « Fit To AI Head » : son visage est trouvé par MediaPipe sur des rendus de
+la tête générée (tournée dans les 24 orientations d'axes, puis de face), ses 468 points relevés sur sa surface ; une
+similitude la pose sur le visage ajusté sur les vues (sa taille, sa place : celles des caméras) ; la tête du
+FaceBuilder y est ajustée : le visage sur ces points (yeux, nez, bouche), l'identité (50 modes) et un déplacement de
+chaque oreille sur sa surface (point à plan sur les points les plus proches, des oreilles et du haut du cou ; pas le
+crâne, sous ses cheveux), puis chaque oreille affinée seule. « Head From AI » : la tête est celle-là ; « Show
+Geometry » : la tête, la tête IA (ombrée, ses couleurs) ou les deux ; sortie « AI Head ». Sur une tête synthétique :
+oreilles à 1 mm de sa surface (5 mm prédites depuis le visage).
+ Sur des têtes synthétiques du modèle :
 erreur hors visage −30 à 50 % par la prédiction (contre le simple suivi du visage), encore −35 % par l'ajustement.
 Sans « Head From Face » : l'ancien comportement (la tête suit le visage, ajustement libre avec « Fit Radius »).
 

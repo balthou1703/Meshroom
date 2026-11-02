@@ -160,7 +160,8 @@ def test_faceBuilderNode(monkeypatch):
     trackerPlan = buildPlan(tracker)
     shape = Evaluator().data(trackerPlan, trackerPlan.target, "shapeOutput", 1)
     np.testing.assert_allclose(shape.vertices, head.vertices, atol=1e-3)
-    assert builder.nodeDesc.runAction("clearHead", context) == {"faceShape": "", "views": "", "headFit": ""}
+    cleared = {"faceShape": "", "views": "", "headFit": "", "aiHeadFit": ""}
+    assert builder.nodeDesc.runAction("clearHead", context) == cleared
 
 
 def test_rigidHeadFollowKeepsTheSkull():
@@ -723,3 +724,70 @@ def test_pinsSolvedOnTheModel():
                                                 [0], 1)
     shifts = (moved - vertices)[ear]
     assert shifts[:, 0].mean() > 0.3 and shifts[:, 0].std() < 0.25 * shifts[:, 0].mean()
+
+
+def test_faceBuilderAiHead(monkeypatch, tmp_path):
+    """ "Generate AI Head" (the generator faked: it writes a known head) then "Fit To AI Head" (the landmarker faked):
+    the head of the FaceBuilder fitted on it, the AI head shown and output in the face space. """
+    from tests.utils import registerNodeDesc, unregisterNodeDesc
+    from tests.test_aiHead import _FakeLandmarker, _actor
+    from meshroom.live import aiHead, headFit
+    from meshroom.live.evaluator import RenderContext
+    registerNodeDesc(LabelPlate)
+    try:
+        monkeypatch.setattr(headFit, "headSegmenter", lambda: _ColorSegmenter())
+        monkeypatch.setenv("MESHROOM_AIHEAD_FOLDER", str(tmp_path))
+        n = face.MESH_VERTICES
+        actor = _actor(2)
+        head = face.canonicalHead()
+        generated = 0.03 * actor @ np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]]).T
+        inputs = []
+
+        def generate(rgba, output, **kwargs):
+            inputs.append(rgba)
+            np.savez(output, vertices=generated.astype(np.float32), faces=head.triangles().astype(np.int32),
+                     colors=np.full((len(generated), 3), 180, np.uint8))
+            return output
+        monkeypatch.setattr(aiHead, "generate", generate)
+        detector = _FakeLandmarker(generated[:n])
+        render = aiHead._render
+
+        def recording(*args, **kwargs):
+            image, buffer, frame = render(*args, **kwargs)
+            detector.frame = frame
+            return image, buffer, frame
+        monkeypatch.setattr(aiHead, "_render", recording)
+        monkeypatch.setattr(face, "landmarker", lambda *args, **kwargs: detector)
+        size = (640, 480)
+        cameras = _headViews((0, 60, -60), size)
+        graph = Graph("builderAi")
+        plate = graph.addNewNode("LabelPlate", view=0)
+        builder = graph.addNewNode("FaceBuilder")
+        graph.addEdge(plate.output, builder.input)
+        # The face of the views: the actor's
+        builder.faceShape.value = face.dumpShape(actor[:n] - head.vertices[:n])
+        builder.views.value = json.dumps([{"input": "input", "frame": 1, "still": True, "size": list(size),
+                                           "landmarks": [], "focal": 50.0,
+                                           "cameraToFace": [float(v) for v in cameras[0].matrix.ravel()]}])
+        graph.update()
+        values = {attr.name: _snapshotValue(attr) for attr in builder.attributes
+                  if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+        context = ActionContext(values, Evaluator(), buildPlan(plate), 1, nodePlan=buildPlan(builder))
+        result = builder.nodeDesc.runAction("generateAiHead", context)
+        assert len(inputs) == 1 and inputs[0].shape[2] == 4 and 0.0 < inputs[0][:, :, 3].mean() < 1.0
+        assert os.path.exists(result["aiHeadFile"]) and json.loads(result["aiHeadFit"])["registration"]
+        builder.aiHeadFile.value, builder.aiHeadFit.value = result["aiHeadFile"], result["aiHeadFit"]
+        builder.showGeometry.value = "both"
+        graph.update()
+        plan = buildPlan(builder)
+        ctx = RenderContext(plan.nodes[plan.target], 1, Evaluator(), plan)
+        fitted = builder.nodeDesc.head(ctx)
+        from scipy.spatial import cKDTree
+        ears = headFit.headRegions(head)["ear"]
+        assert cKDTree(actor).query(fitted.vertices[ears])[0].mean() < 0.2
+        aiGeo = Evaluator().data(plan, plan.target, "aiHeadOutput", 1)
+        assert np.median(np.linalg.norm(aiGeo.vertices - actor, axis=1)) < 0.3
+        assert Evaluator().render(plan, 1).rgba()[:, :, :3].max() > 0
+        assert builder.nodeDesc.runAction("clearHead", context)["aiHeadFit"] == ""
+    finally:
+        unregisterNodeDesc(LabelPlate)

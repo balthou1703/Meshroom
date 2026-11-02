@@ -971,6 +971,24 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                    "without the network, only the outlines."),
         desc.StringParam(name="headFit", label="Head Fit", value="", advanced=True,
                          description="The fit of the ears, neck and skull (JSON: control points and their moves)."),
+        desc.PushButtonParam(name="generateAiHead", label="Generate AI Head", semantic="liveAction",
+                             description="After 'Build Head': a whole head generated from the view shown by TRELLIS.2 "
+                                         "(an image-to-3D model, in its own Python environment: "
+                                         "MESHROOM_TRELLIS2_PYTHON), then 'Fit To AI Head'. Takes a minute or more."),
+        desc.File(name="aiHeadFile", label="AI Head", value="", invalidate=False,
+                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh (.obj) generated "
+                              "elsewhere."),
+        desc.PushButtonParam(name="fitAiHead", label="Fit To AI Head", semantic="liveAction",
+                             description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
+                                         "then the head on it: the face on its eyes, nose and mouth, the proportions "
+                                         "and the ears on its surface."),
+        desc.BoolParam(name="useAiHead", label="Head From AI", value=True,
+                       description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),
+        desc.StringParam(name="aiHeadFit", label="AI Head Fit", value="", advanced=True,
+                         description="The fit to the AI head (JSON: its placement on the face, the head on it)."),
+        desc.ChoiceParam(name="showGeometry", label="Show Geometry", value="head", values=["head", "ai head", "both"],
+                         description="What is drawn over the view: the head (MediaPipe face, ears, skull, neck), the "
+                                     "AI head (shaded, its colors), or both."),
         desc.PushButtonParam(name="refitHead", label="Fit Again", semantic="liveAction",
                              description="Fit the head again on the landmarks found by 'Build Head' (after changing "
                                          "the parameters of the fit)."),
@@ -991,6 +1009,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
     outputs = [
         desc.Geo(name="geoOutput", label="Head", description="The head of the actor (face space)."),
         desc.Geo(name="originalOutput", label="Original", description="The base head (face space)."),
+        desc.Geo(name="aiHeadOutput", label="AI Head", description="The AI head placed on the face (face space)."),
         desc.Camera(name="cameraOutput", label="Camera",
                     description="The camera of the view shown at this frame, the head at the origin."),
         desc.Image(name="output", label="Output", description="The view shown, with the head drawn over it."),
@@ -1073,6 +1092,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         hasShape = offsets is not None and len(offsets) == len(base.vertices)
         if ctx.value("meshType") != "head":
             fitted = scene3d.GeoData(base.vertices + offsets, name="face", topology=base.topology) if hasShape else original
+        elif self.aiRegistration(ctx, original) is not None:
+            # The head fitted to the AI head ("Fit To AI Head")
+            from meshroom.live import aiHead, headFit
+            fitted = scene3d.GeoData(headFit.straightNeck(aiHead.registeredHead(original.vertices,
+                                                                                self.aiRegistration(ctx, original))),
+                                     name="head", topology=original.topology)
         elif self.usesIdentity(ctx, original):
             # The proportions of the whole head from its face (the identity model), or fitted on the views
             from meshroom.live import headFit
@@ -1092,6 +1117,60 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return fitted
         fitted = self.headFitted(ctx, fitted)
         return self.pinned(ctx, fitted, original) if withPins else fitted
+
+    @staticmethod
+    def aiFit(ctx):
+        """ The stored fit to the AI head (dict), or None. """
+        import json
+        text = ctx.value("aiHeadFit")
+        if not text:
+            return None
+        try:
+            fit = json.loads(text)
+        except ValueError:
+            return None
+        return fit if isinstance(fit, dict) else None
+
+    def aiRegistration(self, ctx, original):
+        """ The head fitted to the AI head (registerHead), when it is used ("Head From AI"), or None. """
+        from meshroom.live import face
+        if not ctx.value("useAiHead") or not face.isHead(original):
+            return None
+        fit = self.aiFit(ctx)
+        return fit.get("registration") if fit else None
+
+    _AI_MESHES = {}
+
+    def photoFace(self, ctx) -> np.ndarray:
+        """ The face (468, 3) fitted on the landmarks of the views ("Build Head"; the base face without it). """
+        from meshroom.live import face
+        base = self.baseMesh(ctx)
+        try:
+            offsets = face.parseShape(ctx.value("faceShape"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        if offsets is not None and len(offsets) == len(base.vertices):
+            return (base.vertices + offsets)[:face.MESH_VERTICES]
+        return self.original(ctx).vertices[:face.MESH_VERTICES]
+
+    def aiHeadGeo(self, ctx):
+        """ The AI head placed on the face (GeoData, colors in .colors), or None. """
+        import os
+        from meshroom.live import aiHead
+        fit = self.aiFit(ctx)
+        path = ctx.value("aiHeadFile")
+        if not fit or not path or not os.path.exists(path):
+            return None
+        key = (path, os.path.getmtime(path))
+        mesh = FaceBuilder._AI_MESHES.get(key)
+        if mesh is None:
+            mesh = aiHead.loadMesh(path)
+            FaceBuilder._AI_MESHES.clear()
+            FaceBuilder._AI_MESHES[key] = mesh
+        vertices, triangles, colors = mesh
+        geo = aiHead.geometry(aiHead.transform(vertices, np.array(fit["matrix"], dtype=np.float64)), triangles)
+        geo.colors = colors
+        return geo
 
     @staticmethod
     def usesIdentity(ctx, original) -> bool:
@@ -1268,6 +1347,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return self.head(ctx)
         if outputName == "originalOutput":
             return self.original(ctx)
+        if outputName == "aiHeadOutput":
+            return self.aiHeadGeo(ctx)
         if outputName == "cameraOutput":
             view = self.viewAt(ctx)
             return self.viewCamera(ctx, view) if view is not None else None
@@ -1287,8 +1368,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             else:
                 from meshroom.live import gpu
                 camera = self.viewCamera(ctx, view)
-                geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
-                                       (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx), quads=True)
+                shown = ctx.value("showGeometry")
+                aiGeo = self.aiHeadGeo(ctx) if shown in ("ai head", "both") else None
+                if aiGeo is not None:
+                    geoRender.drawGeometry(rgba, image.bbox, aiGeo, camera, width, height, "shaded", (0.8, 0.8, 0.8),
+                                           alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
+                                           vertexColors=getattr(aiGeo, "colors", None))
+                if shown in ("head", "both") or aiGeo is None:
+                    geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
+                                           (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
+                                           quads=True)
         return image.withRGBA(rgba)
 
     # Actions
@@ -1299,9 +1388,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         import json
         from meshroom.live import face
         if name == "clearHead":
-            return {"faceShape": "", "views": "", "headFit": ""}
+            return {"faceShape": "", "views": "", "headFit": "", "aiHeadFit": ""}
         if name == "fitHeadContours":
             return self.fitHeadContours(context)
+        if name == "generateAiHead":
+            return self.generateAiHead(context)
+        if name == "fitAiHead":
+            return self.fitAiHead(context)
         if name not in ("buildHead", "refitHead"):
             raise RuntimeError(f"Unknown action: {name}")
         if name == "buildHead":
@@ -1348,6 +1441,83 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         with open(os.path.join(folder, "fit.json"), "w") as f:
             json.dump(fit, f)
         logging.info(f"[FaceBuilder] Fit debug images written in {folder}")
+
+    def generateAiHead(self, context):
+        """ "Generate AI Head": the view shown, cropped around the head and cut out (the MediaPipe segmentation), given
+        to TRELLIS.2 (aiHead.generate); then "Fit To AI Head". """
+        import hashlib
+        import os
+        from meshroom.live import BBox, aiHead, face, headFit
+        from meshroom.live.neural import displayRGB
+        ctx = context.nodeContext()
+        view = self.viewAt(ctx)
+        if view is None or not view.get("cameraToFace"):
+            raise RuntimeError("Build the head first (Build Head): the AI head is generated from the view shown.")
+        width, height = view["size"]
+        image = context.renderInput(view["input"], int(view["frame"]))
+        xy, _, _ = self.baseCamera(view).project(self.photoFace(ctx), width, height)
+        # A square around the head (the face: the head about twice its size), with its hair and the top of the shoulders
+        cx, cy = 0.5 * (xy[:, 0].min() + xy[:, 0].max()), height - 0.5 * (xy[:, 1].min() + xy[:, 1].max())
+        size = 2.6 * max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]))
+        left, top = int(max(0, cx - size / 2)), int(max(0, cy - size / 2))
+        right, bottom = int(min(width, cx + size / 2)), int(min(height, cy + size / 2))
+        rgb = displayRGB(image, BBox.fromFormat(width, height))[top:bottom, left:right]
+        context.progress(0.02, "Cut out the head")
+        try:
+            segmenter = headFit.headSegmenter()
+        except face.FaceUnavailable as e:
+            raise RuntimeError(f"Generate AI Head: {e}") from e
+        try:
+            labels = segmenter.segment((rgb * 255).astype(np.uint8))
+        finally:
+            segmenter.close()
+        alpha = np.clip(1.0 - labels[:, :, headFit.BACKGROUND], 0.0, 1.0)
+        rgba = np.concatenate([rgb[:, :, :3], alpha[:, :, None]], axis=2)
+        folder = os.environ.get("MESHROOM_AIHEAD_FOLDER") or os.path.join(os.path.expanduser("~"), ".cache", "meshroom",
+                                                                          "aiHeads")
+        digest = hashlib.sha1(np.ascontiguousarray((rgba * 255).astype(np.uint8)).tobytes()).hexdigest()[:16]
+        output = os.path.join(folder, f"aiHead_{digest}.npz")
+        if not os.path.exists(output):
+            lines = [0]
+
+            def log(line):
+                import logging
+                logging.info(f"[FaceBuilder] {line}")
+                lines[0] += 1
+                context.progress(min(0.05 + 0.01 * lines[0], 0.8), "TRELLIS.2: " + line[:60])
+            try:
+                aiHead.generate(rgba, output, cancel=context.checkCancelled, log=log)
+            except aiHead.AIHeadUnavailable as e:
+                raise RuntimeError(str(e)) from e
+        result = self.fitAiHead(context, path=output, start=0.8)
+        result["aiHeadFile"] = output
+        return result
+
+    def fitAiHead(self, context, path=None, start=0.0):
+        """ "Fit To AI Head": the AI head put on the face (aiHead.findLandmarks, alignment), the head fitted on it
+        (aiHead.registerHead). """
+        import json
+        from meshroom.live import aiHead, face
+        ctx = context.nodeContext()
+        path = path or context.value("aiHeadFile")
+        original = self.original(ctx)
+        if not face.isHead(original):
+            raise RuntimeError("Fit To AI Head: the mesh is a face only ('Mesh': head).")
+        try:
+            vertices, triangles, colors = aiHead.loadMesh(path)
+            context.progress(start + 0.05 * (1 - start), "Find the face of the AI head")
+            landmarks = aiHead.findLandmarks(vertices, triangles, colors, cancel=context.checkCancelled)
+        except (aiHead.AIHeadUnavailable, face.FaceUnavailable) as e:
+            raise RuntimeError(str(e)) from e
+        # On the face fitted on the views (its size and place: those of the cameras)
+        faceVertices = self.photoFace(ctx)
+        matrix = aiHead.alignment(landmarks, faceVertices)
+        registration = aiHead.registerHead(
+            original.vertices, original.topology, aiHead.transform(vertices, matrix), triangles,
+            aiHead.transform(landmarks, matrix), cancel=context.checkCancelled,
+            progress=lambda done: context.progress(start + (0.3 + 0.7 * done) * (1 - start), "Fit the head"))
+        fit = {"matrix": [[round(float(v), 7) for v in row] for row in matrix], "registration": registration}
+        return {"aiHeadFit": json.dumps(fit)}
 
     def fitHeadContours(self, context):
         """ "Fit Ears, Neck And Skull": each view segmented (and its depth estimated), then headFit.fitHead on all. """
