@@ -200,6 +200,24 @@ def main(argv=None):
     parser.add_argument("--device", default="auto", help="auto, cuda or cpu")
     parser.add_argument("--chunk", type=int, default=8192)
     args = parser.parse_args(argv)
+    # The weights: the models folder (nothing downloaded, offline); Hugging Face only when asked for (--model)
+    if not args.model:
+        folder = os.path.join(os.environ.get("MESHROOM_MODELS_PATH", ""), "triposr")
+        missing = [name for name in ("config.yaml", "model.ckpt", "dino-vitb16-config.json")
+                   if not os.path.isfile(os.path.join(folder, name))]
+        if missing:
+            raise SystemExit(f"triposrRunner: the weights of TripoSR are not in the models folder ({folder}: "
+                             f"{', '.join(missing)} missing). Download them once: python -m "
+                             "meshroom.live.neural.download triposr (MESHROOM_MODELS_PATH set).")
+        args.model = folder
+    if os.path.isdir(args.model):
+        dino = os.path.join(args.model, "dino-vitb16-config.json")
+        if os.path.isfile(dino):
+            os.environ["MESHROOM_TRIPOSR_DINO_CONFIG"] = dino
+        # Never online (set before transformers and huggingface_hub are imported: they read it then)
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
     # The code: the copy in Meshroom (neural/triposr/tsr, imported as "tsr": its config names its classes so), or a clone
     sys.path.insert(0, args.root or os.path.join(os.path.dirname(os.path.abspath(__file__)), "triposr"))
     _stubModules()
@@ -211,21 +229,6 @@ def main(argv=None):
     except ImportError as e:
         raise SystemExit(f"triposrRunner: TripoSR cannot be imported ({e}): it needs omegaconf, einops and "
                          "transformers (pip install --target <pylibs> omegaconf einops)") from e
-    # The weights: the models folder when they are there (nothing downloaded, offline)
-    if not args.model:
-        folder = os.path.join(os.environ.get("MESHROOM_MODELS_PATH", ""), "triposr")
-        if all(os.path.isfile(os.path.join(folder, name)) for name in ("config.yaml", "model.ckpt")):
-            args.model = folder
-        else:
-            print("[triposr] not in the models folder (python -m meshroom.live.neural.download triposr): "
-                  "downloaded from Hugging Face", flush=True)
-            args.model = "stabilityai/TripoSR"
-    if os.path.isdir(args.model):
-        dino = os.path.join(args.model, "dino-vitb16-config.json")
-        if os.path.isfile(dino):
-            os.environ["MESHROOM_TRIPOSR_DINO_CONFIG"] = dino
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
     device = _device(torch, args.device)
     print(f"[triposr] loading {args.model} ({device})", flush=True)
     model = _load(TSR, args.model, torch)

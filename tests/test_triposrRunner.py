@@ -38,3 +38,13 @@ def test_prepareImage():
     person = (np.abs(pixels.astype(int) - (200, 100, 50)).sum(2) < 10)
     rows = np.nonzero(person.any(1))[0]
     assert abs((rows.max() - rows.min() + 1) / 128.0 - 0.85) < 0.03
+
+
+def test_weightsFromTheModelsFolderOnly(tmp_path, monkeypatch):
+    """ Without its weights in the models folder, the runner stops (it downloads nothing) and says how to get them. """
+    import pytest
+    monkeypatch.setenv("MESHROOM_MODELS_PATH", str(tmp_path))
+    monkeypatch.delenv("MESHROOM_TRIPOSR_MODEL", raising=False)
+    with pytest.raises(SystemExit) as error:
+        triposrRunner.main([str(tmp_path / "image.png"), str(tmp_path / "head.npz")])
+    assert "meshroom.live.neural.download triposr" in str(error.value) and "model.ckpt" in str(error.value)
