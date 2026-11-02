@@ -235,6 +235,31 @@ Convenient groups for 2D geometry, built from `GroupAttribute` and `FloatParam`:
 - **JoinChar**: Controls string serialization for `ListAttribute` and `GroupAttribute` when used in command lines.
 
 
+### Buttons and Dialogs
+
+Clicking a `PushButtonParam` named `myButton` calls the descriptor method `onMyButtonClicked(self, node)`.
+This callback can return a **UI request** (`meshroom/core/desc/uiRequest.py`) that the Meshroom UI opens in its
+own window. Descriptors never import Qt: results come back through Python callbacks, and opening a request is a
+no-op (returning `False`) in headless mode.
+
+- `desc.TreePickerRequest(node, items, onAccepted, ...)`: pick items in a filterable tree built from paths
+  (`"/ctx/sub/leaf"`). `onAccepted(node, paths)` receives the checked paths.
+- `desc.HierarchyEditorRequest(node, listAttribute, actions, ...)`: edit a `ListAttribute` of `GroupAttribute` as
+  a tree, optionally filled from a tree of `sourceItems`. The columns are deduced from the element description
+  (`ChoiceParam` -> combo box, `BoolParam` -> check box, others -> text field). Entries are nested by drag and
+  drop. Each `desc.Action(name, label, callback, tooltip=..., color=...)` is a button calling
+  `callback(node, rows)`, where `rows` holds one dict per entry with a `"parent"` key (1-based index of the
+  parent row, `""` for a root).
+
+```python
+    def onPickLayersClicked(self, node):
+        return desc.TreePickerRequest(
+            node, [("/stage/rop1", "usdrender_rop"), ("/stage/rop2", "usdrender_rop")],
+            onAccepted=lambda node, paths: setattr(node.layers, "value", ",".join(paths)),
+            title="Select Layers",
+        )
+```
+
 ### Advanced: Shape Parameters
 
 Used for UI overlays/annotations; they support `keyable` per-view values:

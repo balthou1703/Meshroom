@@ -801,13 +801,17 @@ class BaseNode(BaseObject):
 
         Args:
             attr (Attribute): attribute that has been clicked
+
+        Returns:
+            The value returned by the descriptor's callback (e.g. a desc.UiRequest to open), or None.
         """
         paramName = attr.name[:1].upper() + attr.name[1:]
         methodName = f'on{paramName}Clicked'
         if hasattr(self.nodeDesc, methodName):
             m = getattr(self.nodeDesc, methodName)
             if callable(m):
-                m(self)
+                return m(self)
+        return None
 
     def updateInternals(self, cacheDir=None):
         """ Update Node's internal parameters and output attributes.

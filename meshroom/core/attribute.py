@@ -893,7 +893,10 @@ class PushButtonParam(Attribute):
 
     @Slot()
     def clicked(self):
-        self.node.onAttributeClicked(self)
+        result = self.node.onAttributeClicked(self)
+        # The descriptor's callback can return a dialog for the UI to open
+        if isinstance(result, desc.UiRequest):
+            result.open()
 
     # Override
     def shortDesc(self) -> dict:
