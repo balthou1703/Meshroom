@@ -1,0 +1,9 @@
+module NodeDialogs
+
+NodeDialogs 1.0 NodeDialogs.qml
+NodeDialogWindow 1.0 NodeDialogWindow.qml
+TreePickerWindow 1.0 TreePickerWindow.qml
+HierarchyEditorWindow 1.0 HierarchyEditorWindow.qml
+PickerTreeView 1.0 PickerTreeView.qml
+EntryTreeView 1.0 EntryTreeView.qml
+ActionButton 1.0 ActionButton.qml

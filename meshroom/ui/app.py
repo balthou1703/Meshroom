@@ -15,7 +15,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication
 
 import meshroom
-from meshroom.core import pluginManager
+from meshroom.core import desc, pluginManager
 from meshroom.core.desc import NodeVersionTypeEnum
 from meshroom.core.plugins.local.taskQueue import PluginTaskQueue
 from meshroom.core.submitter import BaseSubmitter
@@ -31,6 +31,7 @@ from meshroom.ui.components.scene3D import Scene3DHelper, Transformations3DHelpe
 from meshroom.ui.components.scriptEditor import ScriptEditorManager
 from meshroom.ui.components.thumbnail import ThumbnailCache
 from meshroom.ui.components.messaging import MessageController
+from meshroom.ui.components.nodeDialogs import NodeDialogManager
 from meshroom.ui.components.shapes import ShapeFilesHelper, ShapeViewerHelper
 from meshroom.ui.dockLayoutManager import DockLayoutManager
 from meshroom.ui.palette import PaletteManager
@@ -341,6 +342,12 @@ class MeshroomApp(QApplication):
         self.engine.rootContext().setContextProperty("_dockLayout", DockLayoutManager(parent=self))
         self.engine.rootContext().setContextProperty("MeshroomApp", self)
         self.engine.rootContext().setContextProperty("NodeVersionType", NodeVersionTypeEnum(parent=self))
+
+        # open the dialogs requested by the node descriptors (desc.UiRequest)
+        self._nodeDialogManager = NodeDialogManager(parent=self)
+        self.engine.rootContext().setContextProperty("_nodeDialogs", self._nodeDialogManager)
+        desc.setUiRequestHandler(self._nodeDialogManager.handle)
+        self.aboutToQuit.connect(lambda: desc.setUiRequestHandler(None))
 
         # request any potential computation to stop on exit
         self.aboutToQuit.connect(self._activeProject.stopChildThreads)

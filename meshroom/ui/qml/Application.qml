@@ -14,6 +14,7 @@ import PluginManager 1.0
 import Utils 1.0
 import Controls 1.0
 import Docking 1.0
+import NodeDialogs 1.0
 
 Page {
     id: root
@@ -558,6 +559,11 @@ Page {
 
     DialogsFactory {
         id: dialogsFactory
+    }
+
+    // Windows of the dialogs requested by the node descriptors (desc.UiRequest)
+    NodeDialogs {
+        id: nodeDialogs
     }
 
     CompatibilityManager {
