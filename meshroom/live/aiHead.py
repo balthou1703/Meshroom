@@ -82,7 +82,7 @@ def generate(rgba: np.ndarray, output: str, python: Optional[str] = None, root: 
 
 
 def loadMesh(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """ (vertices (n, 3), triangles (m, 3), colors (n, 3) in [0, 1]) of a generated head (.npz) or an .obj. """
+    """ (vertices (n, 3), triangles (m, 3), colors (n, 3) in [0, 1]) of a generated head (.npz), a .glb or an .obj. """
     if not path or not os.path.exists(path):
         raise AIHeadUnavailable(f"AI head: no file {path!r}")
     if path.lower().endswith(".npz"):
@@ -107,7 +107,113 @@ def loadMesh(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
                     faces += [[ids[0], ids[i], ids[i + 1]] for i in range(1, len(ids) - 1)]
         vertices = np.array(vertices, dtype=np.float64).reshape(-1, 3)
         return vertices, np.array(faces, dtype=np.int64).reshape(-1, 3), np.full((len(vertices), 3), 0.7)
-    raise AIHeadUnavailable(f"AI head: {path!r} is neither a .npz (Generate AI Head) nor an .obj")
+    if path.lower().endswith(".glb"):
+        return readGlb(path)
+    raise AIHeadUnavailable(f"AI head: {path!r} is not a .npz (Generate AI Head), a .glb or an .obj")
+
+
+_GLB_TYPES = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
+_GLB_SIZES = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+
+
+def readGlb(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    (vertices, triangles, colors in [0, 1]) of a binary glTF (.glb: what TRELLIS.2 and most image-to-3D services
+    export): its triangle primitives together, the color of each vertex from its COLOR_0 or its base color texture at
+    its UV (PIL to decode it; gray without). Node transforms are ignored (the head is placed on the face afterwards).
+    """
+    import json
+    import struct
+    with open(path, "rb") as f:
+        data = f.read()
+    magic, _, _ = struct.unpack_from("<4sII", data, 0)
+    if magic != b"glTF":
+        raise AIHeadUnavailable(f"AI head: {path!r} is not a binary glTF")
+    offset, document, binary = 12, None, b""
+    while offset < len(data):
+        length, kind = struct.unpack_from("<I4s", data, offset)
+        chunk = data[offset + 8:offset + 8 + length]
+        if kind == b"JSON":
+            document = json.loads(chunk.decode("utf-8"))
+        elif kind == b"BIN\x00":
+            binary = chunk
+        offset += 8 + length
+    if document is None:
+        raise AIHeadUnavailable(f"AI head: {path!r} has no glTF document")
+
+    def view(index):
+        bufferView = document["bufferViews"][index]
+        start = bufferView.get("byteOffset", 0)
+        return binary[start:start + bufferView["byteLength"]], bufferView.get("byteStride")
+
+    def accessor(index):
+        item = document["accessors"][index]
+        raw, stride = view(item["bufferView"])
+        dtype = np.dtype(_GLB_TYPES[item["componentType"]])
+        size = _GLB_SIZES[item["type"]]
+        start = item.get("byteOffset", 0)
+        count = item["count"]
+        if stride and stride != size * dtype.itemsize:
+            rows = np.frombuffer(raw, np.uint8, count=stride * (count - 1) + size * dtype.itemsize, offset=start)
+            values = np.lib.stride_tricks.as_strided(rows, (count, size * dtype.itemsize), (stride, 1)).copy()
+            values = values.view(dtype).reshape(count, size)
+        else:
+            values = np.frombuffer(raw, dtype, count=count * size, offset=start).reshape(count, size)
+        values = values.astype(np.float64)
+        if item.get("normalized") and dtype.kind in "iu":
+            values /= float(np.iinfo(dtype).max)
+        return values
+
+    def texture(material):
+        info = (material or {}).get("pbrMetallicRoughness", {}).get("baseColorTexture")
+        if info is None:
+            return None
+        source = document["textures"][info["index"]]
+        image = source.get("source", source.get("extensions", {}).get("EXT_texture_webp", {}).get("source"))
+        if image is None:
+            return None
+        try:
+            import io
+            from PIL import Image
+            raw, _ = view(document["images"][image]["bufferView"])
+            return np.asarray(Image.open(io.BytesIO(raw)).convert("RGB"), dtype=np.float64) / 255.0
+        except Exception:
+            return None
+
+    allVertices, allTriangles, allColors = [], [], []
+    count = 0
+    for mesh in document.get("meshes", []):
+        for primitive in mesh.get("primitives", []):
+            if primitive.get("mode", 4) != 4 or "POSITION" not in primitive["attributes"]:
+                continue
+            attributes = primitive["attributes"]
+            vertices = accessor(attributes["POSITION"])[:, :3]
+            if "indices" in primitive:
+                triangles = accessor(primitive["indices"]).astype(np.int64).reshape(-1, 3)
+            else:
+                triangles = np.arange(len(vertices)).reshape(-1, 3)
+            colors = np.full((len(vertices), 3), 0.7)
+            if "COLOR_0" in attributes:
+                colors = accessor(attributes["COLOR_0"])[:, :3]
+            elif "TEXCOORD_0" in attributes and primitive.get("material") is not None:
+                image = texture(document["materials"][primitive["material"]])
+                if image is not None:
+                    uv = accessor(attributes["TEXCOORD_0"])
+                    h, w = image.shape[:2]
+                    columns = np.clip((uv[:, 0] % 1.0) * (w - 1), 0, w - 1).astype(np.int64)
+                    rows = np.clip((uv[:, 1] % 1.0) * (h - 1), 0, h - 1).astype(np.int64)
+                    colors = image[rows, columns]
+                factor = document["materials"][primitive["material"]].get("pbrMetallicRoughness", {}).get(
+                    "baseColorFactor")
+                if factor:
+                    colors = colors * np.asarray(factor[:3])
+            allVertices.append(vertices)
+            allTriangles.append(triangles + count)
+            allColors.append(colors)
+            count += len(vertices)
+    if not allVertices:
+        raise AIHeadUnavailable(f"AI head: no triangles in {path!r}")
+    return np.concatenate(allVertices), np.concatenate(allTriangles), np.clip(np.concatenate(allColors), 0, 1)
 
 
 def geometry(vertices: np.ndarray, triangles: np.ndarray, name: str = "aiHead") -> scene3d.GeoData:

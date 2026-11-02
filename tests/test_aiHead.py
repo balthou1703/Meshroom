@@ -84,3 +84,46 @@ def test_registerOnAGeneratedHead(monkeypatch):
     assert errorRegistered < 0.3 * errorPredicted and errorRegistered < 0.15
     # The face on the landmarks found
     assert np.median(np.linalg.norm(result[:n] - actor[:n], axis=1)) < 0.3
+
+
+def test_readGlb(tmp_path):
+    """ A binary glTF with a texture: its vertices, triangles and the texture color at each vertex. """
+    import io
+    import json
+    import struct
+    pytest = __import__("pytest")
+    Image = pytest.importorskip("PIL.Image")
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], np.float32)
+    triangles = np.array([[0, 1, 2], [1, 3, 2]], np.uint16)
+    uv = np.array([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]], np.float32)
+    texture = np.zeros((8, 8, 3), np.uint8)
+    texture[:4, :4] = (255, 0, 0)
+    texture[4:, 4:] = (0, 0, 255)
+    png = io.BytesIO()
+    Image.fromarray(texture).save(png, format="PNG")
+    parts = [vertices.tobytes(), triangles.tobytes() + b"\0\0", uv.tobytes(), png.getvalue()]
+    views, offset = [], 0
+    for part in parts:
+        views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(part)})
+        offset += len(part)
+        offset += (-offset) % 4
+    binary = b"".join(part + b"\0" * ((-len(part)) % 4) for part in parts)
+    document = {
+        "asset": {"version": "2.0"}, "buffers": [{"byteLength": len(binary)}], "bufferViews": views,
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3"},
+                      {"bufferView": 1, "componentType": 5123, "count": 6, "type": "SCALAR"},
+                      {"bufferView": 2, "componentType": 5126, "count": 4, "type": "VEC2"}],
+        "images": [{"bufferView": 3, "mimeType": "image/png"}], "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 2}, "indices": 1, "material": 0}]}]}
+    text = json.dumps(document).encode()
+    text += b" " * ((-len(text)) % 4)
+    glb = struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(text) + 8 + len(binary)) + \
+        struct.pack("<I4s", len(text), b"JSON") + text + struct.pack("<I4s", len(binary), b"BIN\0") + binary
+    path = tmp_path / "head.glb"
+    path.write_bytes(glb)
+    readVertices, readTriangles, colors = aiHead.loadMesh(str(path))
+    np.testing.assert_allclose(readVertices, vertices)
+    np.testing.assert_array_equal(readTriangles, triangles)
+    np.testing.assert_allclose(colors[0], (1, 0, 0))
+    np.testing.assert_allclose(colors[3], (0, 0, 1))

@@ -976,8 +976,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          "(an image-to-3D model, in its own Python environment: "
                                          "MESHROOM_TRELLIS2_PYTHON), then 'Fit To AI Head'. Takes a minute or more."),
         desc.File(name="aiHeadFile", label="AI Head", value="", invalidate=False,
-                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh (.obj) generated "
-                              "elsewhere."),
+                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh generated "
+                              "elsewhere (.glb, as image-to-3D services export it, or .obj); then 'Fit To AI Head'."),
         desc.PushButtonParam(name="fitAiHead", label="Fit To AI Head", semantic="liveAction",
                              description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
                                          "then the head on it: the face on its eyes, nose and mouth, the proportions "

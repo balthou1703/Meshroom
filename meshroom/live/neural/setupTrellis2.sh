@@ -25,8 +25,15 @@ unset PYTHONPATH PYTHONHOME
 echo "== GPU"
 if command -v nvidia-smi > /dev/null; then
     nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader || nvidia-smi -L
+    MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1 || echo 0)
+    if [ "${MEMORY:-0}" -lt 20000 ] && [ "${FORCE:-0}" != "1" ]; then
+        echo "This GPU has ${MEMORY} MiB: TRELLIS.2 needs about 24 GB (its 4 billion parameters alone take 8 GB)."
+        echo "Install it on a machine with such a GPU (FORCE=1 to install here anyway)."
+        exit 1
+    fi
 else
     echo "nvidia-smi not found: TRELLIS.2 needs an NVIDIA GPU (24 GB or more)."
+    [ "${FORCE:-0}" = "1" ] || exit 1
 fi
 
 echo "== micromamba"
@@ -36,12 +43,15 @@ if [ -z "$MAMBA" ]; then
     curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C "$HOME/.local" bin/micromamba
     MAMBA=$HOME/.local/bin/micromamba
 fi
-export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$HOME/.micromamba}
+# Its package cache next to the environment, not in the home (often a small quota)
+export MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-$(dirname "$ENV")/.micromamba}
 
 echo "== environment $ENV (Python 3.10, CUDA 12.4 toolkit, compilers)"
 if [ ! -x "$ENV/bin/python" ]; then
-    "$MAMBA" create -y -p "$ENV" -c conda-forge -c nvidia/label/cuda-12.4.1 \
-        python=3.10 cuda-toolkit gcc_linux-64=12 gxx_linux-64=12 git
+    # CUDA 12.4 (that of the PyTorch wheels): its channel first, the version pinned
+    "$MAMBA" create -y -p "$ENV" --override-channels -c nvidia/label/cuda-12.4.1 -c conda-forge \
+        python=3.10 "cuda-version=12.4" cuda-nvcc cuda-cudart-dev cuda-cccl libcublas-dev libcusparse-dev \
+        libcusolver-dev libcurand-dev gcc_linux-64=12 gxx_linux-64=12 git
 fi
 PY="$ENV/bin/python"
 export PATH="$ENV/bin:$PATH"

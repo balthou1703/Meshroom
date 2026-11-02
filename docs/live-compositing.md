@@ -729,7 +729,7 @@ Python (sa version de PyTorch, ses extensions CUDA), lancé par `meshroom/live/n
     export MESHROOM_TRELLIS2_PYTHON=~/trellis2-env/bin/python
     export MESHROOM_TRELLIS2_ROOT=<chemin de TRELLIS.2>
 
-`setupTrellis2.sh` n'a besoin ni de root, ni de conda, ni de pip sur la machine (hors de l'environnement rez de
+`setupTrellis2.sh` refuse un GPU de moins de 20 Go (`FORCE=1` pour passer outre). Il n'a besoin ni de root, ni de conda, ni de pip sur la machine (hors de l'environnement rez de
 Meshroom) : micromamba (un binaire dans `~/.local/bin`) crée l'environnement avec Python 3.10, le toolkit CUDA 12.4 et
 un compilateur (pour ses extensions CUDA : nvdiffrast, nvdiffrec, CuMesh, FlexGEMM, o-voxel, compilées pour le GPU de
 la machine), puis PyTorch 2.6 et xformers (`FLASH_ATTN=1` : flash-attn aussi). Meshroom lance le Python de cet
@@ -739,7 +739,8 @@ Les poids (`microsoft/TRELLIS.2-4B`, ou `MESHROOM_TRELLIS2_MODEL`) et les modèl
 Hugging Face au premier lancement (certains demandent d'accepter leur licence sur Hugging Face et `hf auth login`).
 Le maillage (.npz : sommets, triangles, couleur de la texture par sommet ; et .glb) est écrit dans
 `~/.cache/meshroom/aiHeads` (`MESHROOM_AIHEAD_FOLDER`), nommé d'après l'image (déjà généré : réutilisé) ; « AI Head »
-peut aussi pointer un .obj généré ailleurs. « Fit To AI Head » : son visage est trouvé par MediaPipe sur des rendus de
+peut aussi pointer une tête générée ailleurs : .glb (l'export de TRELLIS.2 et des services image vers 3D, couleurs
+de sa texture lues avec PIL) ou .obj. « Fit To AI Head » : son visage est trouvé par MediaPipe sur des rendus de
 la tête générée (tournée dans les 24 orientations d'axes, puis de face), ses 468 points relevés sur sa surface ; une
 similitude la pose sur le visage ajusté sur les vues (sa taille, sa place : celles des caméras) ; la tête du
 FaceBuilder y est ajustée : le visage sur ces points (yeux, nez, bouche), l'identité (50 modes) et un déplacement de
