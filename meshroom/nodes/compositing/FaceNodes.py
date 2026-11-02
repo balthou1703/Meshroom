@@ -1521,7 +1521,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         matrix = aiHead.alignment(landmarks, faceVertices)
         registration = aiHead.registerHead(
             original.vertices, original.topology, aiHead.transform(vertices, matrix), triangles,
-            aiHead.transform(landmarks, matrix), cancel=context.checkCancelled,
+            aiHead.transform(landmarks, matrix), faceTarget=faceVertices, earDetail=context.value("aiModel") == "trellis2",
+            cancel=context.checkCancelled,
             progress=lambda done: context.progress(start + (0.3 + 0.7 * done) * (1 - start), "Fit the head"))
         fit = {"matrix": [[round(float(v), 7) for v in row] for row in matrix], "registration": registration}
         return {"aiHeadFit": json.dumps(fit)}

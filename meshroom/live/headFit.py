@@ -560,9 +560,10 @@ def fitIdentity(rest: np.ndarray, faceTarget: np.ndarray, topology, views: List[
                 cancel: Optional[Callable[[], None]] = None, progress: Optional[Callable[[float], None]] = None) -> dict:
     """
     The identity coefficients of a head whose face is `faceTarget`, refined on the views: the outlines of the ears on
-    the skin (not the neck: its bend changes from view to view), the skull inside the head, the depth of the ears (contourConstraints, depthConstraints), all the
-    views together, robust, regularized toward the proportions the face predicts (predictIdentity): a few coefficients
-    for the whole head, so a wrong border cannot bend it, the result always a human head.
+    the skin (not the neck: its bend changes from view to view), the skull inside the head, the depth of the ears
+    (contourConstraints, depthConstraints), all the views together, robust, regularized toward the proportions the
+    face predicts (predictIdentity): a few coefficients for the whole head, so a wrong border cannot bend it, the
+    result always a human head.
 
     Returns:
         {"identity": [coefficients], "constraints": count used}.
@@ -675,14 +676,19 @@ _EAR_WEIGHTS = {}
 
 def earWeights(count: int) -> np.ndarray:
     """ (n, 2): how much each vertex of a head of the FaceBuilder follows the move of its right (x < 0) and left ear:
-    1 on the whole ear, fading out around it (gaussian, EAR_RADIUS), none on the face. """
+    1 on the whole ear, fading out around it (gaussian, EAR_RADIUS), none on the face nor near its oval (the head stays
+    joined to the face there: the vertices of the hole on its oval edges). """
     if count not in _EAR_WEIGHTS:
         head = face.canonicalHead()
         rest = head.vertices
         weights = np.zeros((len(rest), 2))
         if len(rest) == count:
             ear = headRegions(head)["ear"]
-            mobility = face.headMobility(head)
+            # Nothing on the face; from nothing on its oval to all 2 cm away from it
+            from scipy.spatial import cKDTree
+            oval = np.unique(np.asarray(face.headData()["holeEdges"]).ravel())
+            mobility = np.clip(cKDTree(rest[oval]).query(rest)[0] / 2.0, 0.0, 1.0)
+            mobility[:face.MESH_VERTICES] = 0.0
             for side, sign in enumerate((-1.0, 1.0)):
                 mask = ear & (np.sign(rest[:, 0]) == sign)
                 center = rest[mask].mean(axis=0)

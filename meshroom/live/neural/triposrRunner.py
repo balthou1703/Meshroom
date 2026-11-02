@@ -92,6 +92,24 @@ def marchingTetrahedra(field, level=0.0):
     return vertices, triangles[keep]
 
 
+def smoothSurface(vertices, triangles, iterations=10, shrink=0.5, inflate=-0.53):
+    """ The surface smoothed without shrinking (Taubin: an averaging step, then one back, at each iteration): the steps
+    of the grid and the noise of the density gone, the shape kept. """
+    import numpy as np
+    vertices = np.asarray(vertices, dtype=np.float64).copy()
+    edges = np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]])
+    edges = np.unique(np.sort(edges, axis=1), axis=0)
+    degree = np.bincount(edges.ravel(), minlength=len(vertices)).astype(np.float64)[:, None]
+    for _ in range(iterations):
+        for factor in (shrink, inflate):
+            total = np.zeros_like(vertices)
+            np.add.at(total, edges[:, 0], vertices[edges[:, 1]])
+            np.add.at(total, edges[:, 1], vertices[edges[:, 0]])
+            average = np.where(degree > 0, total / np.maximum(degree, 1.0), vertices)
+            vertices += factor * (average - vertices)
+    return vertices
+
+
 def extractSurface(field, level):
     """ (vertices, triangles) of the level surface of a grid: scikit-image or PyMCubes when installed, else
     marchingTetrahedra. Triangles facing toward lower values. """
@@ -304,6 +322,7 @@ def main(argv=None):
     vertices, triangles = extractSurface(field, args.threshold)
     if not len(triangles):
         raise SystemExit("triposrRunner: no surface")
+    vertices = smoothSurface(vertices, triangles)
     vertices = vertices / (args.resolution - 1) * 2.0 * radius - radius
     with torch.no_grad():
         colors = []

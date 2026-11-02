@@ -83,3 +83,26 @@ def test_checkpointOfTransformers4OnTransformers5():
     assert triposrRunner.remapCheckpoint(new, new).keys() == new.keys()
     with pytest.raises(SystemExit):
         triposrRunner.remapCheckpoint({"decoder.layers.0.weight": np.zeros((4, 4))}, new)
+
+
+def test_smoothSurfaceKeepsTheShape():
+    """ A noisy sphere smoothed: smoother, about the same size. """
+    size = 40
+    grid = np.mgrid[0:size, 0:size, 0:size].astype(np.float64)
+    center, radius = np.array([19.5, 20.0, 18.7]), 12.0
+    field = radius - np.sqrt(((grid - center[:, None, None, None]) ** 2).sum(0))
+    field += np.random.default_rng(0).normal(0, 0.3, field.shape)
+    vertices, triangles = triposrRunner.marchingTetrahedra(field, 0.0)
+    smoothed = triposrRunner.smoothSurface(vertices, triangles)
+    after = np.linalg.norm(smoothed - center, axis=1)
+    assert abs(after.mean() - radius) < 0.1
+
+    def roughness(points):
+        # How far each vertex is from the middle of its triangles' corners
+        total = np.zeros_like(points)
+        count = np.zeros(len(points))
+        for i in range(3):
+            np.add.at(total, triangles[:, i], points[triangles].mean(1))
+            np.add.at(count, triangles[:, i], 1)
+        return np.linalg.norm(points - total / np.maximum(count, 1)[:, None], axis=1).mean()
+    assert roughness(smoothed) < 0.5 * roughness(vertices)

@@ -755,9 +755,12 @@ peut aussi pointer une tête générée ailleurs : .glb (l'export de TRELLIS.2 e
 de sa texture lues avec PIL) ou .obj. « Fit To AI Head » : son visage est trouvé par MediaPipe sur des rendus de
 la tête générée (tournée dans les 24 orientations d'axes, puis de face), ses 468 points relevés sur sa surface ; une
 similitude la pose sur le visage ajusté sur les vues (sa taille, sa place : celles des caméras) ; la tête du
-FaceBuilder y est ajustée : le visage sur ces points (yeux, nez, bouche), l'identité (50 modes) et un déplacement de
-chaque oreille sur sa surface (point à plan sur les points les plus proches, des oreilles et du haut du cou ; pas le
-crâne, sous ses cheveux), puis chaque oreille affinée seule. « Head From AI » : la tête est celle-là ; « Show
+FaceBuilder y est ajustée : le visage reste celui ajusté sur les photos (plus fin que celui de la tête générée), ses
+points ne servent qu'à la placer ; l'identité (50 modes) et un déplacement de chaque oreille d'un bloc (sa forme
+gardée ; rien sur le visage ni près de son ovale) sur sa surface (point à plan sur les points les plus proches des
+oreilles ; pas le crâne, sous ses cheveux, ni le cou) ; avec TRELLIS.2 (assez fin), chaque oreille est ensuite affinée
+seule. Le cou garde sa forme vers sa base (il n'y suit que le visage). La surface de TripoSR est lissée (Taubin) dans
+le runner. « Head From AI » : la tête est celle-là ; « Show
 Geometry » : la tête, la tête IA (ombrée, ses couleurs) ou les deux ; sortie « AI Head ». Sur une tête synthétique :
 oreilles à 1 mm de sa surface (5 mm prédites depuis le visage).
  Sur des têtes synthétiques du modèle :

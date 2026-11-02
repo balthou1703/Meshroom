@@ -400,12 +400,14 @@ def vertexNormals(vertices, triangles):
 
 def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles: np.ndarray,
                  landmarks: np.ndarray, iterations: int = 8, maxDistance: float = 2.0, earSmoothing: float = 1.0,
-                 cancel=None, progress=None) -> dict:
+                 faceTarget: Optional[np.ndarray] = None, earDetail: bool = False, cancel=None, progress=None) -> dict:
     """
-    The head of the FaceBuilder on a generated head (aligned on it: face space): its face on the landmarks found on it,
-    its identity (the proportions of the whole head) and the moves of its ears fitted on the surface of the generated
-    head (point to plane on the nearest points: the ears, the upper neck, the face; not the skull, under the hair of the
-    generated head), then each ear refined on its own (its vertices to their nearest points, the moves smoothed).
+    The head of the FaceBuilder on a generated head (aligned on it: face space): its face `faceTarget` (the one fitted
+    on the photos: finer than the generated one) or the landmarks found on it, its identity (the proportions of the
+    whole head) and the moves of its ears (each as a whole: its shape kept) fitted on the surface of the generated head
+    (point to plane on the nearest points of the ears; not the skull, under the hair of the generated head, nor the
+    neck, that keeps its shape); with `earDetail`, each ear then refined on its own (its vertices to their nearest
+    points, the moves smoothed: for a fine generated head).
 
     Returns:
         {"face": (468, 3) list, "identity": [...], "ears": [[x, y, z] right, left], "earOffsets": {vertex: [x, y, z]}}.
@@ -418,11 +420,13 @@ def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles
     tree = cKDTree(aiVertices)
     seen = np.isfinite(landmarks).all(1)
     # The face: the landmarks of the generated head; those not found from the face fitted before (none: the rest)
-    faceTarget = np.where(seen[:, None], landmarks, rest[:face.MESH_VERTICES])
+    if faceTarget is None:
+        faceTarget = np.where(seen[:, None], landmarks, rest[:face.MESH_VERTICES])
+    faceTarget = np.asarray(faceTarget, dtype=np.float64)[:face.MESH_VERTICES]
     geo = scene3d.GeoData(rest, topology=topology)
     triangles = geo.triangles()
     regions = headFit.headRegions(geo)
-    used = regions["ear"] | regions["upperNeck"]
+    used = regions["ear"]
     modes = headFit.identityModel()
     origin = headFit.identityHead(rest, faceTarget, np.zeros(len(modes)))
     jacobian = np.stack([headFit.identityHead(rest, faceTarget, np.eye(len(modes))[k]) - origin
@@ -467,7 +471,7 @@ def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles
     offsets = np.zeros((len(ear), 3))
     neighbors = cKDTree(rest[ear]).query_ball_point(rest[ear], r=max(earSmoothing, 1e-3))
     normals = headFit._vertexNormals(head, triangles)[ear]
-    for _ in range(12):
+    for _ in range(12 if earDetail else 0):
         if cancel:
             cancel()
         points = head[ear] + offsets
@@ -490,4 +494,8 @@ def registeredHead(rest: np.ndarray, registration: dict) -> np.ndarray:
     vertices = vertices + headFit.earWeights(len(rest)) @ np.asarray(registration["ears"], dtype=np.float64).reshape(2, 3)
     for vertex, offset in registration.get("earOffsets", {}).items():
         vertices[int(vertex)] += offset
-    return vertices
+    # The neck keeps its shape toward its base: there it only follows the face (no identity, no ear move)
+    followed = face.HeadFollow.of(rest).follow(np.asarray(registration["face"], dtype=np.float64))
+    weight = headFit.neckIdentityWeight(rest)
+    weight = np.clip((weight - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)[:, None]
+    return followed + weight * (vertices - followed)

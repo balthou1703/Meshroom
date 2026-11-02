@@ -84,6 +84,16 @@ def test_registerOnAGeneratedHead(monkeypatch):
     assert errorRegistered < 0.3 * errorPredicted and errorRegistered < 0.15
     # The face on the landmarks found
     assert np.median(np.linalg.norm(result[:n] - actor[:n], axis=1)) < 0.3
+    # The base of the neck keeps its shape: it only follows the face
+    neck = headFit.headRegions(head)["neck"]
+    base = neck & (rest[:, 1] < rest[neck, 1].min() + 0.3)
+    followed = face.HeadFollow.of(rest).follow(result[:n])
+    assert np.linalg.norm(result[base] - followed[base], axis=1).max() < 0.1
+    # With the face fitted on the photos: that face, exactly
+    photoFace = actor[:n] + 0.05
+    registration = aiHead.registerHead(rest, head.topology, aligned, triangles, aiHead.transform(landmarks, matrix),
+                                       faceTarget=photoFace)
+    np.testing.assert_allclose(aiHead.registeredHead(rest, registration)[:n], photoFace, atol=1e-6)
 
 
 def test_readGlb(tmp_path):
