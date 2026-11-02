@@ -726,9 +726,8 @@ paquets ; la surface est extraite par le runner (marching tetrahedra en numpy, o
 dépendances compilées de TripoSR :
 
     git clone https://github.com/VAST-AI-Research/TripoSR
-    python -m pip install --no-deps --target <pylibs> einops omegaconf antlr4-python3-runtime==4.9.3 pyyaml \
-        huggingface_hub transformers safetensors tokenizers regex tqdm filelock fsspec requests packaging \
-        typing_extensions idna urllib3 certifi charset_normalizer
+    python -m pip install --target <pylibs> --upgrade huggingface_hub einops omegaconf    # (with their dependencies)
+    python -m pip install --no-deps --target <pylibs> transformers safetensors tokenizers regex   # (not numpy)
     export MESHROOM_TRIPOSR_ROOT=<chemin de TripoSR>
     export HF_HOME=<dossier avec de la place>   # ses poids (stabilityai/TripoSR, 1,7 Go) y sont téléchargés
 
