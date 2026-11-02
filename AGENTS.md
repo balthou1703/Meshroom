@@ -52,7 +52,8 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   face.py: FaceTracker (MediaPipe landmarks, non-rigid face fit on a MediaPipe-topology mesh),
 │   │                           #   headFit.py: FaceBuilder "Fit Ears, Neck And Skull" (segmentation outlines, depth) and "Head
 │   │                           #   From Face" (ICT identity model, data/faceIdentity.npz: head proportions from the face),
-│   │                           #   aiHead.py: FaceBuilder "Generate AI Head" (TripoSR: neural/triposrRunner.py, or TRELLIS.2
+│   │                           #   aiHead.py: FaceBuilder "Generate AI Head" (TripoSR: neural/triposrRunner.py, its code copied in
+│   │                           #   neural/triposr/tsr (MIT), weights in the models folder; or TRELLIS.2
 │   │                           #   in its own Python: neural/trellis2Runner.py) and the head registered on the generated one,
 │   │                           #   faceRig.py: the face rigs fitted by the FaceTracker (BlendshapeRig: the 51 ARKit
 │   │                           #   expression shapes; FaceRig: jaw, brows, lids, lips, cheeks controls),

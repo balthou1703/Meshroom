@@ -70,13 +70,13 @@ def generate(rgba: np.ndarray, output: str, model: str = "triposr", python: Opti
     if model == "trellis2" and not python:
         raise AIHeadUnavailable("TRELLIS.2 is not set up: set MESHROOM_TRELLIS2_PYTHON to the python of its environment "
                                 "(and MESHROOM_TRELLIS2_ROOT to its clone); see docs/live-compositing.md.")
-    if not root:
+    if model == "trellis2" and not root:
         raise AIHeadUnavailable(f"{spec['label']} is not set up: set {spec['root']} to the clone of its repository; see "
                                 "docs/live-compositing.md.")
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
     imagePath = os.path.splitext(output)[0] + "_input.png"
     writePngRGBA(imagePath, (np.clip(rgba, 0, 1) * 255).astype(np.uint8))
-    command = [python or sys.executable, runnerPath(model), imagePath, output, "--root", root]
+    command = [python or sys.executable, runnerPath(model), imagePath, output] + (["--root", root] if root else [])
     # Meshroom's own Python keeps its environment (its packages); another one gets its own
     environment = runnerEnvironment(python) if python else dict(os.environ)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment)

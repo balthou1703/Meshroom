@@ -1,11 +1,13 @@
 """
 Generate a colored 3D head from a photo with TripoSR (Stability AI & Tripo AI, MIT:
-https://github.com/VAST-AI-Research/TripoSR) for the FaceBuilder ("Generate AI Head", meshroom/live/aiHead.py). A light model (about 6 GB of GPU memory, or the CPU):
-it runs in Meshroom's own Python, with its clone (MESHROOM_TRIPOSR_ROOT) and a few small packages (einops, omegaconf,
-huggingface_hub, transformers); what TripoSR imports only for its other uses (trimesh, rembg, imageio, torchmcubes) is
+https://github.com/VAST-AI-Research/TripoSR) for the FaceBuilder ("Generate AI Head", meshroom/live/aiHead.py).
+A light model (about 6 GB of GPU memory, or the CPU): it runs in Meshroom's own Python, with the copy of its code in
+Meshroom (neural/triposr/tsr, MIT) and a few small packages
+(einops, omegaconf, transformers), its weights in the models folder (python -m meshroom.live.neural.download triposr:
+then nothing is downloaded); what TripoSR imports only for its other uses (trimesh, rembg, imageio, torchmcubes) is
 not needed: the surface is extracted here (marching tetrahedra in numpy, or scikit-image / PyMCubes when installed).
 
-    python triposrRunner.py --root <TripoSR clone> image.png head.npz
+    python triposrRunner.py image.png head.npz
 
 The image is RGBA (its alpha: the person cut out by Meshroom). Writes head.npz: vertices (n, 3) float32, faces (m, 3)
 int32, colors (n, 3) uint8.
@@ -189,16 +191,17 @@ def main(argv=None):
     parser.add_argument("image", help="RGBA image of the head (PNG)")
     parser.add_argument("output", help="the .npz written")
     parser.add_argument("--root", default=os.environ.get("MESHROOM_TRIPOSR_ROOT", ""),
-                        help="the clone of the TripoSR repository (added to the import path)")
-    parser.add_argument("--model", default=os.environ.get("MESHROOM_TRIPOSR_MODEL", "stabilityai/TripoSR"),
-                        help="the weights: a Hugging Face name or a local folder (config.yaml, model.ckpt)")
+                        help="a clone of TripoSR to use instead of the copy of its code in Meshroom (neural/triposr/tsr)")
+    parser.add_argument("--model", default=os.environ.get("MESHROOM_TRIPOSR_MODEL", ""),
+                        help="the weights: a folder (config.yaml, model.ckpt) or a Hugging Face name; default: the "
+                             "models folder (MESHROOM_MODELS_PATH/triposr), else stabilityai/TripoSR downloaded")
     parser.add_argument("--resolution", type=int, default=192, help="the grid of the surface")
     parser.add_argument("--threshold", type=float, default=25.0, help="the density of the surface")
     parser.add_argument("--device", default="auto", help="auto, cuda or cpu")
     parser.add_argument("--chunk", type=int, default=8192)
     args = parser.parse_args(argv)
-    if args.root:
-        sys.path.insert(0, args.root)
+    # The code: the copy in Meshroom (neural/triposr/tsr, imported as "tsr": its config names its classes so), or a clone
+    sys.path.insert(0, args.root or os.path.join(os.path.dirname(os.path.abspath(__file__)), "triposr"))
     _stubModules()
     import numpy as np
     import torch
@@ -206,8 +209,22 @@ def main(argv=None):
     try:
         from tsr.system import TSR
     except ImportError as e:
-        raise SystemExit(f"triposrRunner: TripoSR cannot be imported ({e}): MESHROOM_TRIPOSR_ROOT must be its clone, "
-                         "with einops, omegaconf, huggingface_hub and transformers installed") from e
+        raise SystemExit(f"triposrRunner: TripoSR cannot be imported ({e}): it needs omegaconf, einops and "
+                         "transformers (pip install --target <pylibs> omegaconf einops)") from e
+    # The weights: the models folder when they are there (nothing downloaded, offline)
+    if not args.model:
+        folder = os.path.join(os.environ.get("MESHROOM_MODELS_PATH", ""), "triposr")
+        if all(os.path.isfile(os.path.join(folder, name)) for name in ("config.yaml", "model.ckpt")):
+            args.model = folder
+        else:
+            print("[triposr] not in the models folder (python -m meshroom.live.neural.download triposr): "
+                  "downloaded from Hugging Face", flush=True)
+            args.model = "stabilityai/TripoSR"
+    if os.path.isdir(args.model):
+        dino = os.path.join(args.model, "dino-vitb16-config.json")
+        if os.path.isfile(dino):
+            os.environ["MESHROOM_TRIPOSR_DINO_CONFIG"] = dino
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
     device = _device(torch, args.device)
     print(f"[triposr] loading {args.model} ({device})", flush=True)

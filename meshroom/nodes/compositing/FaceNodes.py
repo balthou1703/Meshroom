@@ -974,7 +974,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.ChoiceParam(name="aiModel", label="AI Model", value="triposr", values=["triposr", "trellis2"],
                          invalidate=False,
                          description="The image-to-3D model of 'Generate AI Head': TripoSR (light: 6 GB of GPU or the "
-                                     "CPU, in Meshroom's Python, MESHROOM_TRIPOSR_ROOT) or TRELLIS.2 (much finer, a 24 GB "
+                                     "CPU, in Meshroom's Python, its weights in the models folder: python -m meshroom.live.neural.download "
+                                     "triposr) or TRELLIS.2 (much finer, a 24 GB "
                                      "GPU, its own environment: MESHROOM_TRELLIS2_PYTHON)."),
         desc.PushButtonParam(name="generateAiHead", label="Generate AI Head", semantic="liveAction",
                              description="After 'Build Head': a whole head generated from the view shown by the AI "

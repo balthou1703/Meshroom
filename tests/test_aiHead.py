@@ -157,9 +157,13 @@ def test_generateRunsItsRunner(tmp_path, monkeypatch):
         raise AssertionError("no error")
     except aiHead.AIHeadUnavailable as e:
         assert "out of memory" in str(e) and "TripoSR" in str(e)
+    # TripoSR needs no clone (its code is in Meshroom); TRELLIS.2 needs its environment
     monkeypatch.delenv("MESHROOM_TRIPOSR_ROOT")
+    runner.write_text(runner.read_text().replace("assert sys.argv[3] == '--root'", "assert len(sys.argv) == 3"))
+    aiHead.generate(rgba, str(tmp_path / "other.npz"), model="triposr")
+    monkeypatch.delenv("MESHROOM_TRELLIS2_PYTHON", raising=False)
     try:
-        aiHead.generate(rgba, str(tmp_path / "other.npz"), model="triposr")
+        aiHead.generate(rgba, str(tmp_path / "trellis.npz"), model="trellis2")
         raise AssertionError("no error")
     except aiHead.AIHeadUnavailable as e:
-        assert "MESHROOM_TRIPOSR_ROOT" in str(e)
+        assert "MESHROOM_TRELLIS2_PYTHON" in str(e)

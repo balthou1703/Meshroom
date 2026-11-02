@@ -8,6 +8,7 @@ Weights are read from the folder of MESHROOM_MODELS_PATH (never downloaded while
     <models>/megapose/                MegaPose data folder (MEGAPOSE_DATA_DIR)
     <models>/mediapipe/               MediaPipe Face Landmarker, multiclass selfie segmenter (FaceTracker, FaceBuilder)
     <models>/depthanything/           Depth Anything V2 Small (transformers format): depth of the FaceBuilder views
+    <models>/triposr/                 TripoSR (config.yaml, model.ckpt, the config of its DINO encoder): AI head
 
 Fill it once, on a machine with internet access: python -m meshroom.live.neural.download --path <models> [names]
 """
@@ -68,6 +69,13 @@ MODELS = {
                            {"mediapipe/selfie_multiclass_256x256.tflite":
                             "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/"
                             "float32/latest/selfie_multiclass_256x256.tflite"}),
+    "triposr": Model("triposr", "TripoSR (FaceBuilder: Generate AI Head, the light image-to-3D model)", "omegaconf",
+                     "omegaconf einops transformers", "MIT",
+                     ["triposr/config.yaml", "triposr/model.ckpt", "triposr/dino-vitb16-config.json"],
+                     {"triposr/config.yaml": "https://huggingface.co/stabilityai/TripoSR/resolve/main/config.yaml",
+                      "triposr/model.ckpt": "https://huggingface.co/stabilityai/TripoSR/resolve/main/model.ckpt",
+                      "triposr/dino-vitb16-config.json":
+                      "https://huggingface.co/facebook/dino-vitb16/resolve/main/config.json"}),
     "depthanything": Model("depthanything", "Depth Anything V2 Small (FaceBuilder: depth of the views)", "transformers",
                            "transformers", "Apache-2.0",
                            ["depthanything/config.json", "depthanything/model.safetensors",
