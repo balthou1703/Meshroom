@@ -992,9 +992,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
                                          "then the head on it: the face on its eyes, nose and mouth, the proportions "
                                          "and the ears on its surface."),
-        desc.FloatParam(name="aiFace", label="AI Face", value=0.5, range=(0.0, 1.0, 0.05),
+        desc.FloatParam(name="aiFace", label="AI Face", value=0.0, range=(0.0, 1.0, 0.05),
                         description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
-                                    "0: the face fitted on the photos (finer), 1: that of the AI head. The ears always "
+                                    "0: the face fitted on the photos (it fits them), 1: that of the AI head. The ears always "
                                     "follow it."),
         desc.BoolParam(name="useAiHead", label="Head From AI", value=True,
                        description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),

@@ -665,8 +665,19 @@ def warpWeights(rest: np.ndarray, faceWeight: float = 1.0, skull: bool = False):
         data[regions["skull"]] = 1.0
     neck = headFit.neckIdentityWeight(rest)
     neck = np.clip((neck - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)
-    fixed = np.where(regions["neck"], 100.0 * (1.0 - neck) ** 2, 0.0)
+    # The neck held more and more toward its base (its shape: not bent by the warp of the head above it)
+    fixed = np.where(regions["neck"], 100.0 * (1.0 - neck), 0.0)
     return data, fixed
+
+
+def neckWarpFade(count: int) -> np.ndarray:
+    """ (n,): how much of the warp applies on the neck: none at its base, all at its top and above. """
+    from . import headFit
+    rest = face.canonicalHead().vertices
+    if count != len(rest):
+        return np.ones(count)
+    neck = headFit.neckIdentityWeight(rest)
+    return np.clip((neck - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)
 
 
 def faceBlend(count: int, aiFace: float) -> np.ndarray:
@@ -685,4 +696,5 @@ def warpedHead(vertices: np.ndarray, registration: dict, aiFace: float = 1.0) ->
     moves = np.zeros_like(vertices)
     for vertex, move in warp.items():
         moves[int(vertex)] = move
-    return vertices + faceBlend(len(vertices), float(aiFace))[:, None] * moves
+    weights = faceBlend(len(vertices), float(aiFace)) * neckWarpFade(len(vertices))
+    return vertices + weights[:, None] * moves

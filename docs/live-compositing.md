@@ -767,7 +767,7 @@ le runner. Enfin la tête entière est déformée sur la surface générée (`ai
 correspondances par position, quelle que soit la topologie de la surface générée ; chaque sommet du visage et des
 oreilles vers le point le plus proche, glissant sur son plan tangent, seulement à moins de 1 cm et orienté pareil ; une
 déformation lisse, énergie de membrane des arêtes, de plus en plus souple ; pas le crâne ni le cou, dont la base est
-tenue). « AI Face » dose la part de cette déformation sur le visage (0 : celui des photos, 1 : celui de la tête générée ;
+tenue de plus en plus vers sa base, où la déformation s'efface). « AI Face » (0 par défaut) dose la part de cette déformation sur le visage (0 : celui des photos, qui leur colle ; 1 : celui de la tête générée ;
 fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). « AI Model » flame : FLAME 2023 Open (MPI-IS, CC-BY-4.0 : usage commercial permis, en citant FLAME), sans
 réseau (`meshroom/live/flameFit.py`) : sa forme (toutes ses directions, variance unité) et une similitude ajustées sur
 le visage des photos, alternativement ; ses landmarks MediaPipe (son embedding) sur ceux du visage, puis (à partir de
