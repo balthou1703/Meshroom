@@ -767,12 +767,17 @@ le runner. Enfin la tête entière est déformée sur la surface générée (`ai
 correspondances par position, quelle que soit la topologie de la surface générée ; chaque sommet du visage et des
 oreilles vers le point le plus proche, glissant sur son plan tangent, seulement à moins de 1 cm et orienté pareil ; une
 déformation lisse, énergie de membrane des arêtes, de plus en plus souple ; pas le crâne ni le cou, dont la base est
-tenue de plus en plus vers sa base, où la déformation s'efface). « AI Face » (0 par défaut) dose la part de cette déformation sur le visage (0 : celui des photos, qui leur colle ; 1 : celui de la tête générée ;
+tenue de plus en plus vers sa base, où la déformation s'efface). « AI Face » (1 par défaut) dose la part de cette déformation sur le visage (1 : celui de la tête générée, ses landmarks connus (FLAME) tenant les sommets du visage correspondants ; 0 : celui des photos, pour une tête générée qui leur colle moins, TripoSR ;
 fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). « AI Model » flame : FLAME 2023 Open (MPI-IS, CC-BY-4.0 : usage commercial permis, en citant FLAME), sans
 réseau (`meshroom/live/flameFit.py`) : sa forme (toutes ses directions, variance unité) et une similitude ajustées sur
 le visage des photos, alternativement ; ses landmarks MediaPipe (son embedding) sur ceux du visage, puis (à partir de
 la 4e itération) chaque sommet du visage sur la surface de FLAME (le long de la normale du sommet le plus proche, à
-moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 par correspondance). La tête FLAME obtenue
+moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 par correspondance). Puis FLAME est
+ajusté sur les landmarks de toutes les vues (`fitFlameToViews` : leur reprojection par les caméras des vues,
+Gauss-Newton sur ses coefficients et sa pose, régularisé ; ses landmarks tenus près de ceux du visage des photos en
+3D, 5 px par cm : la profondeur qu'une vue seule ne voit pas) ; enfin sa surface est déplacée autour de chaque landmark
+(gaussiennes de 1 cm, résolues ensemble) pour qu'il tombe sur son pixel dans chaque vue : FLAME calé exactement sur le
+visage des images. La tête FLAME obtenue
 (crâne, oreilles, cou, sans cheveux) est ensuite traitée comme une tête générée (posée par ses landmarks, crâne
 compris). Fichiers à mettre à la main dans `MESHROOM_MODELS_PATH/flame` : le .pkl de « FLAME 2023 Open » et
 `mediapipe_landmark_embedding.npz` (ou dans `mica/`), https://flame.is.tue.mpg.de. Sur une tête synthétique (FLAME

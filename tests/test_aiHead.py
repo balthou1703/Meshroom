@@ -361,3 +361,27 @@ def test_flameFittedOnTheFace():
     seen = np.isfinite(fit["landmarks"]).all(1)
     assert seen.sum() == 105
     np.testing.assert_allclose(fit["landmarks"][seen], fit["vertices"][np.where(seen)[0]], atol=1e-9)
+
+
+def test_flameFittedOnTheViews():
+    """ FLAME fitted on the landmarks of the views (their reprojection), from its fit on a face that is a bit off:
+    its landmarks then land on their pixels in every view. """
+    from tests.test_faceBuilder import _headViews
+    from meshroom.live import flameFit
+    model = _fakeFlame()
+    n = face.MESH_VERTICES
+    actor = _actor(7, out=0.0, back=0.0)
+    size = (640, 480)
+    views = []
+    for camera in _headViews((0, 50, -50), size):
+        xy, _, _ = camera.project(actor[:n], *size)
+        views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
+    # The face of the photos: off by a few millimeters (a smooth error)
+    off = actor[:n] + 0.3 * np.sin(actor[:n] / 3.0)
+    start = flameFit.fitFlame(model, off)
+    fit = flameFit.fitFlameToViews(model, views, start, faceTarget=off)
+    before, after = fit["pixels"]
+    print(f"FLAME on the views: {before:.2f} -> {after:.2f} px")
+    assert after < 0.5 and after < 0.2 * before
+    seen = np.isfinite(fit["landmarks"]).all(1)
+    assert np.linalg.norm(fit["landmarks"][seen] - actor[:n][seen], axis=1).mean() < 0.1

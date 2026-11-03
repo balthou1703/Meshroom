@@ -992,9 +992,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
                                          "then the head on it: the face on its eyes, nose and mouth, the proportions "
                                          "and the ears on its surface."),
-        desc.FloatParam(name="aiFace", label="AI Face", value=0.0, range=(0.0, 1.0, 0.05),
+        desc.FloatParam(name="aiFace", label="AI Face", value=1.0, range=(0.0, 1.0, 0.05),
                         description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
-                                    "0: the face fitted on the photos (it fits them), 1: that of the AI head. The ears always "
+                                    "1: that of the AI head (FLAME: fitted on the landmarks of the views), 0: the face fitted on "
+                                    "the photos (for a generated head that fits them less: TripoSR). The ears always "
                                     "follow it."),
         desc.BoolParam(name="useAiHead", label="Head From AI", value=True,
                        description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),
@@ -1525,7 +1526,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         head (its MediaPipe landmarks with it), then fitted on ("Fit To AI Head"). """
         import hashlib
         import os
-        from meshroom.live import flameFit
+        from meshroom.live import face, flameFit
         ctx = context.nodeContext()
         faceTarget = self.photoFace(ctx)
         context.progress(0.05, "Load FLAME")
@@ -1533,8 +1534,19 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             flame = flameFit.loadModel()
         except flameFit.FlameUnavailable as e:
             raise RuntimeError(str(e)) from e
-        fit = flameFit.fitFlame(flame, faceTarget, cancel=context.checkCancelled,
-                                progress=lambda done: context.progress(0.1 + 0.6 * done, "Fit FLAME on the face"))
+        start = flameFit.fitFlame(flame, faceTarget, cancel=context.checkCancelled,
+                                  progress=lambda done: context.progress(0.1 + 0.2 * done, "Fit FLAME on the face"))
+        # Then on the landmarks of every view (their reprojection): FLAME on the face of the images
+        views = []
+        for view in self.storedViews(context):
+            if not view.get("cameraToFace") or not view.get("landmarks"):
+                continue
+            width, height = view["size"]
+            views.append({"camera": self.baseCamera(view), "size": (width, height), "hidden": view.get("hidden") or [],
+                          "pixels": face.toPixels(np.array(view["landmarks"], dtype=np.float64), width, height)})
+        fit = flameFit.fitFlameToViews(flame, views, start, faceTarget=faceTarget, cancel=context.checkCancelled,
+                                       progress=lambda done: context.progress(0.3 + 0.4 * done,
+                                                                              "Fit FLAME on the views")) if views else start
         folder = os.environ.get("MESHROOM_AIHEAD_FOLDER") or os.path.join(os.path.expanduser("~"), ".cache", "meshroom",
                                                                           "aiHeads")
         os.makedirs(folder, exist_ok=True)
@@ -1545,7 +1557,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                             landmarks=fit["landmarks"].astype(np.float32),
                             coefficients=fit["coefficients"].astype(np.float32))
         import logging
-        logging.info(f"[FaceBuilder] FLAME fitted on the face: {fit['error']:.3f} cm RMS")
+        before, after = fit.get("pixels", (0.0, 0.0))
+        logging.info(f"[FaceBuilder] FLAME fitted on the views: landmarks {before:.2f} -> {after:.2f} px RMS")
         result = self.fitAiHead(context, path=output, start=0.7)
         result["aiHeadFile"] = output
         return result
@@ -1606,8 +1619,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         head = headFit.straightNeck(aiHead.registeredHead(original.vertices, registration))
         data, fixed = aiHead.warpWeights(original.vertices,
                                          skull=not aiHead.MODELS.get(context.value("aiModel"), {}).get("hair", True))
+        # The landmarks known on the AI head (FLAME): the face vertices held on them (the face where FLAME is)
+        known = np.isfinite(landmarks).all(1) & (aiHead.storedLandmarks(path) is not None)
+        anchors = (np.where(known)[0], aiHead.transform(landmarks[known], matrix)) if known.any() else None
         moves = aiHead.warpOntoSurface(head, original.triangles(), aiHead.transform(vertices, matrix), triangles, data,
-                                       fixed, cancel=context.checkCancelled,
+                                       fixed, anchors=anchors, cancel=context.checkCancelled,
                                        progress=lambda done: context.progress(start2 + 0.4 * done * (1 - start),
                                                                               "Warp the head onto the AI head"))
         registration["warp"] = {int(v): [round(float(c), 4) for c in moves[v]]

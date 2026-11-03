@@ -606,12 +606,15 @@ def _edgeLaplacian(triangles: np.ndarray, count: int):
 
 def warpOntoSurface(vertices: np.ndarray, triangles: np.ndarray, aiVertices: np.ndarray, aiTriangles: np.ndarray,
                     dataWeights: np.ndarray, fixed: np.ndarray, stiffness=(30.0, 12.0, 5.0, 2.0), iterations: int = 3,
-                    maxDistance: float = 1.0, cancel=None, progress=None) -> np.ndarray:
+                    maxDistance: float = 1.0, anchors=None, anchorWeight: float = 20.0, cancel=None,
+                    progress=None) -> np.ndarray:
     """
     The moves (n, 3) of the vertices of a head that put it onto a surface (non-rigid ICP: the correspondences by
     position, whatever the topology of the surface): each vertex with a data weight toward the nearest point of the
     surface (on its tangent plane: free to slide along it; only near enough and facing the same way), the moves smooth
-    (the membrane energy of the edges, `stiffness` lowered from step to step), `fixed` vertices (weights) held in place.
+    (the membrane energy of the edges, `stiffness` lowered from step to step), `fixed` vertices (weights) held in place;
+    `anchors` (vertex indices, points): vertices drawn onto known points of the surface (their correspondence known:
+    the landmarks of a FLAME head), by `anchorWeight`.
     """
     from scipy import sparse
     from scipy.sparse.linalg import splu
@@ -638,6 +641,10 @@ def warpOntoSurface(vertices: np.ndarray, triangles: np.ndarray, aiVertices: np.
             along = ((targets - current) * targetNormals).sum(1)
             wanted = current + along[:, None] * targetNormals
             weights = np.where(valid, dataWeights, 0.0)
+            if anchors is not None:
+                anchorIndices, anchorPoints = anchors
+                weights[anchorIndices] = anchorWeight
+                wanted[anchorIndices] = anchorPoints
             # (weights + fixed + alpha L) (moves) = weights (wanted - vertices)
             system = (sparse.diags(weights + fixed) + alpha * laplacian).tocsc()
             solver = splu(system + sparse.identity(count, format="csc") * 1e-8)

@@ -148,4 +148,143 @@ def fitFlame(model: FlameModel, faceTarget: np.ndarray, iterations: int = 12, re
     landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
     landmarks[indices] = (vertices[corners] * weights[:, :, None]).sum(1)
     return {"vertices": vertices, "triangles": model.triangles, "landmarks": landmarks, "coefficients": coefficients,
-            "error": error}
+            "error": error, "similarity": (scale, rotation, translation)}
+
+
+def _rotation(vector):
+    angle = float(np.linalg.norm(vector))
+    if angle < 1e-12:
+        return np.eye(3)
+    k = np.asarray(vector) / angle
+    cross = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(angle) * cross + (1 - np.cos(angle)) * cross @ cross
+
+
+def _reprojection(views, points, indices):
+    """ The reprojection residuals (rows, 2) of landmark points (l, 3) (face space) in the views, the rows that count
+    (each view's visible landmarks among `indices`), and their jacobians (rows, 2, 3) and landmark of each row. """
+    from .headFit import _projection
+    residuals, jacobians, which = [], [], []
+    for view in views:
+        width, height = view["size"]
+        pixels = view["pixels"]
+        hidden = set(int(i) for i in view.get("hidden") or [])
+        keep = np.array([i < len(pixels) and int(i) not in hidden for i in indices])
+        if not keep.any():
+            continue
+        xy, depth, jacobian = _projection(view["camera"], points[keep], width, height)
+        residuals.append(xy - pixels[indices[keep]])
+        jacobians.append(jacobian)
+        which.append(np.where(keep)[0])
+    return np.concatenate(residuals), np.concatenate(jacobians), np.concatenate(which)
+
+
+def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[np.ndarray] = None, iterations: int = 10,
+                    regularization: float = 1.0, faceWeight: float = 5.0, exact: bool = True, radius: float = 1.0,
+                    cancel=None, progress=None) -> dict:
+    """
+    FLAME fitted on the landmarks of the photos (their reprojection in every view: what makes it fit the images), from
+    `start` (fitFlame on the face of the photos): its coefficients and its placement (similarity) by Gauss-Newton,
+    regularized (`regularization`: a coefficient of 1 against 1 pixel of error per landmark and view); then, with
+    `exact`, its surface moved around each landmark (gaussians of `radius` cm, solved together) so that each lands on
+    its pixel in every view. `faceTarget` (the face of the photos, 468 x 3): its landmarks held near it too
+    (`faceWeight` pixels per centimeter: what the views do not see, e.g. the depth with a single view).
+
+    Args:
+        views: [{"camera", "size": (w, h), "pixels": (n, 2) the landmarks (Nuke pixels), "hidden": [indices]}].
+
+    Returns:
+        fitFlame's dict, with "pixels": the RMS reprojection error (pixels) before and after.
+    """
+    corners, weights = model.landmarkRows()
+    indices = model.embeddingIndices
+    count = model.directions.shape[2]
+    scale0, rotation0, translation0 = start["similarity"]
+    coefficients = np.asarray(start["coefficients"], dtype=np.float64).copy()
+    pose = np.zeros(7)  # rotation vector, translation (cm), log of the scale
+
+    def landmarkPoints(c, p):
+        local = (model.vertices(c)[corners] * weights[:, :, None]).sum(1)
+        rotation = _rotation(p[:3]) @ rotation0
+        return scale0 * np.exp(p[6]) * local @ rotation.T + translation0 + p[3:6], rotation
+
+    points, rotation = landmarkPoints(coefficients, pose)
+    residuals, _, _ = _reprojection(views, points, indices)
+    before = float(np.sqrt((residuals ** 2).sum(1).mean()))
+    basis = (model.directions[corners] * weights[:, :, None, None]).sum(1)          # (l, 3, k) meters
+    for iteration in range(iterations):
+        if cancel:
+            cancel()
+        points, rotation = landmarkPoints(coefficients, pose)
+        residuals, jacobians, which = _reprojection(views, points, indices)
+        scale = scale0 * np.exp(pose[6])
+        # The coefficients: d xy / d c = J (2, 3) . scale R basis (3, k)
+        rowsC = np.einsum("rij,jk,rkm->rim", jacobians, scale * rotation, basis[which])
+        # The placement: numerically
+        rowsP = np.zeros((len(residuals), 2, 7))
+        for k in range(7):
+            step = np.zeros(7)
+            step[k] = 1e-4
+            moved, _ = landmarkPoints(coefficients, pose + step)
+            movedResiduals, _, _ = _reprojection(views, moved, indices)
+            rowsP[:, :, k] = (movedResiduals - residuals) / 1e-4
+        a = np.concatenate([rowsC, rowsP], axis=2).reshape(-1, count + 7)
+        b = -residuals.reshape(-1)
+        if faceTarget is not None:
+            # The landmarks near those of the face of the photos (in 3D)
+            offsets = points - np.asarray(faceTarget, dtype=np.float64)[indices]
+            rows3C = faceWeight * np.einsum("ij,ljk->lik", scale * rotation, basis)
+            rows3P = np.zeros((len(points), 3, 7))
+            for k in range(7):
+                step = np.zeros(7)
+                step[k] = 1e-4
+                moved, _ = landmarkPoints(coefficients, pose + step)
+                rows3P[:, :, k] = faceWeight * (moved - points) / 1e-4
+            a = np.concatenate([a, np.concatenate([rows3C, rows3P], axis=2).reshape(-1, count + 7)])
+            b = np.concatenate([b, -faceWeight * offsets.reshape(-1)])
+        damping = np.r_[np.full(count, regularization * len(residuals)), np.full(7, 1e-6)]
+        delta = np.linalg.solve(a.T @ a + np.diag(damping), a.T @ b - damping * np.r_[coefficients, np.zeros(7)])
+        coefficients += delta[:count]
+        pose += delta[count:]
+        if progress:
+            progress(0.8 * (iteration + 1) / float(iterations))
+        if np.abs(delta).max() < 1e-5:
+            break
+    rotation = _rotation(pose[:3]) @ rotation0
+    scale = scale0 * np.exp(pose[6])
+    translation = translation0 + pose[3:6]
+    vertices = scale * model.vertices(coefficients) @ rotation.T + translation
+    if exact:
+        vertices = _exactLandmarks(vertices, model, views, radius)
+    landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
+    landmarks[indices] = (vertices[corners] * weights[:, :, None]).sum(1)
+    residuals, _, _ = _reprojection(views, landmarks[indices], indices)
+    after = float(np.sqrt((residuals ** 2).sum(1).mean()))
+    if progress:
+        progress(1.0)
+    return {"vertices": vertices, "triangles": model.triangles, "landmarks": landmarks, "coefficients": coefficients,
+            "error": start.get("error", 0.0), "similarity": (scale, rotation, translation), "pixels": (before, after)}
+
+
+def _exactLandmarks(vertices, model, views, radius, iterations=3):
+    """ The surface of FLAME moved so that its landmarks land on their pixels in every view: a gaussian move around
+    each landmark (`radius` cm, normalized: moves of neighbors do not add up), all solved together (least squares on
+    the reprojections, a little damped: a landmark seen in one view moves across it). """
+    corners, weights = model.landmarkRows()
+    indices = model.embeddingIndices
+    points = (vertices[corners] * weights[:, :, None]).sum(1)
+    # The weight of each landmark's move at each vertex (and at each landmark)
+
+    def kernel(at):
+        g = np.exp(-((at[:, None, :] - points[None, :, :]) ** 2).sum(-1) / radius ** 2)
+        return g / np.maximum(g.sum(1, keepdims=True), 1.0)
+    atVertices, atLandmarks = kernel(vertices), kernel(points)
+    moves = np.zeros_like(points)
+    for _ in range(iterations):
+        current = points + atLandmarks @ moves
+        residuals, jacobians, which = _reprojection(views, current, indices)
+        # d residual / d moves: J (2, 3) at the landmark of the row times its kernel weights over the landmarks
+        rows = np.einsum("rij,rl->rilj", jacobians, atLandmarks[which]).reshape(len(residuals) * 2, -1)
+        damping = 1e-2 * np.eye(rows.shape[1])
+        moves = moves + np.linalg.solve(rows.T @ rows + damping, -rows.T @ residuals.reshape(-1)).reshape(-1, 3)
+    return vertices + atVertices @ moves
