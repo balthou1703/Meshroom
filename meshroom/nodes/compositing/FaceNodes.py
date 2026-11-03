@@ -971,12 +971,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                    "without the network, only the outlines."),
         desc.StringParam(name="headFit", label="Head Fit", value="", advanced=True,
                          description="The fit of the ears, neck and skull (JSON: control points and their moves)."),
-        desc.ChoiceParam(name="aiModel", label="AI Model", value="triposr", values=["triposr", "trellis2", "mica"],
+        desc.ChoiceParam(name="aiModel", label="AI Model", value="triposr", values=["triposr", "trellis2", "flame", "mica"],
                          invalidate=False,
                          description="The model of 'Generate AI Head': TripoSR (image to 3D, light: 6 GB of GPU or "
                                      "the CPU, in Meshroom's Python, its weights in the models folder: python -m "
                                      "meshroom.live.neural.download triposr), TRELLIS.2 (image to 3D, much finer, a 24 GB "
-                                     "GPU, its own environment: MESHROOM_TRELLIS2_PYTHON) or MICA (a FLAME head from the "
+                                     "GPU, its own environment: MESHROOM_TRELLIS2_PYTHON), FLAME (FLAME 2023 Open, CC-BY-4.0: "
+                                     "fitted on the face of the photos, no network; its .pkl and the MediaPipe "
+                                     "landmark embedding in MESHROOM_MODELS_PATH/flame) or MICA (a FLAME head from the "
                                      "faces of all the views, without hair; NON-COMMERCIAL, a reference: its weights and "
                                      "FLAME 2020 in MESHROOM_MODELS_PATH/mica)."),
         desc.PushButtonParam(name="generateAiHead", label="Generate AI Head", semantic="liveAction",
@@ -1466,6 +1468,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         model = context.value("aiModel")
         if aiHead.MODELS.get(model, {}).get("crops"):
             return self._generateFromCrops(context, model)
+        if aiHead.MODELS.get(model, {}).get("fit"):
+            return self._generateFlame(context, model)
         view = self.viewAt(ctx)
         if view is None or not view.get("cameraToFace"):
             raise RuntimeError("Build the head first (Build Head): the AI head is generated from the view shown.")
@@ -1513,6 +1517,36 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             except aiHead.AIHeadUnavailable as e:
                 raise RuntimeError(str(e)) from e
         result = self.fitAiHead(context, path=output, start=0.8)
+        result["aiHeadFile"] = output
+        return result
+
+    def _generateFlame(self, context, model):
+        """ "Generate AI Head" with FLAME 2023 Open: fitted on the face of the photos (flameFit), written as a generated
+        head (its MediaPipe landmarks with it), then fitted on ("Fit To AI Head"). """
+        import hashlib
+        import os
+        from meshroom.live import flameFit
+        ctx = context.nodeContext()
+        faceTarget = self.photoFace(ctx)
+        context.progress(0.05, "Load FLAME")
+        try:
+            flame = flameFit.loadModel()
+        except flameFit.FlameUnavailable as e:
+            raise RuntimeError(str(e)) from e
+        fit = flameFit.fitFlame(flame, faceTarget, cancel=context.checkCancelled,
+                                progress=lambda done: context.progress(0.1 + 0.6 * done, "Fit FLAME on the face"))
+        folder = os.environ.get("MESHROOM_AIHEAD_FOLDER") or os.path.join(os.path.expanduser("~"), ".cache", "meshroom",
+                                                                          "aiHeads")
+        os.makedirs(folder, exist_ok=True)
+        digest = hashlib.sha1(np.ascontiguousarray(faceTarget).tobytes() + flame.template.tobytes()).hexdigest()[:16]
+        output = os.path.join(folder, f"aiHead_{model}_{digest}.npz")
+        np.savez_compressed(output, vertices=fit["vertices"].astype(np.float32), faces=fit["triangles"].astype(np.int32),
+                            colors=np.full((len(fit["vertices"]), 3), 190, np.uint8),
+                            landmarks=fit["landmarks"].astype(np.float32),
+                            coefficients=fit["coefficients"].astype(np.float32))
+        import logging
+        logging.info(f"[FaceBuilder] FLAME fitted on the face: {fit['error']:.3f} cm RMS")
+        result = self.fitAiHead(context, path=output, start=0.7)
         result["aiHeadFile"] = output
         return result
 

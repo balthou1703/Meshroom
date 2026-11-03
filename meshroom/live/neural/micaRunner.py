@@ -120,8 +120,12 @@ class _FlameUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 
-def loadFlame(path):
-    """ (v_template (n, 3), shapedirs (n, 3, 300), faces (m, 3)) of the FLAME pickle, in meters. """
+def loadFlame(path, components=300):
+    """
+    (v_template (n, 3), shapedirs (n, 3, k), faces (m, 3)) of a FLAME pickle (chumpy or not), in meters: its first
+    `components` directions (FLAME 2020: 300 of shape, then 100 of expression; None: all, with the expression ones
+    when they are apart).
+    """
     import numpy as np
     with open(path, "rb") as f:
         data = _FlameUnpickler(f, encoding="latin1").load()
@@ -132,13 +136,18 @@ def loadFlame(path):
         if hasattr(value, "toarray"):  # a scipy sparse matrix
             return value.toarray()
         return np.asarray(value)
-    return (array(data["v_template"]).astype(np.float64), array(data["shapedirs"]).astype(np.float64)[:, :, :300],
-            array(data["f"]).astype(np.int64))
+    directions = array(data["shapedirs"]).astype(np.float64)
+    for key in ("expressiondirs", "exprdirs", "expression_dirs"):
+        if components is None and key in data:
+            directions = np.concatenate([directions, array(data[key]).astype(np.float64)], axis=2)
+    faces = data["f"] if "f" in data else data["faces"]
+    return (array(data["v_template"]).astype(np.float64), directions if components is None else directions[:, :, :components],
+            array(faces).astype(np.int64))
 
 
-def mediapipeLandmarks(vertices, faces, path):
-    """ (468, 3): the MediaPipe landmarks on a FLAME head from its MediaPipe landmark embedding (the .npz of the FLAME
-    site: the face and barycentric coordinates of some of them), NaN for the others; None without the file. """
+def readMediapipeEmbedding(path):
+    """ (faces (k,), barycentric coordinates (k, 3), MediaPipe landmark indices (k,)) of the FLAME MediaPipe landmark
+    embedding (.npz of the FLAME site), or None without the file. """
     import numpy as np
     if not os.path.isfile(path):
         return None
@@ -148,14 +157,24 @@ def mediapipeLandmarks(vertices, faces, path):
         for key in data.files:
             if all(part in key.lower() for part in parts):
                 return np.asarray(data[key])
-        raise SystemExit(f"micaRunner: {path} has no {'/'.join(parts)} ({data.files})")
+        raise ValueError(f"{path} has no {'/'.join(parts)} ({data.files})")
     faceIndices = find("face", "idx").astype(np.int64).ravel()
     coordinates = find("b_coord").astype(np.float64).reshape(len(faceIndices), 3)
     indices = find("indices").astype(np.int64).ravel()
-    points = (vertices[faces[faceIndices]] * coordinates[:, :, None]).sum(1)
-    landmarks = np.full((468, 3), np.nan)
     keep = indices < 468
-    landmarks[indices[keep]] = points[keep]
+    return faceIndices[keep], coordinates[keep], indices[keep]
+
+
+def mediapipeLandmarks(vertices, faces, path):
+    """ (468, 3): the MediaPipe landmarks on a FLAME head from its MediaPipe landmark embedding (readMediapipeEmbedding),
+    NaN for the others; None without the file. """
+    import numpy as np
+    embedding = readMediapipeEmbedding(path)
+    if embedding is None:
+        return None
+    faceIndices, coordinates, indices = embedding
+    landmarks = np.full((468, 3), np.nan)
+    landmarks[indices] = (vertices[faces[faceIndices]] * coordinates[:, :, None]).sum(1)
     return landmarks
 
 

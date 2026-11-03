@@ -54,7 +54,8 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   From Face" (ICT identity model, data/faceIdentity.npz: head proportions from the face),
 │   │                           #   aiHead.py: FaceBuilder "Generate AI Head" (TripoSR: neural/triposrRunner.py, its code copied in
 │   │                           #   neural/triposr/tsr (MIT), weights in the models folder; or TRELLIS.2
-│   │                           #   in its own Python: neural/trellis2Runner.py; MICA + FLAME 2020, a non-commercial reference:
+│   │                           #   in its own Python: neural/trellis2Runner.py; flameFit.py: FLAME 2023 Open (CC-BY-4.0) fitted on
+│   │                           #   the face, no network; MICA + FLAME 2020, a non-commercial reference:
 │   │                           #   neural/micaRunner.py) and the head registered on the generated one,
 │   │                           #   faceRig.py: the face rigs fitted by the FaceTracker (BlendshapeRig: the 51 ARKit
 │   │                           #   expression shapes; FaceRig: jaw, brows, lids, lips, cheeks controls),

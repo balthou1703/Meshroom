@@ -768,7 +768,17 @@ correspondances par position, quelle que soit la topologie de la surface génér
 oreilles vers le point le plus proche, glissant sur son plan tangent, seulement à moins de 1 cm et orienté pareil ; une
 déformation lisse, énergie de membrane des arêtes, de plus en plus souple ; pas le crâne ni le cou, dont la base est
 tenue). « AI Face » dose la part de cette déformation sur le visage (0 : celui des photos, 1 : celui de la tête générée ;
-fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). « AI Model » mica est un étalon NON COMMERCIAL (licences
+fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). « AI Model » flame : FLAME 2023 Open (MPI-IS, CC-BY-4.0 : usage commercial permis, en citant FLAME), sans
+réseau (`meshroom/live/flameFit.py`) : sa forme (toutes ses directions, variance unité) et une similitude ajustées sur
+le visage des photos, alternativement ; ses landmarks MediaPipe (son embedding) sur ceux du visage, puis (à partir de
+la 4e itération) chaque sommet du visage sur la surface de FLAME (le long de la normale du sommet le plus proche, à
+moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 par correspondance). La tête FLAME obtenue
+(crâne, oreilles, cou, sans cheveux) est ensuite traitée comme une tête générée (posée par ses landmarks, crâne
+compris). Fichiers à mettre à la main dans `MESHROOM_MODELS_PATH/flame` : le .pkl de « FLAME 2023 Open » et
+`mediapipe_landmark_embedding.npz` (ou dans `mica/`), https://flame.is.tue.mpg.de. Sur une tête synthétique (FLAME
+remplacé par le modèle ICT) : visage à 0,7 mm, crâne et oreilles à 3,6 mm (3,4 mm prédits directement depuis le
+visage).
+« AI Model » mica est un étalon NON COMMERCIAL (licences
 MPI de MICA et de FLAME 2020 : recherche seulement, pas pour la production) : MICA (Zielonka et al.) donne la forme
 d'une tête FLAME complète (visage, crâne, oreilles, cou ; sans cheveux) depuis les visages de toutes les vues, alignés
 comme ArcFace les attend depuis leurs landmarks (`aiHead.arcfaceCrop` : yeux, bout du nez, coins de la bouche sur son

@@ -726,7 +726,7 @@ def test_pinsSolvedOnTheModel():
     assert shifts[:, 0].mean() > 0.3 and shifts[:, 0].std() < 0.25 * shifts[:, 0].mean()
 
 
-@pytest.mark.parametrize("model", ["triposr", "mica"])
+@pytest.mark.parametrize("model", ["triposr", "mica", "flame"])
 def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
     """ "Generate AI Head" (the generator faked: it writes a known head) then "Fit To AI Head" (the landmarker faked):
     the head of the FaceBuilder fitted on it, the AI head shown and output in the face space. """
@@ -759,6 +759,10 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
             return image, buffer, frame
         monkeypatch.setattr(aiHead, "_render", recording)
         monkeypatch.setattr(face, "landmarker", lambda *args, **kwargs: detector)
+        # FLAME: a stand-in of the same statistics as the identity model (no FLAME file here)
+        from meshroom.live import flameFit
+        from tests.test_aiHead import _fakeFlame
+        monkeypatch.setattr(flameFit, "loadModel", lambda folder=None: _fakeFlame())
         size = (640, 480)
         cameras = _headViews((0, 60, -60), size)
         graph = Graph("builderAi")
@@ -780,6 +784,9 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
         if model == "mica":
             # The aligned face crops of the views
             assert len(inputs) == 1 and len(inputs[0]) == 1 and inputs[0][0].shape == (112, 112, 3)
+        elif model == "flame":
+            # Fitted, not generated
+            assert not inputs and np.load(result["aiHeadFile"])["landmarks"].shape == (n, 3)
         else:
             assert len(inputs) == 1 and inputs[0].shape[2] == 4 and 0.0 < inputs[0][:, :, 3].mean() < 1.0
         assert os.path.exists(result["aiHeadFile"]) and json.loads(result["aiHeadFit"])["registration"]
@@ -791,9 +798,13 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
         fitted = builder.nodeDesc.head(ctx)
         from scipy.spatial import cKDTree
         ears = headFit.headRegions(head)["ear"]
-        assert cKDTree(actor).query(fitted.vertices[ears])[0].mean() < 0.2
         aiGeo = Evaluator().data(plan, plan.target, "aiHeadOutput", 1)
-        assert np.median(np.linalg.norm(aiGeo.vertices - actor, axis=1)) < 0.3
+        if model == "flame":
+            # (the actor's ears are out of the statistics of the stand-in: only the head on the fitted one)
+            assert cKDTree(aiGeo.vertices).query(fitted.vertices[ears])[0].mean() < 0.2
+        else:
+            assert cKDTree(actor).query(fitted.vertices[ears])[0].mean() < 0.2
+            assert np.median(np.linalg.norm(aiGeo.vertices - actor, axis=1)) < 0.3
         assert Evaluator().render(plan, 1).rgba()[:, :, :3].max() > 0
         assert builder.nodeDesc.runAction("clearHead", context)["aiHeadFit"] == ""
     finally:

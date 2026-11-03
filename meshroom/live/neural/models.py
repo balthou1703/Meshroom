@@ -9,6 +9,7 @@ Weights are read from the folder of MESHROOM_MODELS_PATH (never downloaded while
     <models>/mediapipe/               MediaPipe Face Landmarker, multiclass selfie segmenter (FaceTracker, FaceBuilder)
     <models>/depthanything/           Depth Anything V2 Small (transformers format): depth of the FaceBuilder views
     <models>/triposr/                 TripoSR (config.yaml, model.ckpt, the config of its DINO encoder): AI head
+    <models>/flame/                   FLAME 2023 Open (.pkl) and its MediaPipe landmark embedding: AI head (CC-BY-4.0)
     <models>/mica/                    MICA (mica.tar) and FLAME 2020 (generic_model.pkl): AI head, non-commercial
 
 Fill it once, on a machine with internet access: python -m meshroom.live.neural.download --path <models> [names]
@@ -77,6 +78,10 @@ MODELS = {
                       "triposr/model.ckpt": "https://huggingface.co/stabilityai/TripoSR/resolve/main/model.ckpt",
                       "triposr/dino-vitb16-config.json":
                       "https://huggingface.co/facebook/dino-vitb16/resolve/main/config.json"}),
+    "flame": Model("flame", "FLAME 2023 Open (FaceBuilder: Generate AI Head, fitted on the face): flame2023_Open.pkl "
+                   "and mediapipe_landmark_embedding.npz from https://flame.is.tue.mpg.de (an account), into "
+                   "<models>/flame by hand", "numpy", "numpy", "CC-BY-4.0 (attribution: MPI-IS, FLAME)",
+                   ["flame/flame2023_Open.pkl", "flame/mediapipe_landmark_embedding.npz"], {}),
     "mica": Model("mica", "MICA + FLAME 2020 (FaceBuilder: Generate AI Head, a reference): mica.tar from "
                   "https://github.com/Zielon/MICA (install.sh), generic_model.pkl from FLAME2020.zip "
                   "(https://flame.is.tue.mpg.de, an account), both into <models>/mica by hand", "torch", "torch",

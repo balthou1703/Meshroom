@@ -315,3 +315,49 @@ def test_mediapipeLandmarksOnFlame(tmp_path):
     assert np.isnan(landmarks[0]).all() and micaRunner.mediapipeLandmarks(vertices, faces, str(tmp_path / "no")) is None
     np.savez(tmp_path / "head.npz", vertices=vertices, faces=faces, landmarks=landmarks)
     np.testing.assert_allclose(aiHead.storedLandmarks(str(tmp_path / "head.npz"))[33], landmarks[33])
+
+
+def _fakeFlame(seed=0):
+    """ A FLAME stand-in: the canonical head in meters, the identity modes as its directions, MediaPipe landmarks on
+    some of its vertices (the embedding: a triangle with the vertex as its first corner). """
+    from meshroom.live import flameFit
+    head = face.canonicalHead()
+    triangles = head.triangles()
+    rng = np.random.default_rng(seed)
+    indices = np.sort(rng.choice(face.MESH_VERTICES, 105, replace=False))
+    faces, weights = [], []
+    for index in indices:
+        triangle = int(np.where((triangles == index).any(1))[0][0])
+        corner = int(np.where(triangles[triangle] == index)[0][0])
+        w = np.zeros(3)
+        w[corner] = 1.0
+        faces.append(triangle)
+        weights.append(w)
+    modes = headFit.identityModel()
+    return flameFit.FlameModel(head.vertices / 100.0, np.moveaxis(modes, 0, 2) / 100.0, triangles,
+                               (np.array(faces), np.array(weights), indices))
+
+
+def test_flameFittedOnTheFace():
+    """ FLAME (a stand-in of the same statistics) fitted on a face of the FaceBuilder, turned, moved and scaled: the
+    whole head found, in the space of the face. """
+    from meshroom.live import flameFit
+    model = _fakeFlame()
+    n = face.MESH_VERTICES
+    rest = face.canonicalHead().vertices
+    actor = _actor(6, out=0.0, back=0.0)
+    angle = np.radians(10.0)
+    rotation = np.array([[np.cos(angle), 0, np.sin(angle)], [0, 1, 0], [-np.sin(angle), 0, np.cos(angle)]])
+    placed = 1.1 * actor @ rotation.T + np.array([1.0, -2.0, 0.5])
+    fit = flameFit.fitFlame(model, placed[:n])
+    regions = headFit.headRegions(face.canonicalHead())
+    head = regions["ear"] | regions["skull"]
+    error = np.linalg.norm(fit["vertices"] - placed, axis=1)
+    predicted = headFit.identityHead(rest, actor[:n], headFit.predictIdentity(actor[:n], rest))
+    errorPredicted = 1.1 * np.linalg.norm(predicted - actor, axis=1)
+    print(f"FLAME fit: face {error[:n].mean():.3f} cm, head {error[head].mean():.3f} cm "
+          f"(identity from the face: {errorPredicted[head].mean():.3f})")
+    assert error[:n].mean() < 0.15 and error[head].mean() < 1.2 * errorPredicted[head].mean() + 0.05
+    seen = np.isfinite(fit["landmarks"]).all(1)
+    assert seen.sum() == 105
+    np.testing.assert_allclose(fit["landmarks"][seen], fit["vertices"][np.where(seen)[0]], atol=1e-9)

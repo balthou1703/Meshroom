@@ -30,6 +30,8 @@ MODELS = {
     "trellis2": {"runner": "trellis2Runner.py", "python": "MESHROOM_TRELLIS2_PYTHON", "root": "MESHROOM_TRELLIS2_ROOT",
                  "label": "TRELLIS.2"},
     # A reference (non-commercial): a FLAME head from aligned crops of all the views, without hair
+    # Commercial use (CC-BY-4.0): FLAME 2023 Open fitted on the face (flameFit, no network), without hair
+    "flame": {"runner": "", "python": "", "root": "", "label": "FLAME 2023 Open", "fit": True, "hair": False},
     "mica": {"runner": "micaRunner.py", "python": "MESHROOM_MICA_PYTHON", "root": "", "label": "MICA (FLAME)",
              "crops": True, "hair": False},
 }
