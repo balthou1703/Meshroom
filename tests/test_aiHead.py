@@ -198,3 +198,44 @@ def test_earsUnderTheHairOfTheGeneratedHeadStay():
     predicted = headFit.identityHead(rest, actor[:n], headFit.predictIdentity(actor[:n], rest))
     moved = np.linalg.norm(result - predicted, axis=1)
     assert moved[regions["ear"]].max() < 0.5 and moved[regions["skull"]].max() < 0.5
+
+
+def test_warpOntoTheGeneratedHead():
+    """ The head warped onto the generated surface (non-rigid ICP): its face and ears on it, "AI Face" dosing the face,
+    the base of the neck held, the warp smooth. """
+    from scipy.spatial import cKDTree
+    head = face.canonicalHead()
+    rest = head.vertices
+    n = face.MESH_VERTICES
+    triangles = head.triangles()
+    actor = _actor(5)
+    # The face fitted on the photos: the actor's, a bit wider (what the generated head corrects)
+    photoFace = actor[:n] * np.array([1.06, 1.0, 1.0])
+    registration = aiHead.registerHead(rest, head.topology, actor, triangles, actor[:n], faceTarget=photoFace)
+    start = headFit.straightNeck(aiHead.registeredHead(rest, registration))
+    data, fixed = aiHead.warpWeights(rest)
+    moves = aiHead.warpOntoSurface(start, triangles, actor, triangles, data, fixed)
+    registration["warp"] = {int(v): list(moves[v]) for v in range(len(rest))}
+    surface = cKDTree(actor)
+    regions = headFit.headRegions(head)
+    full = aiHead.warpedHead(start, registration, aiFace=1.0)
+    none = aiHead.warpedHead(start, registration, aiFace=0.0)
+    actorNormals = aiHead.vertexNormals(actor, triangles)
+
+    def toSurface(points):
+        # Point to plane: the distance to the tangent plane of the nearest point
+        _, index = surface.query(points)
+        return np.abs(((points - actor[index]) * actorNormals[index]).sum(1))
+    print(f"face to the generated surface: {toSurface(start[:n]).mean():.3f} -> {toSurface(full[:n]).mean():.3f} cm")
+    assert toSurface(full[:n]).mean() < 0.4 * toSurface(start[:n]).mean()
+    assert surface.query(full[regions["ear"]])[0].mean() < 0.15
+    np.testing.assert_allclose(none[:n][face.headMobility(head)[:n] == 0], photoFace[face.headMobility(head)[:n] == 0],
+                               atol=1e-9)
+    neck = regions["neck"]
+    base = neck & (rest[:, 1] < rest[neck, 1].min() + 0.3)
+    assert np.linalg.norm(moves[base], axis=1).max() < 0.05
+    # Smooth: no triangle turned over
+    def normals(points):
+        a, b, c = (points[triangles[:, i]] for i in range(3))
+        return np.cross(b - a, c - a)
+    assert ((normals(full) * normals(start)).sum(1) > 0).mean() > 0.995

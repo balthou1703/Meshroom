@@ -518,3 +518,96 @@ def registeredHead(rest: np.ndarray, registration: dict) -> np.ndarray:
     weight = headFit.neckIdentityWeight(rest)
     weight = np.clip((weight - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)[:, None]
     return followed + weight * (vertices - followed)
+
+
+# The whole head onto the generated one: a smooth warp (non-rigid ICP), the correspondence by position
+
+def _edgeLaplacian(triangles: np.ndarray, count: int):
+    """ The graph Laplacian (sparse, count x count) of the edges of triangles. """
+    from scipy import sparse
+    edges = np.unique(np.sort(np.r_[triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]], axis=1), axis=0)
+    adjacency = sparse.coo_matrix((np.ones(2 * len(edges)), (np.r_[edges[:, 0], edges[:, 1]],
+                                                             np.r_[edges[:, 1], edges[:, 0]])), shape=(count, count)).tocsr()
+    return (sparse.diags(np.asarray(adjacency.sum(1)).ravel()) - adjacency).tocsr()
+
+
+def warpOntoSurface(vertices: np.ndarray, triangles: np.ndarray, aiVertices: np.ndarray, aiTriangles: np.ndarray,
+                    dataWeights: np.ndarray, fixed: np.ndarray, stiffness=(30.0, 12.0, 5.0, 2.0), iterations: int = 3,
+                    maxDistance: float = 1.0, cancel=None, progress=None) -> np.ndarray:
+    """
+    The moves (n, 3) of the vertices of a head that put it onto a surface (non-rigid ICP: the correspondences by
+    position, whatever the topology of the surface): each vertex with a data weight toward the nearest point of the
+    surface (on its tangent plane: free to slide along it; only near enough and facing the same way), the moves smooth
+    (the membrane energy of the edges, `stiffness` lowered from step to step), `fixed` vertices (weights) held in place.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import splu
+    from scipy.spatial import cKDTree
+    vertices = np.asarray(vertices, dtype=np.float64)
+    count = len(vertices)
+    laplacian = _edgeLaplacian(np.asarray(triangles, dtype=np.int64), count)
+    aiVertices = np.asarray(aiVertices, dtype=np.float64)
+    aiNormals = vertexNormals(aiVertices, aiTriangles)
+    tree = cKDTree(aiVertices)
+    moves = np.zeros_like(vertices)
+    dataWeights = np.asarray(dataWeights, dtype=np.float64)
+    fixed = np.asarray(fixed, dtype=np.float64)
+    steps = len(stiffness) * iterations
+    done = 0
+    for alpha in stiffness:
+        for _ in range(iterations):
+            if cancel:
+                cancel()
+            current = vertices + moves
+            normals = vertexNormals(current, triangles)
+            targets, targetNormals, valid = _closest(tree, aiVertices, aiNormals, current, normals, maxDistance)
+            # On the tangent plane of the nearest point
+            along = ((targets - current) * targetNormals).sum(1)
+            wanted = current + along[:, None] * targetNormals
+            weights = np.where(valid, dataWeights, 0.0)
+            # (weights + fixed + alpha L) (moves) = weights (wanted - vertices)
+            system = (sparse.diags(weights + fixed) + alpha * laplacian).tocsc()
+            solver = splu(system + sparse.identity(count, format="csc") * 1e-8)
+            right = weights[:, None] * (wanted - vertices)
+            moves = np.stack([solver.solve(right[:, axis]) for axis in range(3)], axis=1)
+            done += 1
+            if progress:
+                progress(done / float(steps))
+    return moves
+
+
+def warpWeights(rest: np.ndarray, faceWeight: float = 1.0):
+    """
+    (data weights, fixed weights) of warpOntoSurface for a head of the FaceBuilder: the face and the ears drawn to the
+    generated surface (the face by `faceWeight`), not the skull (under the hair of the generated head) nor the neck,
+    whose base is held.
+    """
+    from . import headFit
+    geo = scene3d.GeoData(rest)
+    regions = headFit.headRegions(geo)
+    data = np.zeros(len(rest))
+    data[:face.MESH_VERTICES] = faceWeight
+    data[regions["ear"]] = 1.0
+    neck = headFit.neckIdentityWeight(rest)
+    neck = np.clip((neck - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)
+    fixed = np.where(regions["neck"], 100.0 * (1.0 - neck) ** 2, 0.0)
+    return data, fixed
+
+
+def faceBlend(count: int, aiFace: float) -> np.ndarray:
+    """ (n,): how much of the warp onto the generated head applies ("AI Face"): `aiFace` on the face, all of it away
+    from it, fading over 2 cm from the face oval. """
+    mobility = face.headMobility(face.canonicalHead()) if count == len(face.canonicalHead().vertices) else np.ones(count)
+    return aiFace + (1.0 - aiFace) * mobility
+
+
+def warpedHead(vertices: np.ndarray, registration: dict, aiFace: float = 1.0) -> np.ndarray:
+    """ The head (vertices: registeredHead, its neck straight) with the warp onto the generated head of the
+    registration ("warp": {vertex: move}), its face part by `aiFace`. """
+    warp = registration.get("warp")
+    if not warp:
+        return vertices
+    moves = np.zeros_like(vertices)
+    for vertex, move in warp.items():
+        moves[int(vertex)] = move
+    return vertices + faceBlend(len(vertices), float(aiFace))[:, None] * moves

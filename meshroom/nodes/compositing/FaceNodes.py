@@ -988,6 +988,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
                                          "then the head on it: the face on its eyes, nose and mouth, the proportions "
                                          "and the ears on its surface."),
+        desc.FloatParam(name="aiFace", label="AI Face", value=0.5, range=(0.0, 1.0, 0.05),
+                        description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
+                                    "0: the face fitted on the photos (finer), 1: that of the AI head. The ears always "
+                                    "follow it."),
         desc.BoolParam(name="useAiHead", label="Head From AI", value=True,
                        description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),
         desc.StringParam(name="aiHeadFit", label="AI Head Fit", value="", advanced=True,
@@ -1101,8 +1105,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         elif self.aiRegistration(ctx, original) is not None:
             # The head fitted to the AI head ("Fit To AI Head")
             from meshroom.live import aiHead, headFit
-            fitted = scene3d.GeoData(headFit.straightNeck(aiHead.registeredHead(original.vertices,
-                                                                                self.aiRegistration(ctx, original))),
+            registration = self.aiRegistration(ctx, original)
+            fitted = scene3d.GeoData(aiHead.warpedHead(headFit.straightNeck(aiHead.registeredHead(original.vertices,
+                                                                                               registration)),
+                                                       registration, ctx.value("aiFace")),
                                      name="head", topology=original.topology)
         elif self.usesIdentity(ctx, original):
             # The proportions of the whole head from its face (the identity model), or fitted on the views
@@ -1523,7 +1529,18 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             original.vertices, original.topology, aiHead.transform(vertices, matrix), triangles,
             aiHead.transform(landmarks, matrix), faceTarget=faceVertices, earDetail=context.value("aiModel") == "trellis2",
             cancel=context.checkCancelled,
-            progress=lambda done: context.progress(start + (0.3 + 0.7 * done) * (1 - start), "Fit the head"))
+            progress=lambda done: context.progress(start + (0.3 + 0.3 * done) * (1 - start), "Fit the head"))
+        # Then the whole head onto it: a smooth warp, the face and the ears to its surface ("AI Face" doses the face)
+        from meshroom.live import headFit
+        start2 = start + 0.6 * (1 - start)
+        head = headFit.straightNeck(aiHead.registeredHead(original.vertices, registration))
+        data, fixed = aiHead.warpWeights(original.vertices)
+        moves = aiHead.warpOntoSurface(head, original.triangles(), aiHead.transform(vertices, matrix), triangles, data,
+                                       fixed, cancel=context.checkCancelled,
+                                       progress=lambda done: context.progress(start2 + 0.4 * done * (1 - start),
+                                                                              "Warp the head onto the AI head"))
+        registration["warp"] = {int(v): [round(float(c), 4) for c in moves[v]]
+                                for v in np.where(np.abs(moves).max(axis=1) > 1e-4)[0]}
         fit = {"matrix": [[round(float(v), 7) for v in row] for row in matrix], "registration": registration}
         return {"aiHeadFit": json.dumps(fit)}
 

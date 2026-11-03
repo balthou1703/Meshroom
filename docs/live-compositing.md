@@ -763,7 +763,13 @@ seule. L'identité est ramenée vers celle que le visage prédit (« Head From F
 pas le crâne ; une oreille que la tête générée n'a pas près d'elle (sous ses cheveux : moins de 40 % de ses sommets à
 moins de 1,5 cm de sa surface) n'est pas bougée, une autre de 1,5 cm au plus. Le cou garde sa forme vers sa base (il
 n'y suit que le visage). La surface de TripoSR est lissée (Taubin) dans
-le runner. « Head From AI » : la tête est celle-là ; « Show
+le runner. Enfin la tête entière est déformée sur la surface générée (`aiHead.warpOntoSurface`, ICP non rigide :
+correspondances par position, quelle que soit la topologie de la surface générée ; chaque sommet du visage et des
+oreilles vers le point le plus proche, glissant sur son plan tangent, seulement à moins de 1 cm et orienté pareil ; une
+déformation lisse, énergie de membrane des arêtes, de plus en plus souple ; pas le crâne ni le cou, dont la base est
+tenue). « AI Face » dose la part de cette déformation sur le visage (0 : celui des photos, 1 : celui de la tête générée ;
+fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). Les modèles FLAME (DECA, EMOCA, MICA, SMIRK : poids non
+commerciaux, forme FLAME 2020 non commerciale) ne sont pas utilisés. « Head From AI » : la tête est celle-là ; « Show
 Geometry » : la tête, la tête IA (ombrée, ses couleurs) ou les deux ; sortie « AI Head ». Sur une tête synthétique :
 oreilles à 1 mm de sa surface (5 mm prédites depuis le visage).
  Sur des têtes synthétiques du modèle :
