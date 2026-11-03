@@ -235,6 +235,7 @@ def test_warpOntoTheGeneratedHead():
     base = neck & (rest[:, 1] < rest[neck, 1].min() + 0.3)
     assert np.linalg.norm(moves[base], axis=1).max() < 0.05
     # Smooth: no triangle turned over
+
     def normals(points):
         a, b, c = (points[triangles[:, i]] for i in range(3))
         return np.cross(b - a, c - a)
@@ -298,3 +299,19 @@ def test_micaNetworks():
     mapping = micaRunner._mapping(torch)
     assert set(mapping.state_dict()) >= {"network.0.weight", "network.3.bias", "output.weight"}
     assert mapping(torch.zeros(1, 512)).shape == (1, 300)
+
+
+def test_mediapipeLandmarksOnFlame(tmp_path):
+    """ The MediaPipe landmarks of a FLAME head from its embedding (faces, barycentric coordinates, indices). """
+    from meshroom.live.neural import micaRunner
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], np.float64)
+    faces = np.array([[0, 1, 2], [1, 3, 2]])
+    path = tmp_path / "mediapipe_landmark_embedding.npz"
+    np.savez(path, lmk_face_idx=np.array([0, 1]), lmk_b_coords=np.array([[1, 0, 0], [0.2, 0.3, 0.5]]),
+             landmark_indices=np.array([1, 33]))
+    landmarks = micaRunner.mediapipeLandmarks(vertices, faces, str(path))
+    np.testing.assert_allclose(landmarks[1], (0, 0, 0))
+    np.testing.assert_allclose(landmarks[33], 0.2 * vertices[1] + 0.3 * vertices[3] + 0.5 * vertices[2])
+    assert np.isnan(landmarks[0]).all() and micaRunner.mediapipeLandmarks(vertices, faces, str(tmp_path / "no")) is None
+    np.savez(tmp_path / "head.npz", vertices=vertices, faces=faces, landmarks=landmarks)
+    np.testing.assert_allclose(aiHead.storedLandmarks(str(tmp_path / "head.npz"))[33], landmarks[33])

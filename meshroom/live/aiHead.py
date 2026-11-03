@@ -290,6 +290,17 @@ def readGlb(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return np.concatenate(allVertices), np.concatenate(allTriangles), np.clip(np.concatenate(allColors), 0, 1)
 
 
+def storedLandmarks(path: str) -> Optional[np.ndarray]:
+    """ The 468 MediaPipe landmarks (NaN where unknown) a generated head carries (.npz "landmarks": a FLAME head with
+    its MediaPipe embedding, micaRunner.py), or None. """
+    if not path or not path.lower().endswith(".npz") or not os.path.exists(path):
+        return None
+    data = np.load(path)
+    if "landmarks" not in data:
+        return None
+    return np.asarray(data["landmarks"], dtype=np.float64)
+
+
 def geometry(vertices: np.ndarray, triangles: np.ndarray, name: str = "aiHead") -> scene3d.GeoData:
     triangles = np.asarray(triangles, dtype=np.int64)
     return scene3d.GeoData(vertices, np.full(len(triangles), 3), triangles.ravel(), name=name)

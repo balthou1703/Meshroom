@@ -776,7 +776,9 @@ gabarit 112 × 112) ; l'identité est moyennée sur les vues. Ses réseaux sont 
 `meshroom/live/neural/micaRunner.py` (ArcFace iresnet100, son réseau vers les 300 coefficients de forme de FLAME ; le
 pickle de FLAME lu sans chumpy), rien de son code n'est utilisé ; ses fichiers sont à mettre à la main dans
 `MESHROOM_MODELS_PATH/mica` : `mica.tar` (son `install.sh`, https://github.com/Zielon/MICA) et `generic_model.pkl`
-(FLAME2020.zip, https://flame.is.tue.mpg.de, un compte). Sans cheveux, le crâne de la tête FLAME sert aussi à
+(FLAME2020.zip, https://flame.is.tue.mpg.de, un compte). Avec `mediapipe_landmark_embedding.npz` (le site de FLAME) dans ce dossier,
+les landmarks MediaPipe sont connus sur la tête FLAME : elle est posée sur le visage par eux, sans les chercher sur
+des rendus. Sans cheveux, le crâne de la tête FLAME sert aussi à
 l'ajustement (identité et déformation), et les oreilles sont affinées une à une. « Head From AI » : la tête est celle-là ; « Show
 Geometry » : la tête, la tête IA (ombrée, ses couleurs) ou les deux ; sortie « AI Head ». Sur une tête synthétique :
 oreilles à 1 mm de sa surface (5 mm prédites depuis le visage).

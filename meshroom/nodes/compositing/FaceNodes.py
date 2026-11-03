@@ -1551,7 +1551,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         try:
             vertices, triangles, colors = aiHead.loadMesh(path)
             context.progress(start + 0.05 * (1 - start), "Find the face of the AI head")
-            landmarks = aiHead.findLandmarks(vertices, triangles, colors, cancel=context.checkCancelled)
+            # Known on a FLAME head (its MediaPipe landmark embedding), else found on renders of it
+            landmarks = aiHead.storedLandmarks(path)
+            if landmarks is None or np.isfinite(landmarks).all(1).sum() < 50:
+                landmarks = aiHead.findLandmarks(vertices, triangles, colors, cancel=context.checkCancelled)
         except (aiHead.AIHeadUnavailable, face.FaceUnavailable) as e:
             raise RuntimeError(str(e)) from e
         # On the face fitted on the views (its size and place: those of the cameras)

@@ -9,6 +9,8 @@ nothing of MICA's code is needed; its files, in the models folder (MESHROOM_MODE
 with their licenses:
     mica.tar           the trained weights (https://github.com/Zielon/MICA: install.sh)
     generic_model.pkl  FLAME 2020 (https://flame.is.tue.mpg.de, an account: FLAME2020.zip)
+    mediapipe_landmark_embedding.npz  (optional, the FLAME site) the MediaPipe landmarks on FLAME: the head placed on
+                       the face by them (else its face is found on renders of it)
 
     python micaRunner.py head.npz crop1.png [crop2.png ...]
 
@@ -134,6 +136,29 @@ def loadFlame(path):
             array(data["f"]).astype(np.int64))
 
 
+def mediapipeLandmarks(vertices, faces, path):
+    """ (468, 3): the MediaPipe landmarks on a FLAME head from its MediaPipe landmark embedding (the .npz of the FLAME
+    site: the face and barycentric coordinates of some of them), NaN for the others; None without the file. """
+    import numpy as np
+    if not os.path.isfile(path):
+        return None
+    data = np.load(path, allow_pickle=True)
+
+    def find(*parts):
+        for key in data.files:
+            if all(part in key.lower() for part in parts):
+                return np.asarray(data[key])
+        raise SystemExit(f"micaRunner: {path} has no {'/'.join(parts)} ({data.files})")
+    faceIndices = find("face", "idx").astype(np.int64).ravel()
+    coordinates = find("b_coord").astype(np.float64).reshape(len(faceIndices), 3)
+    indices = find("indices").astype(np.int64).ravel()
+    points = (vertices[faces[faceIndices]] * coordinates[:, :, None]).sum(1)
+    landmarks = np.full((468, 3), np.nan)
+    keep = indices < 468
+    landmarks[indices[keep]] = points[keep]
+    return landmarks
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="MICA: a FLAME head from aligned face crops (non-commercial)")
     parser.add_argument("output", help="the .npz written")
@@ -171,8 +196,13 @@ def main(argv=None):
         identity = torch.nn.functional.normalize(identities.mean(0, keepdim=True), dim=1)
         shape = mapping(identity)[0].numpy().astype(np.float64)
     vertices = (template + shapedirs @ shape) * 100.0
+    extra = {}
+    landmarks = mediapipeLandmarks(vertices, faces, os.path.join(args.models, "mediapipe_landmark_embedding.npz"))
+    if landmarks is not None:
+        extra["landmarks"] = landmarks.astype(np.float32)
+        print(f"[mica] {int(np.isfinite(landmarks).all(1).sum())} MediaPipe landmarks on the head", flush=True)
     np.savez_compressed(args.output, vertices=vertices.astype(np.float32), faces=faces.astype(np.int32),
-                        colors=np.full((len(vertices), 3), 190, np.uint8), shape=shape.astype(np.float32))
+                        colors=np.full((len(vertices), 3), 190, np.uint8), shape=shape.astype(np.float32), **extra)
     print(f"[mica] written {args.output}: {len(vertices)} vertices", flush=True)
 
 
