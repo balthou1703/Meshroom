@@ -759,7 +759,10 @@ FaceBuilder y est ajustée : le visage reste celui ajusté sur les photos (plus 
 points ne servent qu'à la placer ; l'identité (50 modes) et un déplacement de chaque oreille d'un bloc (sa forme
 gardée ; rien sur le visage ni près de son ovale) sur sa surface (point à plan sur les points les plus proches des
 oreilles ; pas le crâne, sous ses cheveux, ni le cou) ; avec TRELLIS.2 (assez fin), chaque oreille est ensuite affinée
-seule. Le cou garde sa forme vers sa base (il n'y suit que le visage). La surface de TripoSR est lissée (Taubin) dans
+seule. L'identité est ramenée vers celle que le visage prédit (« Head From Face ») : les oreilles seules ne tordent
+pas le crâne ; une oreille que la tête générée n'a pas près d'elle (sous ses cheveux : moins de 40 % de ses sommets à
+moins de 1,5 cm de sa surface) n'est pas bougée, une autre de 1,5 cm au plus. Le cou garde sa forme vers sa base (il
+n'y suit que le visage). La surface de TripoSR est lissée (Taubin) dans
 le runner. « Head From AI » : la tête est celle-là ; « Show
 Geometry » : la tête, la tête IA (ombrée, ses couleurs) ou les deux ; sortie « AI Head ». Sur une tête synthétique :
 oreilles à 1 mm de sa surface (5 mm prédites depuis le visage).

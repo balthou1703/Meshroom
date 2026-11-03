@@ -398,8 +398,12 @@ def vertexNormals(vertices, triangles):
     return _vertexNormals(np.asarray(vertices, dtype=np.float64), np.asarray(triangles, dtype=np.int64))
 
 
+# How far an ear may move from where the identity has it (centimeters)
+EAR_MOVE_LIMIT = 1.5
+
+
 def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles: np.ndarray,
-                 landmarks: np.ndarray, iterations: int = 8, maxDistance: float = 2.0, earSmoothing: float = 1.0,
+                 landmarks: np.ndarray, iterations: int = 8, maxDistance: float = 1.5, earSmoothing: float = 1.0,
                  faceTarget: Optional[np.ndarray] = None, earDetail: bool = False, cancel=None, progress=None) -> dict:
     """
     The head of the FaceBuilder on a generated head (aligned on it: face space): its face `faceTarget` (the one fitted
@@ -437,9 +441,13 @@ def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles
         for axis in range(3):
             earColumns[:, axis, 3 * side + axis] = earWeights[:, side]
     jacobian = np.concatenate([jacobian, earColumns], axis=2)
-    prior = np.r_[np.full(len(modes), 1.0), np.full(6, 0.3)]
-    x = np.zeros(jacobian.shape[2])
+    # Toward the proportions the face gives (Head From Face) and the ears where the model has them; regularized enough
+    # that the ears alone (all that is fitted) do not bend the skull
+    center = np.r_[headFit.predictIdentity(faceTarget, rest), np.zeros(6)]
+    prior = np.r_[np.full(len(modes), 1.0), np.full(6, 0.5)]
+    x = center.copy()
     indices = np.where(used)[0]
+    sides = np.sign(face.canonicalHead().vertices[indices, 0]) > 0
     for iteration in range(iterations):
         if cancel:
             cancel()
@@ -447,6 +455,15 @@ def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles
         normals = headFit._vertexNormals(current, triangles)
         targets, targetNormals, valid = _closest(tree, aiVertices, aiNormals, current[indices], normals[indices],
                                                  maxDistance)
+        # An ear the generated head hardly has near (under its hair, or not generated): not moved by it
+        weak = np.ones(len(prior), dtype=bool)
+        weak[:len(modes)] = False
+        for side in range(2):
+            onSide = sides == bool(side)
+            if valid[onSide].mean() < 0.4:
+                valid &= ~onSide
+            else:
+                weak[len(modes) + 3 * side:len(modes) + 3 * side + 3] = False
         if valid.sum() < 20:
             break
         k = indices[valid]
@@ -456,11 +473,13 @@ def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles
         # Robust (Cauchy, 5 mm)
         robust = 1.0 / np.sqrt(1.0 + (rhs / 0.5) ** 2)
         rows, rhs = rows * robust[:, None], rhs * robust
-        damping = 0.02 * len(k) / 100.0
-        lhs = rows.T @ rows + damping * np.diag(prior ** 2)
-        step = np.linalg.solve(lhs, rows.T @ rhs - damping * prior ** 2 * x)
+        damping = max(5.0, 0.1 * len(k))
+        weights = damping * prior ** 2 + np.where(weak, 1e6, 0.0)
+        lhs = rows.T @ rows + np.diag(weights)
+        step = np.linalg.solve(lhs, rows.T @ rhs - weights * (x - center))
         x = x + step
         x[:len(modes)] = np.clip(x[:len(modes)], -headFit.IDENTITY_LIMIT, headFit.IDENTITY_LIMIT)
+        x[len(modes):] = np.clip(x[len(modes):], -EAR_MOVE_LIMIT, EAR_MOVE_LIMIT)
         if progress:
             progress(0.7 * (iteration + 1) / iterations)
         if np.abs(step).max() < 1e-3:

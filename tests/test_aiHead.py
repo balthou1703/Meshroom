@@ -81,7 +81,7 @@ def test_registerOnAGeneratedHead(monkeypatch):
     errorPredicted = surface.query(predicted[ears])[0].mean()
     errorRegistered = surface.query(result[ears])[0].mean()
     print(f"ears: predicted {errorPredicted:.2f} cm, registered {errorRegistered:.2f} cm")
-    assert errorRegistered < 0.3 * errorPredicted and errorRegistered < 0.15
+    assert errorRegistered < 0.5 * errorPredicted and errorRegistered < 0.25
     # The face on the landmarks found
     assert np.median(np.linalg.norm(result[:n] - actor[:n], axis=1)) < 0.3
     # The base of the neck keeps its shape: it only follows the face
@@ -177,3 +177,24 @@ def test_generateRunsItsRunner(tmp_path, monkeypatch):
         raise AssertionError("no error")
     except aiHead.AIHeadUnavailable as e:
         assert "MESHROOM_TRELLIS2_PYTHON" in str(e)
+
+
+def test_earsUnderTheHairOfTheGeneratedHeadStay():
+    """ A generated head whose ears are under a mass of hair (its surface 2.5 cm out around them): the ears are not
+    pulled into it, the skull stays the one the face gives. """
+    head = face.canonicalHead()
+    rest = head.vertices
+    n = face.MESH_VERTICES
+    actor = _actor(4)
+    regions = headFit.headRegions(head)
+    normals = aiHead.vertexNormals(actor, head.triangles())
+    around = np.zeros(len(actor))
+    for side in (-1, 1):
+        center = actor[regions["ear"] & (np.sign(rest[:, 0]) == side)].mean(0)
+        around = np.maximum(around, np.exp(-((actor - center) ** 2).sum(1) / 4.0 ** 2))
+    generated = actor + 2.5 * around[:, None] * normals
+    registration = aiHead.registerHead(rest, head.topology, generated, head.triangles(), actor[:n], faceTarget=actor[:n])
+    result = aiHead.registeredHead(rest, registration)
+    predicted = headFit.identityHead(rest, actor[:n], headFit.predictIdentity(actor[:n], rest))
+    moved = np.linalg.norm(result - predicted, axis=1)
+    assert moved[regions["ear"]].max() < 0.5 and moved[regions["skull"]].max() < 0.5
