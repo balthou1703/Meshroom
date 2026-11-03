@@ -768,8 +768,16 @@ correspondances par position, quelle que soit la topologie de la surface génér
 oreilles vers le point le plus proche, glissant sur son plan tangent, seulement à moins de 1 cm et orienté pareil ; une
 déformation lisse, énergie de membrane des arêtes, de plus en plus souple ; pas le crâne ni le cou, dont la base est
 tenue). « AI Face » dose la part de cette déformation sur le visage (0 : celui des photos, 1 : celui de la tête générée ;
-fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). Les modèles FLAME (DECA, EMOCA, MICA, SMIRK : poids non
-commerciaux, forme FLAME 2020 non commerciale) ne sont pas utilisés. « Head From AI » : la tête est celle-là ; « Show
+fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). « AI Model » mica est un étalon NON COMMERCIAL (licences
+MPI de MICA et de FLAME 2020 : recherche seulement, pas pour la production) : MICA (Zielonka et al.) donne la forme
+d'une tête FLAME complète (visage, crâne, oreilles, cou ; sans cheveux) depuis les visages de toutes les vues, alignés
+comme ArcFace les attend depuis leurs landmarks (`aiHead.arcfaceCrop` : yeux, bout du nez, coins de la bouche sur son
+gabarit 112 × 112) ; l'identité est moyennée sur les vues. Ses réseaux sont refaits dans
+`meshroom/live/neural/micaRunner.py` (ArcFace iresnet100, son réseau vers les 300 coefficients de forme de FLAME ; le
+pickle de FLAME lu sans chumpy), rien de son code n'est utilisé ; ses fichiers sont à mettre à la main dans
+`MESHROOM_MODELS_PATH/mica` : `mica.tar` (son `install.sh`, https://github.com/Zielon/MICA) et `generic_model.pkl`
+(FLAME2020.zip, https://flame.is.tue.mpg.de, un compte). Sans cheveux, le crâne de la tête FLAME sert aussi à
+l'ajustement (identité et déformation), et les oreilles sont affinées une à une. « Head From AI » : la tête est celle-là ; « Show
 Geometry » : la tête, la tête IA (ombrée, ses couleurs) ou les deux ; sortie « AI Head ». Sur une tête synthétique :
 oreilles à 1 mm de sa surface (5 mm prédites depuis le visage).
  Sur des têtes synthétiques du modèle :

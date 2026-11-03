@@ -9,6 +9,7 @@ Weights are read from the folder of MESHROOM_MODELS_PATH (never downloaded while
     <models>/mediapipe/               MediaPipe Face Landmarker, multiclass selfie segmenter (FaceTracker, FaceBuilder)
     <models>/depthanything/           Depth Anything V2 Small (transformers format): depth of the FaceBuilder views
     <models>/triposr/                 TripoSR (config.yaml, model.ckpt, the config of its DINO encoder): AI head
+    <models>/mica/                    MICA (mica.tar) and FLAME 2020 (generic_model.pkl): AI head, non-commercial
 
 Fill it once, on a machine with internet access: python -m meshroom.live.neural.download --path <models> [names]
 """
@@ -76,6 +77,11 @@ MODELS = {
                       "triposr/model.ckpt": "https://huggingface.co/stabilityai/TripoSR/resolve/main/model.ckpt",
                       "triposr/dino-vitb16-config.json":
                       "https://huggingface.co/facebook/dino-vitb16/resolve/main/config.json"}),
+    "mica": Model("mica", "MICA + FLAME 2020 (FaceBuilder: Generate AI Head, a reference): mica.tar from "
+                  "https://github.com/Zielon/MICA (install.sh), generic_model.pkl from FLAME2020.zip "
+                  "(https://flame.is.tue.mpg.de, an account), both into <models>/mica by hand", "torch", "torch",
+                  "MPI non-commercial (MICA, FLAME 2020)", ["mica/mica.tar", "mica/generic_model.pkl"], {},
+                  nonCommercial=True),
     "depthanything": Model("depthanything", "Depth Anything V2 Small (FaceBuilder: depth of the views)", "transformers",
                            "transformers", "Apache-2.0",
                            ["depthanything/config.json", "depthanything/model.safetensors",

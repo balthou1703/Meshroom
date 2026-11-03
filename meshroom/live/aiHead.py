@@ -29,7 +29,57 @@ MODELS = {
                 "label": "TripoSR"},
     "trellis2": {"runner": "trellis2Runner.py", "python": "MESHROOM_TRELLIS2_PYTHON", "root": "MESHROOM_TRELLIS2_ROOT",
                  "label": "TRELLIS.2"},
+    # A reference (non-commercial): a FLAME head from aligned crops of all the views, without hair
+    "mica": {"runner": "micaRunner.py", "python": "MESHROOM_MICA_PYTHON", "root": "", "label": "MICA (FLAME)",
+             "crops": True, "hair": False},
 }
+
+# The ArcFace template: eyes (image left, right), nose tip, mouth corners in a 112 x 112 crop
+ARCFACE_TEMPLATE = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655],
+                             [70.7299, 92.2041]])
+
+
+def arcfaceKeypoints(landmarks: np.ndarray) -> np.ndarray:
+    """ The 5 points of ArcFace (5, 2) from MediaPipe landmarks (n, 2) in image pixels (rows from the top): the eye
+    centers (irises when there are 478 landmarks), the nose tip, the mouth corners; image left first. """
+    landmarks = np.asarray(landmarks, dtype=np.float64)
+    if len(landmarks) >= 478:
+        eyes = [landmarks[468], landmarks[473]]
+    else:
+        eyes = [landmarks[[33, 133]].mean(0), landmarks[[362, 263]].mean(0)]
+    points = np.array([eyes[0], eyes[1], landmarks[1], landmarks[61], landmarks[291]])
+    # Image left first (whatever the side MediaPipe calls them)
+    if points[0, 0] > points[1, 0]:
+        points[[0, 1]] = points[[1, 0]]
+    if points[3, 0] > points[4, 0]:
+        points[[3, 4]] = points[[4, 3]]
+    return points
+
+
+def arcfaceCrop(rgb: np.ndarray, keypoints: np.ndarray, size: int = 112) -> np.ndarray:
+    """ The 112 x 112 crop (uint8) of an image (h, w, 3) in [0, 1] that ArcFace expects: the similarity putting the
+    keypoints (arcfaceKeypoints) on its template, bilinear. """
+    from scipy import ndimage
+    template = ARCFACE_TEMPLATE * size / 112.0
+    # The similarity from the template to the image (to sample the image at each pixel of the crop)
+    scale, rotation, translation = _similarity2(template, np.asarray(keypoints, dtype=np.float64))
+    rows, columns = np.mgrid[0:size, 0:size].astype(np.float64)
+    crop = np.stack([columns.ravel(), rows.ravel()], axis=1)
+    source = scale * crop @ rotation.T + translation
+    out = np.stack([ndimage.map_coordinates(np.asarray(rgb[:, :, c], dtype=np.float64), [source[:, 1], source[:, 0]],
+                                            order=1, mode="nearest") for c in range(3)], axis=1)
+    return (np.clip(out.reshape(size, size, 3), 0, 1) * 255).astype(np.uint8)
+
+
+def _similarity2(source, target):
+    """ (scale, rotation (2, 2), translation): target ~ scale * rotation @ source + translation (2D Umeyama). """
+    ms, mt = source.mean(0), target.mean(0)
+    s, t = source - ms, target - mt
+    u, sigma, vt = np.linalg.svd(t.T @ s)
+    d = np.diag([1.0, np.sign(np.linalg.det(u @ vt))])
+    rotation = u @ d @ vt
+    scale = float(np.trace(np.diag(sigma) @ d) / max((s ** 2).sum(), 1e-12))
+    return scale, rotation, mt - scale * rotation @ ms
 
 
 def runnerPath(model: str = "trellis2") -> str:
@@ -74,9 +124,17 @@ def generate(rgba: np.ndarray, output: str, model: str = "triposr", python: Opti
         raise AIHeadUnavailable(f"{spec['label']} is not set up: set {spec['root']} to the clone of its repository; see "
                                 "docs/live-compositing.md.")
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    imagePath = os.path.splitext(output)[0] + "_input.png"
-    writePngRGBA(imagePath, (np.clip(rgba, 0, 1) * 255).astype(np.uint8))
-    command = [python or sys.executable, runnerPath(model), imagePath, output] + (["--root", root] if root else [])
+    if spec.get("crops"):
+        # Several aligned crops (uint8): the runner takes the output first, then them
+        paths = []
+        for index, crop in enumerate(rgba):
+            paths.append(os.path.splitext(output)[0] + f"_crop{index}.png")
+            writePngRGBA(paths[-1], np.asarray(crop, dtype=np.uint8))
+        command = [python or sys.executable, runnerPath(model), output] + paths
+    else:
+        imagePath = os.path.splitext(output)[0] + "_input.png"
+        writePngRGBA(imagePath, (np.clip(rgba, 0, 1) * 255).astype(np.uint8))
+        command = [python or sys.executable, runnerPath(model), imagePath, output] + (["--root", root] if root else [])
     # Meshroom's own Python keeps its environment (its packages); another one gets its own
     environment = runnerEnvironment(python) if python else dict(os.environ)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment)
@@ -404,7 +462,8 @@ EAR_MOVE_LIMIT = 1.5
 
 def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles: np.ndarray,
                  landmarks: np.ndarray, iterations: int = 8, maxDistance: float = 1.5, earSmoothing: float = 1.0,
-                 faceTarget: Optional[np.ndarray] = None, earDetail: bool = False, cancel=None, progress=None) -> dict:
+                 faceTarget: Optional[np.ndarray] = None, earDetail: bool = False, hair: bool = True, cancel=None,
+                 progress=None) -> dict:
     """
     The head of the FaceBuilder on a generated head (aligned on it: face space): its face `faceTarget` (the one fitted
     on the photos: finer than the generated one) or the landmarks found on it, its identity (the proportions of the
@@ -430,7 +489,8 @@ def registerHead(rest: np.ndarray, topology, aiVertices: np.ndarray, aiTriangles
     geo = scene3d.GeoData(rest, topology=topology)
     triangles = geo.triangles()
     regions = headFit.headRegions(geo)
-    used = regions["ear"]
+    # The skull only on a generated head without hair (FLAME)
+    used = regions["ear"] | (regions["skull"] if not hair else np.zeros(len(rest), dtype=bool))
     modes = headFit.identityModel()
     origin = headFit.identityHead(rest, faceTarget, np.zeros(len(modes)))
     jacobian = np.stack([headFit.identityHead(rest, faceTarget, np.eye(len(modes))[k]) - origin
@@ -576,11 +636,11 @@ def warpOntoSurface(vertices: np.ndarray, triangles: np.ndarray, aiVertices: np.
     return moves
 
 
-def warpWeights(rest: np.ndarray, faceWeight: float = 1.0):
+def warpWeights(rest: np.ndarray, faceWeight: float = 1.0, skull: bool = False):
     """
     (data weights, fixed weights) of warpOntoSurface for a head of the FaceBuilder: the face and the ears drawn to the
-    generated surface (the face by `faceWeight`), not the skull (under the hair of the generated head) nor the neck,
-    whose base is held.
+    generated surface (the face by `faceWeight`), not the skull (under the hair of the generated head; with `skull`:
+    a head without hair, e.g. FLAME) nor the neck, whose base is held.
     """
     from . import headFit
     geo = scene3d.GeoData(rest)
@@ -588,6 +648,8 @@ def warpWeights(rest: np.ndarray, faceWeight: float = 1.0):
     data = np.zeros(len(rest))
     data[:face.MESH_VERTICES] = faceWeight
     data[regions["ear"]] = 1.0
+    if skull:
+        data[regions["skull"]] = 1.0
     neck = headFit.neckIdentityWeight(rest)
     neck = np.clip((neck - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)
     fixed = np.where(regions["neck"], 100.0 * (1.0 - neck) ** 2, 0.0)

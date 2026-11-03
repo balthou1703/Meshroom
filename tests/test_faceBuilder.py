@@ -726,7 +726,8 @@ def test_pinsSolvedOnTheModel():
     assert shifts[:, 0].mean() > 0.3 and shifts[:, 0].std() < 0.25 * shifts[:, 0].mean()
 
 
-def test_faceBuilderAiHead(monkeypatch, tmp_path):
+@pytest.mark.parametrize("model", ["triposr", "mica"])
+def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
     """ "Generate AI Head" (the generator faked: it writes a known head) then "Fit To AI Head" (the landmarker faked):
     the head of the FaceBuilder fitted on it, the AI head shown and output in the face space. """
     from tests.utils import registerNodeDesc, unregisterNodeDesc
@@ -762,19 +763,25 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path):
         cameras = _headViews((0, 60, -60), size)
         graph = Graph("builderAi")
         plate = graph.addNewNode("LabelPlate", view=0)
-        builder = graph.addNewNode("FaceBuilder")
+        builder = graph.addNewNode("FaceBuilder", aiModel=model)
         graph.addEdge(plate.output, builder.input)
-        # The face of the views: the actor's
+        # The face of the views: the actor's (its landmarks: its face seen by the camera, normalized)
         builder.faceShape.value = face.dumpShape(actor[:n] - head.vertices[:n])
+        xy, _, _ = cameras[0].project(actor[:n], *size)
+        landmarks = np.c_[xy[:, 0] / size[0], (size[1] - xy[:, 1]) / size[1]].tolist()
         builder.views.value = json.dumps([{"input": "input", "frame": 1, "still": True, "size": list(size),
-                                           "landmarks": [], "focal": 50.0,
+                                           "landmarks": landmarks, "focal": 50.0,
                                            "cameraToFace": [float(v) for v in cameras[0].matrix.ravel()]}])
         graph.update()
         values = {attr.name: _snapshotValue(attr) for attr in builder.attributes
                   if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
         context = ActionContext(values, Evaluator(), buildPlan(plate), 1, nodePlan=buildPlan(builder))
         result = builder.nodeDesc.runAction("generateAiHead", context)
-        assert len(inputs) == 1 and inputs[0].shape[2] == 4 and 0.0 < inputs[0][:, :, 3].mean() < 1.0
+        if model == "mica":
+            # The aligned face crops of the views
+            assert len(inputs) == 1 and len(inputs[0]) == 1 and inputs[0][0].shape == (112, 112, 3)
+        else:
+            assert len(inputs) == 1 and inputs[0].shape[2] == 4 and 0.0 < inputs[0][:, :, 3].mean() < 1.0
         assert os.path.exists(result["aiHeadFile"]) and json.loads(result["aiHeadFit"])["registration"]
         builder.aiHeadFile.value, builder.aiHeadFit.value = result["aiHeadFile"], result["aiHeadFit"]
         builder.showGeometry.value = "both"

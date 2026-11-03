@@ -239,3 +239,62 @@ def test_warpOntoTheGeneratedHead():
         a, b, c = (points[triangles[:, i]] for i in range(3))
         return np.cross(b - a, c - a)
     assert ((normals(full) * normals(start)).sum(1) > 0).mean() > 0.995
+
+
+def test_arcfaceCrop():
+    """ The crop ArcFace expects: the 5 points of the face on its template. """
+    image = np.zeros((300, 400, 3))
+    keypoints = np.array([[150.0, 120.0], [230.0, 118.0], [190.0, 165.0], [158.0, 205.0], [224.0, 204.0]])
+    for x, y in keypoints:
+        image[int(y) - 2:int(y) + 3, int(x) - 2:int(x) + 3] = 1.0
+    crop = aiHead.arcfaceCrop(image, keypoints)
+    assert crop.shape == (112, 112, 3) and crop.dtype == np.uint8
+    for x, y in aiHead.ARCFACE_TEMPLATE:
+        assert crop[int(round(y)), int(round(x))].max() > 100
+    # MediaPipe landmarks: eyes, nose, mouth corners, image left first
+    landmarks = np.zeros((478, 2))
+    landmarks[473], landmarks[468], landmarks[1], landmarks[291], landmarks[61] = keypoints
+    np.testing.assert_allclose(aiHead.arcfaceKeypoints(landmarks), keypoints)
+
+
+def test_flameOfAChumpyPickle(monkeypatch, tmp_path):
+    """ The FLAME pickle (chumpy arrays) read without chumpy. """
+    import pickle
+    import sys
+    import types
+    from meshroom.live.neural import micaRunner
+    module = types.ModuleType("chumpy.ch")
+
+    class Ch:
+        def __init__(self, x):
+            self.x = x
+    Ch.__module__, Ch.__qualname__ = "chumpy.ch", "Ch"
+    module.Ch = Ch
+    monkeypatch.setitem(sys.modules, "chumpy", types.ModuleType("chumpy"))
+    monkeypatch.setitem(sys.modules, "chumpy.ch", module)
+    template = np.arange(12.0).reshape(4, 3)
+    shapedirs = np.ones((4, 3, 400))
+    path = tmp_path / "generic_model.pkl"
+    with open(path, "wb") as f:
+        pickle.dump({"v_template": Ch(template), "shapedirs": Ch(shapedirs), "f": np.array([[0, 1, 2], [1, 2, 3]])}, f)
+    monkeypatch.delitem(sys.modules, "chumpy.ch")
+    monkeypatch.delitem(sys.modules, "chumpy")
+    loaded, dirs, faces = micaRunner.loadFlame(str(path))
+    np.testing.assert_array_equal(loaded, template)
+    assert dirs.shape == (4, 3, 300) and faces.shape == (2, 3)
+
+
+def test_micaNetworks():
+    """ The networks of MICA rebuilt: the module names of its weights, the shapes of its outputs. """
+    import pytest
+    torch = pytest.importorskip("torch")
+    from meshroom.live.neural import micaRunner
+    arcface = micaRunner._iresnet100(torch).eval()
+    names = set(arcface.state_dict())
+    assert {"conv1.weight", "layer1.0.downsample.0.weight", "layer3.29.conv2.weight", "fc.weight",
+            "features.running_mean"} <= names
+    with torch.no_grad():
+        assert arcface(torch.zeros(1, 3, 112, 112)).shape == (1, 512)
+    mapping = micaRunner._mapping(torch)
+    assert set(mapping.state_dict()) >= {"network.0.weight", "network.3.bias", "output.weight"}
+    assert mapping(torch.zeros(1, 512)).shape == (1, 300)
