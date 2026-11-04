@@ -236,10 +236,67 @@ def denseCorrespondence(model: FlameModel):
     return allCorners, allWeights, embedded, oval[oval < n]
 
 
+def earVertices(model: FlameModel) -> np.ndarray:
+    """ (n,) the vertices of the ears of FLAME: those whose nearest vertex of the canonical head of the FaceBuilder (put
+    on the template by the embedding landmarks) is on its ears (headFit.headRegions). """
+    from scipy.spatial import cKDTree
+    from . import headFit
+    head = face.canonicalHead()
+    n = face.MESH_VERTICES
+    corners, weights = model.landmarkRows()
+    keep = model.embeddingIndices < n
+    points = (model.template[corners[keep]] * weights[keep][:, :, None]).sum(1)
+    scale, rotation, translation = _similarity(head.vertices[model.embeddingIndices[keep]], points,
+                                               np.ones(int(keep.sum())))
+    placed = scale * head.vertices @ rotation.T + translation
+    distance, nearest = cKDTree(placed).query(model.template)
+    return headFit.headRegions(head)["ear"][nearest] & (distance < 0.01)
+
+
+def _earFalloff(model: FlameModel, ears: np.ndarray, faceVertices: np.ndarray, radius: float = 3.5) -> np.ndarray:
+    """ (2, n): how much each vertex follows the move of each ear (right: x < 0, then left): a gaussian of `radius`
+    cm around its center, none within 1 cm of the face (`faceVertices`), all from 3 cm. """
+    from scipy.spatial import cKDTree
+    template = model.template * 100.0
+    toFace, _ = cKDTree(template[faceVertices]).query(template)
+    fade = np.clip((toFace - 1.0) / 2.0, 0.0, 1.0)
+    falloff = np.zeros((2, len(template)))
+    for side, sign in enumerate((-1, 1)):
+        mask = ears & (np.sign(template[:, 0]) == sign)
+        if mask.any():
+            falloff[side] = np.exp(-((template - template[mask].mean(0)) ** 2).sum(1) / radius ** 2) * fade
+    return falloff
+
+
+def _earOutline(vertices, triangles, ears, view, camera, search):
+    """ The ears on the outline of the head in a view and the border of the skin there: [(vertex, direction (2,) out
+    of the head, offset (pixels) of the border along it)] (headFit.contourConstraints: the vertices between the
+    triangles facing the camera and the others, nothing of the head beyond them; the nearest border of the skin from
+    inside to outside within `search` pixels). """
+    from . import headFit
+    regions = {"ear": ears, "upperNeck": np.zeros(len(vertices), bool), "skull": np.zeros(len(vertices), bool),
+               "neck": np.zeros(len(vertices), bool)}
+    fitView = headFit.FitView(camera, view.size, view.labels, view.origin)
+    found = headFit.contourConstraints(vertices, triangles, fitView, regions, np.ones(len(vertices)), search)
+    width, height = view.size
+    xy, depth, jacobians = headFit._projection(camera, vertices, width, height)
+    focal = camera.focalPixels(width)
+    result = []
+    for vertex, row, offset, _ in found:
+        scale = max(float(depth[vertex]), 1e-6) / max(focal, 1e-6)
+        # (back to pixels: the row is the direction times the jacobian, in centimeters at the vertex)
+        direction = np.linalg.lstsq(jacobians[vertex].T, row / scale, rcond=None)[0]
+        result.append((vertex, direction / max(np.linalg.norm(direction), 1e-12), offset / scale))
+    return result
+
+
 def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20, regularization: float = 0.01,
                     jawRegularization: float = 5.0, viewRotation: float = 30.0, viewTranslation: float = 5.0,
-                    denseWeight: float = 0.5, outlineFacing: float = 0.3, expressionRegularization: float = 0.01,
-                    rigidIterations: int = 5, huber: float = 3.0, exact: bool = False, radius: float = 2.0, cancel=None,
+                    denseWeight: float = 0.2, innerWeight: float = 0.0, outlineFacing: float = 0.3,
+                    expressionRegularization: float = 0.01,
+                    rigidIterations: int = 5, huber: float = 3.0, exact: bool = False, radius: float = 2.0,
+                    segmentations=None, earWeight: float = 1.0, earSearch: float = 25.0,
+                    earMoveRegularization: float = 0.05, cancel=None,
                     progress=None) -> dict:
     """
     FLAME fitted on its own on the landmarks of the photos (their reprojection in every view: nothing else, no face of
@@ -250,11 +307,15 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
     of 1 against `regularization` (identity) or `expressionRegularization` pixels squared per landmark, a jaw turned
     by 1 radian against `jawRegularization`, a move of a view of `viewRotation` degrees or `viewTranslation` cm against
     1 pixel; its placement alone the first `rigidIterations`; robust (Huber of `huber` pixels). All the 468 landmarks:
-    those of the embedding, the others (`denseWeight`) where the MediaPipe face is on FLAME (denseCorrespondence); the
+    those of the embedding, those of the face oval (`denseWeight`) and the others (`innerWeight`: a rough
+    correspondence, it pulls the nose and the brows off) where the MediaPipe face is on FLAME (denseCorrespondence); the
     landmarks of the face oval that a view sees on the outline of the face (FLAME turned away there) on the outline of
     FLAME in that view (its vertex nearest to them there, the error across the outline only). With `exact`, the surface
     of each view then moved around each landmark of the embedding (gaussians of `radius` cm) so that each lands on its
-    pixel.
+    pixel. With `segmentations` (one per view, a headFit.FitView or None: its labels, what the segmenter saw), the
+    ears of FLAME on the outline of the head in a view also on the border of the skin there (`earWeight` against a
+    landmark, within `earSearch` pixels), FLAME's shapes and each ear moved as a whole (an ear moved by 1 cm against
+    `earMoveRegularization` pixels squared per landmark): the ears seen in the images, that no landmark gives.
 
     Args:
         views: [{"camera", "size": (w, h), "pixels": (n, 2) the landmarks (Nuke pixels), "hidden": [indices]}].
@@ -289,19 +350,27 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
     center = (scale0 * (model.vertices(startCoefficients)[corners[embedded]] * weights[embedded][:, :, None]).sum(1)
               @ rotation0.T + translation0).mean(0)
     flameFace = np.unique(corners)
+    segmentations = list(segmentations or [None] * len(views))
+    ears = earVertices(model) if any(seg is not None for seg in segmentations) else None
+    # With the segmentation, each ear also moved as a whole (beyond what FLAME's shapes do: where the views see it),
+    # smoothly around it and not on the face (earFalloff)
+    earMoves = np.zeros((2, 3))
+    earFalloff = _earFalloff(model, ears, flameFace) if ears is not None else np.zeros((2, len(model.template)))
     # The columns: identity, then for each view its expression and jaw, then the placement, then the moves of the views
     perView = expressionCount + 3
     placementColumn = identityCount + viewCount * perView
-    size = placementColumn + 7 + 6 * viewCount
+    earColumn = placementColumn + 7 + 6 * viewCount
+    size = earColumn + 6
 
     def viewCoefficients(v):
         return np.r_[identity, expressions[v]]
 
-    def headVertices(c, j, p):
-        """ FLAME in the face space (before the move of a view). """
+    def headVertices(c, j, p, e=None):
+        """ FLAME in the face space (before the move of a view), its ears moved by `e` (2, 3) (default: earMoves). """
         vertices = model.posed(model.vertices(c), j) if hasJaw else model.vertices(c)
         rotation = _rotation(p[:3]) @ rotation0
-        return scale0 * np.exp(p[6]) * vertices @ rotation.T + translation0 + p[3:6]
+        placed = scale0 * np.exp(p[6]) * vertices @ rotation.T + translation0 + p[3:6]
+        return placed + earFalloff.T @ (earMoves if e is None else e)
 
     def inView(points, viewPose):
         """ Points moved as the head is in a view. """
@@ -326,7 +395,9 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         eye = np.asarray(view["camera"].matrix, dtype=np.float64)[:3, 3]
         landmarks = np.where(seen[v])[0]
         rowCorners, rowWeights = corners[landmarks].copy(), weights[landmarks].copy()
-        pixelWeights = np.where(embedded[landmarks], 1.0, denseWeight)
+        # (the oval: the outline of the face, that the embedding lacks; the others where the canonical MediaPipe face is
+        # on FLAME, a rough correspondence: little, it would pull the nose and the brows off)
+        pixelWeights = np.where(embedded[landmarks], 1.0, np.where(isOval[landmarks], denseWeight, innerWeight))
         normals2 = np.zeros((len(landmarks), 2))
         # The oval landmarks where FLAME turns away from the camera: on its outline
         points = at(moved, rowCorners, rowWeights)
@@ -373,6 +444,41 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
             xy, _, _ = view["camera"].project(points, *view["size"])
             errors.append(xy - view["pixels"][np.where(keep)[0]])
         return float(np.sqrt((np.concatenate(errors) ** 2).sum(1).mean()))
+
+    def _earRows(vertices, v, coefficients, jaw, linear):
+        """ The rows (k, size) and right sides (k,) of the ears of a view on the border of the skin (pixels). """
+        view = views[v]
+        width, height = view["size"]
+        moved = inView(vertices, viewPoses[v])
+        found = _earOutline(moved, model.triangles, ears, segmentations[v], view["camera"], earSearch)
+        if not found:
+            return np.zeros((0, size)), np.zeros(0)
+        indices = np.array([vertex for vertex, _, _ in found])
+        directions = np.array([direction for _, direction, _ in found])
+        offsets = np.array([offset for _, _, offset in found])
+        _, _, jacobian = _projection(view["camera"], moved[indices], width, height)
+        # Robust as the landmarks (an ear under the hair: the border found is not its own)
+        weight = earWeight * np.sqrt(np.minimum(1.0, huber / np.maximum(np.abs(offsets), 1e-12)))
+        rows = np.zeros((len(indices), size))
+        across = np.einsum("ri,rij->rj", directions, jacobian)  # d (pixels along the direction) / d point
+        coefficientRows = np.einsum("rj,jk,rkm->rm", across, linear, model.directions[indices])
+        first = identityCount + v * perView
+        rows[:, :identityCount] = coefficientRows[:, :identityCount]
+        rows[:, first:first + expressionCount] = coefficientRows[:, identityCount:]
+        # The placement, the move of the view: numerically
+        for k in range(13):
+            p, vp = pose.copy(), viewPoses[v].copy()
+            (p if k < 7 else vp)[k if k < 7 else k - 7] += step
+            shifted = inView(headVertices(coefficients, jaw, p)[indices], vp)
+            column = placementColumn + k if k < 7 else placementColumn + 7 + 6 * v + (k - 7)
+            rows[:, column] = (across * (shifted - moved[indices])).sum(1) / step
+        # The moves of the ears: the falloff at the vertex, turned by the move of the view
+        viewRotation = _rotation(viewPoses[v, :3])
+        for side in range(2):
+            for axis in range(3):
+                rows[:, earColumn + 3 * side + axis] = (across @ viewRotation[:, axis]) * earFalloff[side, indices]
+        # The vertex moved by `offset` along the direction: the residual is minus it
+        return weight[:, None] * rows, weight * offsets
 
     if not any(keep.any() for keep in seen):
         raise ValueError("FLAME: no landmark seen in the views")
@@ -430,6 +536,11 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
                 block[:, :, column] = (movedResidual - residual) / step
             blocks.append(block.reshape(-1, size))
             right.append(-residual.reshape(-1))
+            if segmentations[v] is not None and iteration >= rigidIterations:
+                earRows, earRight = _earRows(vertices, v, coefficients, jaw, linear)
+                if len(earRows):
+                    blocks.append(earRows)
+                    right.append(earRight)
             viewRows.append(float(pixelWeights.sum()))
             allRows += viewRows[-1]
         a, b = np.concatenate(blocks), np.concatenate(right)
@@ -450,7 +561,9 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         damping[placementColumn:placementColumn + 3] = 1e-6
         damping[placementColumn + 3:placementColumn + 6] = allRows / 5.0 ** 2
         damping[placementColumn + 6] = allRows / 0.1 ** 2
-        current = np.r_[identity, np.c_[expressions, jaws].ravel(), np.zeros(7), viewPoses.ravel()]
+        # (an ear moved by 1 cm against `earMoveRegularization` pixels squared per landmark; held when not seen)
+        damping[earColumn:] = earMoveRegularization * allRows if ears is not None else 1.0
+        current = np.r_[identity, np.c_[expressions, jaws].ravel(), np.zeros(7), viewPoses.ravel(), earMoves.ravel()]
         rightSide = a.T @ b - damping * current
         if iteration < rigidIterations:
             # First its placement alone (the shape not taking what the pose should)
@@ -462,7 +575,8 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         expressions += perViewDelta[:, :expressionCount]
         jaws += perViewDelta[:, expressionCount:]
         pose += delta[placementColumn:placementColumn + 7]
-        viewPoses += delta[placementColumn + 7:].reshape(-1, 6)
+        viewPoses += delta[placementColumn + 7:earColumn].reshape(-1, 6)
+        earMoves += delta[earColumn:].reshape(2, 3)
         if progress:
             progress(0.8 * (iteration + 1) / float(iterations))
         if np.abs(delta).max() < 1e-5 and iteration >= rigidIterations:
@@ -488,7 +602,7 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         progress(1.0)
     return {"vertices": vertices, "triangles": model.triangles, "landmarks": landmarks, "coefficients": neutral,
             "error": start.get("error", 0.0), "similarity": (scale, rotation, translation), "pixels": (before, after),
-            "jaw": jaws.mean(0), "jaws": jaws, "expressions": expressions, "viewVertices": viewVertices,
+            "jaw": jaws.mean(0), "jaws": jaws, "earMoves": earMoves, "expressions": expressions, "viewVertices": viewVertices,
             "views": moves}
 
 

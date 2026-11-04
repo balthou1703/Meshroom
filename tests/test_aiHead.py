@@ -421,3 +421,41 @@ def test_flameJawFittedOnTheViews():
     before, after = fit["pixels"]
     print(f"FLAME jaw: {before:.2f} -> {after:.2f} px, jaw {fit['jaw']}")
     assert after < 0.3 * before and 0.08 < fit["jaw"][0] < 0.22
+
+
+def _skinView(camera, vertices, triangles, size):
+    """ A segmentation (headFit.FitView) of a head seen by a camera: its skin where it is, the background elsewhere. """
+    from meshroom.live import geoRender
+    width, height = size
+    xy, depth, _ = camera.project(vertices, width, height)
+    _, ids = geoRender.rasterize(xy[:, 0], height - xy[:, 1], depth, triangles, (height, width))
+    labels = np.zeros((height, width, 6), np.float32)
+    labels[:, :, headFit.FACE_SKIN] = ids >= 0
+    labels[:, :, headFit.BACKGROUND] = ids < 0
+    return headFit.FitView(camera, size, labels)
+
+
+def test_flameEarsOnTheSegmentation():
+    """ The ears of FLAME, that no landmark sees, put where the skin of the views has them (an actor with its ears
+    further out and back than the model has them). """
+    from tests.test_faceBuilder import _headViews
+    from meshroom.live import flameFit
+    model = _fakeFlame()
+    n = face.MESH_VERTICES
+    head = face.canonicalHead()
+    actor = _actor(3, out=0.8, back=0.5)
+    size = (640, 480)
+    views, segmentations = [], []
+    for camera in _headViews((0, 70, -70), size):
+        xy, _, _ = camera.project(actor[:n], *size)
+        views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
+        segmentations.append(_skinView(camera, actor, head.triangles(), size))
+    start = flameFit.fitFlame(model, actor[:n])
+    ears = flameFit.earVertices(model)
+    assert ears.sum() > 50
+    errors = []
+    for seg in (None, segmentations):
+        fit = flameFit.fitFlameToViews(model, views, start, segmentations=seg)
+        errors.append(np.linalg.norm(fit["vertices"][ears] - actor[ears], axis=1).mean())
+    print(f"FLAME ears: {errors[0]:.3f} cm without the segmentation, {errors[1]:.3f} cm with it")
+    assert errors[1] < 0.7 * errors[0]

@@ -1636,7 +1636,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             inputs.append(view["input"])
             views.append({"camera": self.baseCamera(view), "size": (width, height), "hidden": view.get("hidden") or [],
                           "pixels": face.toPixels(np.array(view["landmarks"], dtype=np.float64), width, height)})
-        fit = flameFit.fitFlameToViews(flame, views, start, cancel=context.checkCancelled,
+        # What the segmenter sees in each view: where the skin is (the ears on its border)
+        segmentations = self._segmentations(context, views, inputs, start["vertices"])
+        fit = flameFit.fitFlameToViews(flame, views, start, segmentations=segmentations, cancel=context.checkCancelled,
                                        progress=lambda done: context.progress(0.3 + 0.4 * done,
                                                                               "Fit FLAME on the views")) if views else start
         moves = np.array(fit.get("views") or np.zeros((0, 4, 4)), dtype=np.float64).reshape(-1, 4, 4)
@@ -1662,7 +1664,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                             # As it is in each view (its expression, its jaw), and its landmarks there
                             viewVertices=np.array(viewVertices, dtype=np.float32).reshape(-1, len(fit["vertices"]), 3),
                             viewLandmarks=np.array(viewLandmarks, dtype=np.float32).reshape(-1, face.MESH_VERTICES, 3))
-        self._writeFlameDebug(context, output, views, inputs, moves, viewVertices, viewLandmarks)
+        self._writeFlameDebug(context, output, views, inputs, moves, viewVertices, viewLandmarks, segmentations)
         import logging
         before, after = fit.get("pixels", (0.0, 0.0))
         jaw = np.degrees(np.linalg.norm(fit.get("jaw", np.zeros(3))))
@@ -1674,7 +1676,42 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         result["aiHeadFile"] = output
         return result
 
-    def _writeFlameDebug(self, context, output, views, inputs, moves, viewVertices, viewLandmarks):
+    def _segmentations(self, context, views, inputs, vertices):
+        """ [headFit.FitView or None]: each view segmented (MediaPipe), around the head `vertices` (face space) seen by
+        its camera; all None without the segmenter. """
+        import logging
+        from meshroom.live import BBox, face, headFit
+        from meshroom.live.neural import displayRGB
+        try:
+            segmenter = headFit.headSegmenter()
+        except face.FaceUnavailable as e:
+            logging.warning(f"[FaceBuilder] FLAME without the segmentation of the views (the ears from FLAME only): {e}")
+            return [None] * len(views)
+        stored = {view["input"]: view for view in self.storedViews(context)}
+        segmentations = []
+        try:
+            for name, view in zip(inputs, views):
+                context.checkCancelled()
+                width, height = view["size"]
+                xy, _, _ = view["camera"].project(vertices, width, height)
+                # The crop around the head (rows from the top), with room around it
+                x0, x1 = xy[:, 0].min(), xy[:, 0].max()
+                y0, y1 = height - xy[:, 1].max(), height - xy[:, 1].min()
+                margin = 0.25 * max(x1 - x0, y1 - y0)
+                left, top = int(max(0, x0 - margin)), int(max(0, y0 - margin))
+                right, bottom = int(min(width, x1 + margin)), int(min(height, y1 + margin))
+                if right - left < 16 or bottom - top < 16:
+                    segmentations.append(None)
+                    continue
+                image = context.renderInput(name, int(stored[name]["frame"]))
+                rgb = displayRGB(image, BBox.fromFormat(width, height))[top:bottom, left:right]
+                labels = segmenter.segment((np.clip(rgb[:, :, :3], 0, 1) * 255).astype(np.uint8))
+                segmentations.append(headFit.FitView(view["camera"], (width, height), labels, (left, top)))
+        finally:
+            segmenter.close()
+        return segmentations
+
+    def _writeFlameDebug(self, context, output, views, inputs, moves, viewVertices, viewLandmarks, segmentations=None):
         """ Next to the FLAME head: for each view, the image with the MediaPipe landmarks (yellow) and those of FLAME
         where it is in the view (orange), <head>_<input>.png; and the views fitted on (<head>_views.json: their
         landmarks in pixels, cameras, sizes) to fit FLAME again elsewhere. """
@@ -1685,7 +1722,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         stem = output[:-len(".npz")]
         stored = {view["input"]: view for view in self.storedViews(context)}
         dump = []
-        for name, view, move, vertices, landmarks in zip(inputs, views, moves, viewVertices, viewLandmarks):
+        segmentations = segmentations or [None] * len(views)
+        for name, view, move, vertices, landmarks, segmentation in zip(inputs, views, moves, viewVertices, viewLandmarks,
+                                                                       segmentations):
             width, height = view["size"]
             camera = view["camera"]
             dump.append({"input": name, "size": [width, height], "pixels": np.asarray(view["pixels"]).tolist(),
@@ -1698,6 +1737,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 logging.warning(f"[FaceBuilder] FLAME debug image of {name}: {e}")
                 continue
             picture = (rgb * 255).astype(np.uint8).copy()
+            if segmentation is not None:
+                # The border of the skin the segmenter saw (cyan)
+                skin = segmentation.labels[:, :, headFit.FACE_SKIN] + segmentation.labels[:, :, headFit.BODY_SKIN] > 0.5
+                border = skin & ~(np.roll(skin, 1, 0) & np.roll(skin, -1, 0) & np.roll(skin, 1, 1) & np.roll(skin, -1, 1))
+                rows, columns = np.where(border)
+                rows, columns = rows + segmentation.origin[1], columns + segmentation.origin[0]
+                inside = (rows < height) & (columns < width)
+                picture[rows[inside], columns[inside]] = (60, 220, 255)
             seen = camera.copy(matrix=np.linalg.inv(move) @ camera.matrix)
             xy, _, _ = seen.project(landmarks[np.isfinite(landmarks).all(1)], width, height)
             outline, _, _ = seen.project(vertices, width, height)
