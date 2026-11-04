@@ -236,9 +236,10 @@ def denseCorrespondence(model: FlameModel):
     return allCorners, allWeights, embedded, oval[oval < n]
 
 
-def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 15, regularization: float = 0.1,
+def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20, regularization: float = 0.1,
                     jawRegularization: float = 5.0, viewRotation: float = 30.0, viewTranslation: float = 5.0,
-                    denseWeight: float = 0.5, outlineFacing: float = 0.3, exact: bool = True, radius: float = 2.0, cancel=None,
+                    denseWeight: float = 0.5, outlineFacing: float = 0.3, expressionRegularization: float = 1.0,
+                    rigidIterations: int = 5, huber: float = 3.0, exact: bool = True, radius: float = 2.0, cancel=None,
                     progress=None) -> dict:
     """
     FLAME fitted on its own on the landmarks of the photos (their reprojection in every view: nothing else, no face of
@@ -246,7 +247,9 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 15,
     jaw, its placement (similarity) and a rigid move of the head in each view (the cameras of the views are only
     estimates: FLAME places itself in each), by Gauss-Newton, regularized (`regularization`: a coefficient of 1 against
     1 pixel of error per landmark and view; `jawRegularization` the same for a jaw turned by 1 radian; a move of a view
-    of `viewRotation` degrees or `viewTranslation` cm against 1 pixel). All the 468 landmarks: those of the embedding,
+    of `viewRotation` degrees or `viewTranslation` cm against 1 pixel; the expression directions after the 300 of
+    identity by `expressionRegularization`; its placement alone the first `rigidIterations`; robust: Huber of `huber`
+    pixels). All the 468 landmarks: those of the embedding,
     the others (`denseWeight`) where the MediaPipe face is on FLAME (denseCorrespondence); the landmarks of the face
     oval that a view sees on the outline of the face (FLAME turned away there) on the outline of FLAME in that view
     (its vertex nearest to them there, the error across the outline only). Then, with `exact`, its surface moved around
@@ -377,6 +380,12 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 15,
                 continue
             rows = correspondences(vertices, v)
             residual, jacobian = residualsOf(vertices, v, rows)
+            # Robust (Huber, `huber` pixels): a landmark far off (MediaPipe wrong there: hair, a hidden eye) counts less
+            pixelWeights = rows[3]
+            raw = np.linalg.norm(residual, axis=1) / np.maximum(pixelWeights, 1e-12)
+            pixelWeights = pixelWeights * np.sqrt(np.minimum(1.0, huber / np.maximum(raw, 1e-12)))
+            rows = rows[:3] + (pixelWeights,) + rows[4:]
+            residual, jacobian = residualsOf(vertices, v, rows)
             _, rowCorners, rowWeights, pixelWeights, _ = rows
             cornerBasis = model.directions[rowCorners]  # (r, 3 corners, 3, k)
             if hasJaw and np.any(jaw):
@@ -409,6 +418,10 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 15,
         # hardly tells apart: 10% of size or 5 cm against 1 pixel)
         damping = np.zeros(size)
         damping[:count] = regularization * allRows
+        if count > 300:
+            # (FLAME: 300 directions of identity, then those of expression: held more, the face of the images is
+            # mostly neutral)
+            damping[300:count] = expressionRegularization * allRows
         damping[count:count + 3] = jawRegularization * allRows if hasJaw else 1.0
         damping[count + 3:count + 6] = 1e-6
         damping[count + 6:count + 9] = allRows / 5.0 ** 2
@@ -418,14 +431,19 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 15,
             damping[first:first + 3] = max(viewRows[v], 1) * rotationDamping
             damping[first + 3:first + 6] = max(viewRows[v], 1) * translationDamping
         current = np.r_[coefficients, jaw, np.zeros(7), viewPoses.ravel()]
-        delta = np.linalg.solve(a.T @ a + np.diag(damping), a.T @ b - damping * current)
+        rightSide = a.T @ b - damping * current
+        if iteration < rigidIterations:
+            # First its placement alone (the shape not taking what the pose should)
+            damping[:count + 3] = 1e12
+            rightSide[:count + 3] = 0.0
+        delta = np.linalg.solve(a.T @ a + np.diag(damping), rightSide)
         coefficients += delta[:count]
         jaw += delta[count:count + 3]
         pose += delta[count + 3:count + 10]
         viewPoses += delta[count + 10:].reshape(-1, 6)
         if progress:
             progress(0.8 * (iteration + 1) / float(iterations))
-        if np.abs(delta).max() < 1e-5:
+        if np.abs(delta).max() < 1e-5 and iteration >= rigidIterations:
             break
     rotation = _rotation(pose[:3]) @ rotation0
     scale = scale0 * np.exp(pose[6])

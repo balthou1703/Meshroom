@@ -793,7 +793,11 @@ ils empirent ; enfin sa surface est déplacée autour de chaque landmark (gaussi
 qu'il tombe sur son pixel dans chaque vue. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
 tête du FaceBuilder aussi quand « Use AI Head » (`headCamera`, sous les pins ; la sortie Camera aussi). « Display »
-landmarks montre aussi ceux de FLAME (orange) dans chaque vue. La tête FLAME
+landmarks montre aussi ceux de FLAME (orange) dans chaque vue. L'ajustement est robuste (Huber, 3 px : un landmark MediaPipe faux, sous les cheveux ou sur
+un œil caché, compte moins), place d'abord FLAME seul (5 itérations rigides, la forme figée) et tient davantage ses
+100 directions d'expression (×10). À chaque génération, à côté du .npz : `<tête>_<vue>.png` (l'image, les landmarks
+MediaPipe en jaune, ceux de FLAME en orange, ses sommets en orange clair) et `<tête>_views.json` (les vues ajustées :
+landmarks en pixels, caméras, tailles, déplacements), pour refaire l'ajustement ailleurs. La tête FLAME
 obtenue est dans l'espace du visage (pas d'alignement) ; le visage de la tête riggée est d'abord posé sur elle
 (`aiHead.faceOnHead` : similitude sur ses landmarks, puis ICP non rigide, landmarks tenus), puis la tête entière est
 recalée et déformée sur FLAME comme sur une tête générée. La tête FLAME obtenue

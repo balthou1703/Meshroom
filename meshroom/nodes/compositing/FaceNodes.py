@@ -1627,6 +1627,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                             # In the face space (no alignment), seen moved in each view
                             faceSpace=np.array(True), viewInputs=np.array(inputs[:len(moves)], dtype=str),
                             viewMoves=moves)
+        self._writeFlameDebug(context, output, views, inputs, moves, fit)
         import logging
         before, after = fit.get("pixels", (0.0, 0.0))
         jaw = np.degrees(np.linalg.norm(fit.get("jaw", np.zeros(3))))
@@ -1637,6 +1638,46 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         result = self.fitAiHead(context, path=output, start=0.7)
         result["aiHeadFile"] = output
         return result
+
+    def _writeFlameDebug(self, context, output, views, inputs, moves, fit):
+        """ Next to the FLAME head: for each view, the image with the MediaPipe landmarks (yellow) and those of FLAME
+        where it is in the view (orange), <head>_<input>.png; and the views fitted on (<head>_views.json: their
+        landmarks in pixels, cameras, sizes) to fit FLAME again elsewhere. """
+        import json
+        import logging
+        from meshroom.live import BBox, headFit
+        from meshroom.live.neural import displayRGB
+        stem = output[:-len(".npz")]
+        stored = {view["input"]: view for view in self.storedViews(context)}
+        dump = []
+        for name, view, move in zip(inputs, views, moves):
+            width, height = view["size"]
+            camera = view["camera"]
+            dump.append({"input": name, "size": [width, height], "pixels": np.asarray(view["pixels"]).tolist(),
+                         "hidden": list(view["hidden"]), "cameraToFace": np.asarray(camera.matrix).ravel().tolist(),
+                         "focal": stored[name].get("focal"), "move": np.asarray(move).ravel().tolist()})
+            try:
+                image = context.renderInput(name, int(stored[name]["frame"]))
+                rgb = np.clip(displayRGB(image, BBox.fromFormat(width, height))[:, :, :3], 0.0, 1.0)
+            except Exception as e:  # (the overlay only: never fails the generation)
+                logging.warning(f"[FaceBuilder] FLAME debug image of {name}: {e}")
+                continue
+            picture = (rgb * 255).astype(np.uint8).copy()
+            seen = camera.copy(matrix=np.linalg.inv(move) @ camera.matrix)
+            landmarks = fit["landmarks"][np.isfinite(fit["landmarks"]).all(1)]
+            xy, _, _ = seen.project(landmarks, width, height)
+            outline, _, _ = seen.project(fit["vertices"], width, height)
+            # (the vertices of FLAME, light; the landmarks of MediaPipe; those of FLAME)
+            for points, color, size in ((outline, (255, 140, 40), 0), (np.asarray(view["pixels"]), (255, 230, 50), 1),
+                                        (xy, (255, 90, 0), 1)):
+                for x, y in points:
+                    col, row = int(round(x)), int(round(height - 1 - y))
+                    if 0 <= col < width and 0 <= row < height:
+                        picture[max(0, row - size):row + size + 1, max(0, col - size):col + size + 1] = color
+            headFit.writePng(f"{stem}_{name}.png", picture)
+        with open(f"{stem}_views.json", "w") as f:
+            json.dump(dump, f)
+        logging.info(f"[FaceBuilder] FLAME debug: {stem}_*.png (yellow: MediaPipe, orange: FLAME), {stem}_views.json")
 
     def _generateFromCrops(self, context, model):
         """ "Generate AI Head" with a model of aligned face crops (MICA): the face of every view, aligned as ArcFace
