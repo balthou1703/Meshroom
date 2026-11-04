@@ -180,15 +180,18 @@ def _reprojection(views, points, indices):
 
 
 def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[np.ndarray] = None, iterations: int = 10,
-                    regularization: float = 1.0, faceWeight: float = 5.0, exact: bool = True, radius: float = 2.0,
-                    cancel=None, progress=None) -> dict:
+                    regularization: float = 1.0, faceWeight: float = 5.0, surfaceWeight: float = 10.0,
+                    exact: bool = True, radius: float = 2.0, cancel=None, progress=None) -> dict:
     """
     FLAME fitted on the landmarks of the photos (their reprojection in every view: what makes it fit the images), from
     `start` (fitFlame on the face of the photos): its coefficients and its placement (similarity) by Gauss-Newton,
     regularized (`regularization`: a coefficient of 1 against 1 pixel of error per landmark and view); then, with
     `exact`, its surface moved around each landmark (gaussians of `radius` cm, solved together) so that each lands on
-    its pixel in every view. `faceTarget` (the face of the photos, 468 x 3): its landmarks held near it too
-    (`faceWeight` pixels per centimeter: what the views do not see, e.g. the depth with a single view).
+    its pixel in every view. `faceTarget` (the face of the photos, 468 x 3, fitted on all the landmarks of the views):
+    its landmarks held near it too (`faceWeight` pixels per centimeter: what the views do not see, e.g. the depth with
+    a single view), the whole face on the surface of FLAME (`surfaceWeight` pixels per centimeter), and, with `exact`,
+    the face of FLAME then warped onto it (onPhotoFace): FLAME on the face of the images everywhere, not only at its
+    landmarks.
 
     Args:
         views: [{"camera", "size": (w, h), "pixels": (n, 2) the landmarks (Nuke pixels), "hidden": [indices]}].
@@ -242,6 +245,13 @@ def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[
                 rows3P[:, :, k] = faceWeight * (moved - points) / 1e-4
             a = np.concatenate([a, np.concatenate([rows3C, rows3P], axis=2).reshape(-1, count + 7)])
             b = np.concatenate([b, -faceWeight * offsets.reshape(-1)])
+            # The whole face of the photos on the surface of FLAME (not only its landmarks: its width, its jaw...),
+            # point to plane at the nearest FLAME vertex
+            rowsS, rightS = _surfaceRows(model, coefficients, scale, rotation, translation0 + pose[3:6],
+                                         np.asarray(faceTarget, dtype=np.float64), surfaceWeight)
+            if len(rowsS):
+                a = np.concatenate([a, np.concatenate([rowsS, np.zeros((len(rowsS), 7))], axis=1)])
+                b = np.concatenate([b, rightS])
         damping = np.r_[np.full(count, regularization * len(residuals)), np.full(7, 1e-6)]
         delta = np.linalg.solve(a.T @ a + np.diag(damping), a.T @ b - damping * np.r_[coefficients, np.zeros(7)])
         coefficients += delta[:count]
@@ -255,6 +265,9 @@ def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[
     translation = translation0 + pose[3:6]
     vertices = scale * model.vertices(coefficients) @ rotation.T + translation
     if exact:
+        if faceTarget is not None:
+            vertices = onPhotoFace(vertices, model.triangles, np.asarray(faceTarget, dtype=np.float64))
+        # (what the warp left: each landmark on its pixel)
         vertices = _exactLandmarks(vertices, model, views, radius)
     landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
     landmarks[indices] = (vertices[corners] * weights[:, :, None]).sum(1)
@@ -264,6 +277,47 @@ def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[
         progress(1.0)
     return {"vertices": vertices, "triangles": model.triangles, "landmarks": landmarks, "coefficients": coefficients,
             "error": start.get("error", 0.0), "similarity": (scale, rotation, translation), "pixels": (before, after)}
+
+
+def _photoFaceGeometry(faceTarget):
+    """ (triangles of the face of the FaceBuilder, its oval vertices). """
+    head = face.canonicalHead()
+    triangles = head.triangles()
+    faceTriangles = triangles[(triangles < face.MESH_VERTICES).all(1)]
+    oval = np.unique(np.asarray(face.headData()["holeEdges"]).ravel())
+    return faceTriangles, oval[oval < face.MESH_VERTICES]
+
+
+def _surfaceRows(model, coefficients, scale, rotation, translation, faceTarget, weight, maxDistance=1.5):
+    """ Rows (k, coefficients) and right sides (k,) of the face of the photos on the surface of FLAME placed by the
+    similarity: each face vertex (not on the oval) along the normal of its nearest FLAME vertex, in centimeters. """
+    from scipy.spatial import cKDTree
+    vertices = model.vertices(coefficients)
+    placed = scale * vertices @ rotation.T + translation
+    _, oval = _photoFaceGeometry(faceTarget)
+    inner = np.setdiff1d(np.arange(len(faceTarget)), oval)
+    distance, nearest = cKDTree(placed).query(faceTarget[inner])
+    close = distance < maxDistance
+    if not close.any():
+        return np.zeros((0, len(coefficients))), np.zeros(0)
+    nearest = nearest[close]
+    normals = _vertexNormals(placed, model.triangles)[nearest]
+    residual = ((faceTarget[inner][close] - placed[nearest]) * normals).sum(1)
+    rows = np.einsum("pi,ij,pjk->pk", normals, scale * rotation, model.directions[nearest])
+    return weight * rows, weight * residual
+
+
+def onPhotoFace(vertices, triangles, faceTarget, maxDistance=1.5):
+    """ The FLAME head with its face warped onto the face of the photos (aiHead.warpOntoSurface: its vertices near the
+    face, not near its oval, to their nearest points; the rest of the head carried smoothly). """
+    from scipy.spatial import cKDTree
+    from .aiHead import warpOntoSurface
+    faceTriangles, oval = _photoFaceGeometry(faceTarget)
+    distance, nearest = cKDTree(faceTarget).query(vertices)
+    data = ((distance < maxDistance) & ~np.isin(nearest, oval)).astype(np.float64)
+    moves = warpOntoSurface(vertices, triangles, faceTarget, faceTriangles, data, np.zeros(len(vertices)),
+                            stiffness=(10.0, 4.0, 1.5, 0.6), maxDistance=maxDistance)
+    return vertices + moves
 
 
 def _exactLandmarks(vertices, model, views, radius, iterations=3):

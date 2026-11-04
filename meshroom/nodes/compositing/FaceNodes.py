@@ -1390,7 +1390,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 if aiGeo is not None:
                     # Drawn as the head is ("Display"), in orange
                     geoRender.drawGeometry(rgba, image.bbox, aiGeo, camera, width, height, display, (1.0, 0.55, 0.15),
-                                           alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx))
+                                           alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx), quads=True)
                 if shown in ("head", "both") or aiGeo is None:
                     geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
                                            (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),

@@ -783,8 +783,11 @@ moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 p
 ajusté sur les landmarks de toutes les vues (`fitFlameToViews` : leur reprojection par les caméras des vues,
 Gauss-Newton sur ses coefficients et sa pose, régularisé ; ses landmarks tenus près de ceux du visage des photos en
 3D, 5 px par cm : la profondeur qu'une vue seule ne voit pas) ; enfin sa surface est déplacée autour de chaque landmark
-(gaussiennes de 1 cm, résolues ensemble) pour qu'il tombe sur son pixel dans chaque vue : FLAME calé exactement sur le
-visage des images. La tête FLAME obtenue
+(gaussiennes de 2 cm, résolues ensemble) pour qu'il tombe sur son pixel dans chaque vue : FLAME calé exactement sur le
+visage des images. Pas seulement en ses landmarks : tout le visage des photos (ses 468 sommets, ajustés sur tous les
+landmarks des vues) tire aussi la surface de FLAME pendant l'ajustement (point à plan, 10 px par cm), puis le visage de
+FLAME est déformé sur lui (`flameFit.onPhotoFace`, ICP non rigide ; l'ovale exclu) avant la dernière retouche de ses
+landmarks. La tête FLAME obtenue
 (crâne, oreilles, cou, sans cheveux) est ensuite traitée comme une tête générée (posée par ses landmarks, crâne
 compris). Fichiers à mettre à la main dans `MESHROOM_MODELS_PATH/flame` : le .pkl de « FLAME 2023 Open » et
 `mediapipe_landmark_embedding.npz` (ou dans `mica/`), https://flame.is.tue.mpg.de. Sur une tête synthétique (FLAME

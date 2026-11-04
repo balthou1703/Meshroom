@@ -379,9 +379,15 @@ def test_flameFittedOnTheViews():
     # The face of the photos: off by a few millimeters (a smooth error)
     off = actor[:n] + 0.3 * np.sin(actor[:n] / 3.0)
     start = flameFit.fitFlame(model, off)
-    fit = flameFit.fitFlameToViews(model, views, start, faceTarget=off)
+    # Without the face: its landmarks put on their pixels
+    fit = flameFit.fitFlameToViews(model, views, start)
     before, after = fit["pixels"]
     print(f"FLAME on the views: {before:.2f} -> {after:.2f} px")
     assert after < 0.5 and after < 0.2 * before
-    seen = np.isfinite(fit["landmarks"]).all(1)
-    assert np.linalg.norm(fit["landmarks"][seen] - actor[:n][seen], axis=1).mean() < 0.1
+    # With the face of the photos (fitted on all their landmarks: here the actor's): FLAME on it everywhere
+    fit = flameFit.fitFlameToViews(model, views, start, faceTarget=actor[:n])
+    before, after = fit["pixels"]
+    print(f"FLAME on the views and the face: {before:.2f} -> {after:.2f} px")
+    assert after < 0.5 and after < 0.2 * before
+    from scipy.spatial import cKDTree
+    assert cKDTree(fit["vertices"]).query(actor[:n])[0].mean() < 0.1
