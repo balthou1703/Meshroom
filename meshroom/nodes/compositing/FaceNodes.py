@@ -1188,30 +1188,55 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return (base.vertices + offsets)[:face.MESH_VERTICES]
         return self.original(ctx).vertices[:face.MESH_VERTICES]
 
-    def aiHeadGeo(self, ctx):
-        """ The AI head placed on the face (GeoData, colors in .colors), or None. """
+    def _aiMesh(self, path):
+        """ (vertices, triangles, colors, {input: (vertices, landmarks) as the head is in that view}) of an AI head
+        file, cached. """
+        import os
+        from meshroom.live import aiHead
+        key = (path, os.path.getmtime(path))
+        mesh = FaceBuilder._AI_MESHES.get(key)
+        if mesh is None:
+            inViews = {}
+            if path.lower().endswith(".npz"):
+                data = np.load(path)
+                if "viewVertices" in data and "viewInputs" in data:
+                    inViews = {str(name): (np.asarray(vertices, dtype=np.float64), np.asarray(landmarks, dtype=np.float64))
+                               for name, vertices, landmarks in zip(data["viewInputs"], data["viewVertices"],
+                                                                    data["viewLandmarks"])}
+            mesh = aiHead.loadMesh(path) + (inViews,)
+            FaceBuilder._AI_MESHES.clear()
+            FaceBuilder._AI_MESHES[key] = mesh
+        return mesh
+
+    def aiHeadGeo(self, ctx, inView=False):
+        """ The AI head placed on the face (GeoData, colors in .colors), or None; with `inView`, as it is in the view
+        shown (FLAME: its expression and jaw there). """
         import os
         from meshroom.live import aiHead
         fit = self.aiFit(ctx)
         path = ctx.value("aiHeadFile")
         if not fit or not path or not os.path.exists(path):
             return None
-        key = (path, os.path.getmtime(path))
-        mesh = FaceBuilder._AI_MESHES.get(key)
-        if mesh is None:
-            mesh = aiHead.loadMesh(path)
-            FaceBuilder._AI_MESHES.clear()
-            FaceBuilder._AI_MESHES[key] = mesh
-        vertices, triangles, colors = mesh
+        vertices, triangles, colors, inViews = self._aiMesh(path)
+        view = self.viewAt(ctx) if inView else None
+        if view is not None and view["input"] in inViews:
+            vertices = inViews[view["input"]][0]
         geo = aiHead.geometry(aiHead.transform(vertices, np.array(fit["matrix"], dtype=np.float64)), triangles)
         geo.colors = colors
         return geo
 
     def aiLandmarks(self, ctx):
-        """ The landmarks the AI head carries (FLAME), placed on the face (k, 3), or None. """
+        """ The landmarks the AI head carries (FLAME), placed on the face as it is in the view shown (k, 3), or None. """
+        import os
         from meshroom.live import aiHead
         fit = self.aiFit(ctx)
-        landmarks = aiHead.storedLandmarks(ctx.value("aiHeadFile")) if fit else None
+        path = ctx.value("aiHeadFile")
+        landmarks = aiHead.storedLandmarks(path) if fit else None
+        view = self.viewAt(ctx)
+        if landmarks is not None and view is not None and os.path.exists(path):
+            inViews = self._aiMesh(path)[3]
+            if view["input"] in inViews:
+                landmarks = inViews[view["input"]][1]
         if landmarks is None:
             return None
         landmarks = landmarks[np.isfinite(landmarks).all(1)]
@@ -1437,7 +1462,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 from meshroom.live import gpu
                 camera = self.viewCamera(ctx, view)
                 shown = ctx.value("showGeometry")
-                aiGeo = self.aiHeadGeo(ctx) if shown in ("ai head", "both") else None
+                aiGeo = self.aiHeadGeo(ctx, inView=True) if shown in ("ai head", "both") else None
                 if aiGeo is not None:
                     # Drawn as the head is ("Display"), in orange, where it was placed in this view (no pins)
                     geoRender.drawGeometry(rgba, image.bbox, aiGeo, self.aiCamera(ctx, view), width, height, display,
@@ -1615,6 +1640,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                        progress=lambda done: context.progress(0.3 + 0.4 * done,
                                                                               "Fit FLAME on the views")) if views else start
         moves = np.array(fit.get("views") or np.zeros((0, 4, 4)), dtype=np.float64).reshape(-1, 4, 4)
+        viewVertices = fit.get("viewVertices") or [fit["vertices"]] * len(moves)
+        corners, weights = flame.landmarkRows()
+        viewLandmarks = []
+        for vertices in viewVertices:
+            landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
+            landmarks[flame.embeddingIndices] = (vertices[corners] * weights[:, :, None]).sum(1)
+            viewLandmarks.append(landmarks)
         folder = os.environ.get("MESHROOM_AIHEAD_FOLDER") or os.path.join(os.path.expanduser("~"), ".cache", "meshroom",
                                                                           "aiHeads")
         os.makedirs(folder, exist_ok=True)
@@ -1626,8 +1658,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                             coefficients=fit["coefficients"].astype(np.float32),
                             # In the face space (no alignment), seen moved in each view
                             faceSpace=np.array(True), viewInputs=np.array(inputs[:len(moves)], dtype=str),
-                            viewMoves=moves)
-        self._writeFlameDebug(context, output, views, inputs, moves, fit)
+                            viewMoves=moves,
+                            # As it is in each view (its expression, its jaw), and its landmarks there
+                            viewVertices=np.array(viewVertices, dtype=np.float32).reshape(-1, len(fit["vertices"]), 3),
+                            viewLandmarks=np.array(viewLandmarks, dtype=np.float32).reshape(-1, face.MESH_VERTICES, 3))
+        self._writeFlameDebug(context, output, views, inputs, moves, viewVertices, viewLandmarks)
         import logging
         before, after = fit.get("pixels", (0.0, 0.0))
         jaw = np.degrees(np.linalg.norm(fit.get("jaw", np.zeros(3))))
@@ -1639,7 +1674,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         result["aiHeadFile"] = output
         return result
 
-    def _writeFlameDebug(self, context, output, views, inputs, moves, fit):
+    def _writeFlameDebug(self, context, output, views, inputs, moves, viewVertices, viewLandmarks):
         """ Next to the FLAME head: for each view, the image with the MediaPipe landmarks (yellow) and those of FLAME
         where it is in the view (orange), <head>_<input>.png; and the views fitted on (<head>_views.json: their
         landmarks in pixels, cameras, sizes) to fit FLAME again elsewhere. """
@@ -1650,7 +1685,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         stem = output[:-len(".npz")]
         stored = {view["input"]: view for view in self.storedViews(context)}
         dump = []
-        for name, view, move in zip(inputs, views, moves):
+        for name, view, move, vertices, landmarks in zip(inputs, views, moves, viewVertices, viewLandmarks):
             width, height = view["size"]
             camera = view["camera"]
             dump.append({"input": name, "size": [width, height], "pixels": np.asarray(view["pixels"]).tolist(),
@@ -1664,9 +1699,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 continue
             picture = (rgb * 255).astype(np.uint8).copy()
             seen = camera.copy(matrix=np.linalg.inv(move) @ camera.matrix)
-            landmarks = fit["landmarks"][np.isfinite(fit["landmarks"]).all(1)]
-            xy, _, _ = seen.project(landmarks, width, height)
-            outline, _, _ = seen.project(fit["vertices"], width, height)
+            xy, _, _ = seen.project(landmarks[np.isfinite(landmarks).all(1)], width, height)
+            outline, _, _ = seen.project(vertices, width, height)
             # (the vertices of FLAME, light; the landmarks of MediaPipe; those of FLAME)
             for points, color, size in ((outline, (255, 140, 40), 0), (np.asarray(view["pixels"]), (255, 230, 50), 1),
                                         (xy, (255, 90, 0), 1)):

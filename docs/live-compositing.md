@@ -782,15 +782,17 @@ le visage des photos, alternativement ; ses landmarks MediaPipe (son embedding) 
 la 4e itération) chaque sommet du visage sur la surface de FLAME (le long de la normale du sommet le plus proche, à
 moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 par correspondance) : seulement son
 point de départ. Puis FLAME est ajusté seul sur les landmarks de toutes les vues (`fitFlameToViews` : leur
-reprojection, rien d'autre ; aucun visage du FaceBuilder ne le tient) : Gauss-Newton sur ses coefficients (identité et
-expression ; un coefficient de 1 contre 0,1 px ; les 468 landmarks : ceux de l'embedding, les autres (poids 0,5) là
+reprojection, rien d'autre ; aucun visage du FaceBuilder ne le tient) : Gauss-Newton sur son identité (ses 300 premières
+directions, communes aux vues), l'expression et la mâchoire de chaque vue (les vues ne sont pas prises au même
+instant : yeux, sourcils, bouche diffèrent ; la tête riggée est déformée sur FLAME neutre, la tête IA est dessinée
+dans chaque vue avec son expression : `viewVertices` du .npz) ; un coefficient de 1 contre 0,01 px² par landmark ; les 468 landmarks : ceux de l'embedding, les autres (poids 0,5) là
 où le visage MediaPipe canonique tombe sur FLAME (`denseCorrespondence`), ceux de l'ovale qu'une vue voit sur le
 contour du visage (FLAME s'y détourne de la caméra) sur le contour de FLAME dans cette vue, l'erreur à travers le
-contour seulement), sa mâchoire (rotation autour de son articulation, skinning linéaire
-de FLAME : bouche ouverte), sa similitude, et un déplacement rigide de la tête dans chaque vue (les caméras des vues
+contour seulement), la rotation de la mâchoire autour de son articulation (skinning
+linéaire de FLAME : bouche ouverte), sa similitude, et un déplacement rigide de la tête dans chaque vue (les caméras des vues
 ne sont que des estimations : FLAME se place lui-même dans chacune ; 30° ou 5 cm contre 1 px : presque libre), pas raccourcis quand
-ils empirent ; enfin sa surface est déplacée autour de chaque landmark (gaussiennes de 2 cm, résolues ensemble) pour
-qu'il tombe sur son pixel dans chaque vue. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
+ils empirent (le recalage exact des landmarks, `exact`, n'est plus fait par défaut : sur de vraies vues il plissait
+le visage). Sur les vues d'un acteur (FLAME 2023 Open réel) : 8,2 px → 1,9 / 2,5 / 2,4 px RMS par vue. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
 tête du FaceBuilder aussi quand « Use AI Head » (`headCamera`, sous les pins ; la sortie Camera aussi). « Display »
 landmarks montre aussi ceux de FLAME (orange) dans chaque vue. L'ajustement est robuste (Huber, 3 px : un landmark MediaPipe faux, sous les cheveux ou sur

@@ -388,7 +388,7 @@ def test_flameFittedOnTheViews():
     before, after = fit["pixels"]
     print(f"FLAME alone on the views: {before:.2f} -> {after:.2f} px")
     assert after < 1.0 and after < 0.2 * before and len(fit["views"]) == 3
-    fit = flameFit.fitFlameToViews(model, views, start)
+    fit = flameFit.fitFlameToViews(model, views, start, exact=True)
     before, after = fit["pixels"]
     print(f"FLAME on the views, exact: {before:.2f} -> {after:.2f} px")
     assert after < 0.5
