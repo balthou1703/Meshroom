@@ -888,6 +888,22 @@ _VIEW_INPUTS = ("input", "input1", "input2", "input3")
 _VIEW_PINS = {"input": "pins", "input1": "pins1", "input2": "pins2", "input3": "pins3"}
 
 
+class _Overridden:
+    """ An action or render context whose values are replaced by some (those an action just computed). """
+
+    def __init__(self, inner, values: dict):
+        self._inner, self._values = inner, values
+
+    def value(self, name):
+        return self._values[name] if name in self._values else self._inner.value(name)
+
+    def nodeContext(self, frame=None):
+        return _Overridden(self._inner.nodeContext(frame), self._values)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 class FaceBuilder(desc.ImageOpNode):
     category = "Comp 3D"
     color = _COLOR
@@ -926,9 +942,41 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              "order, or a head of the FaceBuilder). Without it: the canonical head."),
         desc.ChoiceParam(name="meshType", label="Mesh", value="head", values=["head", "face"],
                          description="head: the face with ears, skull and neck following it. face: the face only."),
-        desc.PushButtonParam(name="buildHead", label="1. Build Head", semantic="liveAction",
-                             description="Find the face in each view and fit the head on all of them."),
-        desc.PushButtonParam(name="refitHead", label="1. Fit Again", semantic="liveAction",
+        desc.ChoiceParam(name="aiModel", label="1. AI Model", value="triposr", values=["triposr", "trellis2", "flame", "mica"],
+                         invalidate=False,
+                         description="The model of 'Generate AI Head': TripoSR (image to 3D, light: 6 GB of GPU or "
+                                     "the CPU, in Meshroom's Python, its weights in the models folder: python -m "
+                                     "meshroom.live.neural.download triposr), TRELLIS.2 (image to 3D, much finer, a 24 GB "
+                                     "GPU, its own environment: MESHROOM_TRELLIS2_PYTHON), FLAME (FLAME 2023 Open, CC-BY-4.0: "
+                                     "fitted on the face of the photos, no network; its .pkl and the MediaPipe "
+                                     "landmark embedding in MESHROOM_MODELS_PATH/flame) or MICA (a FLAME head from the "
+                                     "faces of all the views, without hair; NON-COMMERCIAL, a reference: its weights and "
+                                     "FLAME 2020 in MESHROOM_MODELS_PATH/mica)."),
+        desc.PushButtonParam(name="generateAiHead", label="1. Generate AI Head", semantic="liveAction",
+                             description="The faces of the views found first ('Build Head', when not done yet), then a "
+                                         "whole head made by the AI model ('AI Model': FLAME fitted on its own on the "
+                                         "views, or generated from the view shown in another process), then the head "
+                                         "of the FaceBuilder warped onto it ('Fit Again To AI Head')."),
+        desc.FloatParam(name="aiFace", label="AI Face", value=1.0, range=(0.0, 1.0, 0.05),
+                        description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
+                                    "1: that of the AI head (FLAME: fitted on the landmarks of the views), 0: the face fitted on "
+                                    "the photos (for a generated head that fits them less: TripoSR). The ears always "
+                                    "follow it."),
+        desc.BoolParam(name="useAiHead", label="Use AI Head", value=True,
+                       description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),
+        desc.PushButtonParam(name="fitAiHead", label="Fit Again To AI Head", semantic="liveAction",
+                             description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
+                                         "then the head on it: the face on its eyes, nose and mouth, the proportions "
+                                         "and the ears on its surface."),
+        desc.File(name="aiHeadFile", label="AI Head File", value="", invalidate=False,
+                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh generated "
+                              "elsewhere (.glb, as image-to-3D services export it, or .obj); then 'Fit To AI Head'."),
+        desc.StringParam(name="aiHeadFit", label="AI Head Fit", value="", advanced=True,
+                         description="The fit to the AI head (JSON: its placement on the face, the head on it)."),
+        desc.PushButtonParam(name="buildHead", label="Build Head", semantic="liveAction",
+                             description="Find the face in each view and fit the head on all of them (done by '1. "
+                                         "Generate AI Head' when needed; again: then generate the AI head again)."),
+        desc.PushButtonParam(name="refitHead", label="Fit Again", semantic="liveAction",
                              description="Fit the head again on the landmarks found by 'Build Head' (after changing "
                                          "the parameters of the fit)."),
         desc.FloatParam(name="minConfidence", label="Min Confidence", value=0.5, range=(0.1, 0.95, 0.05),
@@ -947,37 +995,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                         description="How much the change of shape stays symmetric."),
         desc.FloatParam(name="closeness", label="Stay Near Base", value=0.05, range=(0.0, 1.0, 0.01), invalidate=False,
                         description="How much the shape stays near the base face."),
-        desc.ChoiceParam(name="aiModel", label="2. AI Model", value="triposr", values=["triposr", "trellis2", "flame", "mica"],
-                         invalidate=False,
-                         description="The model of 'Generate AI Head': TripoSR (image to 3D, light: 6 GB of GPU or "
-                                     "the CPU, in Meshroom's Python, its weights in the models folder: python -m "
-                                     "meshroom.live.neural.download triposr), TRELLIS.2 (image to 3D, much finer, a 24 GB "
-                                     "GPU, its own environment: MESHROOM_TRELLIS2_PYTHON), FLAME (FLAME 2023 Open, CC-BY-4.0: "
-                                     "fitted on the face of the photos, no network; its .pkl and the MediaPipe "
-                                     "landmark embedding in MESHROOM_MODELS_PATH/flame) or MICA (a FLAME head from the "
-                                     "faces of all the views, without hair; NON-COMMERCIAL, a reference: its weights and "
-                                     "FLAME 2020 in MESHROOM_MODELS_PATH/mica)."),
-        desc.PushButtonParam(name="generateAiHead", label="2. Generate AI Head", semantic="liveAction",
-                             description="After 'Build Head': a whole head generated from the view shown by the AI "
-                                         "model ('AI Model', in another process), then 'Fit To AI Head'. Takes a "
-                                         "minute or more."),
-        desc.FloatParam(name="aiFace", label="AI Face", value=1.0, range=(0.0, 1.0, 0.05),
-                        description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
-                                    "1: that of the AI head (FLAME: fitted on the landmarks of the views), 0: the face fitted on "
-                                    "the photos (for a generated head that fits them less: TripoSR). The ears always "
-                                    "follow it."),
-        desc.BoolParam(name="useAiHead", label="Use AI Head", value=True,
-                       description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),
-        desc.PushButtonParam(name="fitAiHead", label="Fit Again To AI Head", semantic="liveAction",
-                             description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
-                                         "then the head on it: the face on its eyes, nose and mouth, the proportions "
-                                         "and the ears on its surface."),
-        desc.File(name="aiHeadFile", label="AI Head File", value="", invalidate=False,
-                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh generated "
-                              "elsewhere (.glb, as image-to-3D services export it, or .obj); then 'Fit To AI Head'."),
-        desc.StringParam(name="aiHeadFit", label="AI Head Fit", value="", advanced=True,
-                         description="The fit to the AI head (JSON: its placement on the face, the head on it)."),
-        desc.FloatParam(name="pinRadius", label="3. Pin Radius", value=4.0, range=(0.5, 20.0, 0.1),
+        desc.FloatParam(name="pinRadius", label="2. Pin Radius", value=4.0, range=(0.5, 20.0, 0.1),
                         description="How far around a pin the head moves (centimeters on the canonical head: an ear "
                                     "is about 6 cm high). More: a wider, smoother move."),
         *[desc.StringParam(name=pinsName, label=f"Pins (View {index + 1})", value="[]", semantic="tracks",
@@ -1188,6 +1206,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         geo = aiHead.geometry(aiHead.transform(vertices, np.array(fit["matrix"], dtype=np.float64)), triangles)
         geo.colors = colors
         return geo
+
+    def aiLandmarks(self, ctx):
+        """ The landmarks the AI head carries (FLAME), placed on the face (k, 3), or None. """
+        from meshroom.live import aiHead
+        fit = self.aiFit(ctx)
+        landmarks = aiHead.storedLandmarks(ctx.value("aiHeadFile")) if fit else None
+        if landmarks is None:
+            return None
+        landmarks = landmarks[np.isfinite(landmarks).all(1)]
+        return aiHead.transform(landmarks, np.array(fit["matrix"], dtype=np.float64)) if len(landmarks) else None
 
     @staticmethod
     def usesIdentity(ctx, original) -> bool:
@@ -1400,6 +1428,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             if display == "landmarks":
                 pixels = face.toPixels(np.array(view["landmarks"], dtype=np.float64), width, height)
                 scene3d.drawPoints(rgba, image.bbox, pixels, (1.0, 0.85, 0.2), alpha, 2)
+                aiLandmarks = self.aiLandmarks(ctx) if ctx.value("showGeometry") in ("ai head", "both") else None
+                if aiLandmarks is not None:
+                    # Those of the AI head (FLAME) where it is in this view, in orange: how it lands on them
+                    xy, _, inFront = self.aiCamera(ctx, view).project(aiLandmarks, width, height)
+                    scene3d.drawPoints(rgba, image.bbox, xy[inFront], (1.0, 0.45, 0.1), alpha, 2)
             else:
                 from meshroom.live import gpu
                 camera = self.viewCamera(ctx, view)
@@ -1479,8 +1512,20 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         logging.info(f"[FaceBuilder] Fit debug images written in {folder}")
 
     def generateAiHead(self, context):
-        """ "Generate AI Head": the view shown, cropped around the head and cut out (the MediaPipe segmentation), given
-        to the AI model ("AI Model", aiHead.generate); then "Fit To AI Head". """
+        """ "Generate AI Head": "Build Head" first when the views have not been built, then the AI head
+        (_generateAiHead); the values of both. """
+        built = {}
+        if not any(view.get("cameraToFace") for view in self.storedViews(context)):
+            # (the faces of the views first: "Build Head")
+            built = self.runAction("buildHead", context)
+            context = _Overridden(context, built)
+        result = self._generateAiHead(context)
+        return {**built, **result}
+
+    def _generateAiHead(self, context):
+        """ The AI head: FLAME fitted on the views, MICA from their crops, or the view shown, cropped around the head
+        and cut out (the MediaPipe segmentation), given to the AI model ("AI Model", aiHead.generate); then "Fit To AI
+        Head". """
         import hashlib
         from meshroom.live import BBox, aiHead, face, headFit
         from meshroom.live.neural import displayRGB

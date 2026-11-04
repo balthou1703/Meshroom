@@ -377,8 +377,10 @@ def test_flameFittedOnTheViews():
     for index, camera in enumerate(_headViews((0, 50, -50), size)):
         xy, _, _ = camera.project(actor[:n], *size)
         if index == 1:
-            # (the camera estimated for that view: off by 3 degrees and 5 mm)
-            camera = camera.copy(matrix=scene3d.composeTRS((0.5, 0, 0), (3.0, 0, 0)) @ camera.matrix)
+            # (the cameras estimated for the views: off by up to 10 degrees and 1.5 cm)
+            camera = camera.copy(matrix=scene3d.composeTRS((1.5, 0.5, 0), (8.0, -6.0, 0)) @ camera.matrix)
+        elif index == 2:
+            camera = camera.copy(matrix=scene3d.composeTRS((-1.0, 0, 0.5), (-5.0, 4.0, 0)) @ camera.matrix)
         views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
     off = actor[:n] + 0.3 * np.sin(actor[:n] / 3.0)
     start = flameFit.fitFlame(model, off)

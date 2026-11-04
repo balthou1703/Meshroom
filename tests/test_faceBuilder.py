@@ -808,6 +808,10 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
             assert cKDTree(actor).query(fitted.vertices[ears])[0].mean() < 0.2
             assert np.median(np.linalg.norm(aiGeo.vertices - actor, axis=1)) < 0.3
         assert Evaluator().render(plan, 1).rgba()[:, :, :3].max() > 0
+        # The landmarks, with those of the AI head
+        builder.display.value = "landmarks"
+        graph.update()
+        assert Evaluator().render(buildPlan(builder), 1).rgba()[:, :, :3].max() > 0
         assert builder.nodeDesc.runAction("clearHead", context)["aiHeadFit"] == ""
     finally:
         unregisterNodeDesc(LabelPlate)
