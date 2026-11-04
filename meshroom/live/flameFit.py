@@ -5,10 +5,12 @@ the whole head (skull, ears, neck) that goes with the face, from the statistics 
     loadModel: FLAME (its pickle) and its MediaPipe landmark embedding, from the models folder (MESHROOM_MODELS_PATH/flame);
     fitFlame: its shape (all its directions: identity and expression, unit variance) and a similarity put on the face
         fitted on the photos: its MediaPipe landmarks on theirs, then each vertex of the face on the nearest point of
-        FLAME (more correspondences), regularized (the coefficients toward 0: a likely head).
+        FLAME (more correspondences), regularized (the coefficients toward 0: a likely head): only where it starts;
+    fitFlameToViews: FLAME on its own on the landmarks of the images (their reprojection), its jaw and its move in each
+        view free: nothing of the FaceBuilder face holds it.
 
-The head is then given to "Fit To AI Head" like a generated one (aiHead: placed by its landmarks, the FaceBuilder head
-registered and warped on it; FLAME has no hair: its skull is used too).
+The FaceBuilder head is then warped onto it ("Fit To AI Head": aiHead, FLAME in the face space, its moves in the views
+those of the cameras of the head; FLAME has no hair: its skull is used too).
 """
 import glob
 import os
@@ -27,14 +29,29 @@ class FlameModel:
     """ FLAME: its template (n, 3) and directions (n, 3, k) in meters, its triangles, and where the MediaPipe landmarks
     are on it (triangles (l,), barycentric coordinates (l, 3), landmark indices (l,)). """
 
-    def __init__(self, template, directions, triangles, embedding):
+    def __init__(self, template, directions, triangles, embedding, jaw=None):
         self.template = np.asarray(template, dtype=np.float64)
         self.directions = np.asarray(directions, dtype=np.float64)
         self.triangles = np.asarray(triangles, dtype=np.int64)
         self.embeddingFaces, self.embeddingWeights, self.embeddingIndices = embedding
+        # The jaw (optional): its skinning weights (n,) and the regressor of its joint (n,)
+        self.jawWeights, self.jawRegressor = (None, None) if jaw is None else \
+            (np.asarray(jaw[0], dtype=np.float64), np.asarray(jaw[1], dtype=np.float64))
 
     def vertices(self, coefficients) -> np.ndarray:
         return self.template + self.directions[:, :, :len(coefficients)] @ np.asarray(coefficients, dtype=np.float64)
+
+    def jawJoint(self, vertices) -> np.ndarray:
+        return self.jawRegressor @ vertices
+
+    def posed(self, vertices, jaw) -> np.ndarray:
+        """ The vertices with the jaw turned by the rotation vector `jaw` around its joint (linear blend skinning, the
+        other joints at rest). """
+        if self.jawWeights is None or not np.any(jaw):
+            return vertices
+        joint = self.jawJoint(vertices)
+        turned = (vertices - joint) @ _rotation(jaw).T + joint
+        return vertices + self.jawWeights[:, None] * (turned - vertices)
 
     def landmarkRows(self):
         """ The landmarks as linear functions of the vertices: (corner vertices (l, 3), weights (l, 3)). """
@@ -65,9 +82,10 @@ def loadModel(folder: Optional[str] = None) -> FlameModel:
     try:
         template, directions, triangles = micaRunner.loadFlame(pickles[0], components=None)
         embedding = micaRunner.readMediapipeEmbedding(embeddingPath)
+        jaw = micaRunner.loadFlameJaw(pickles[0])
     except (OSError, KeyError, ValueError) as e:
         raise FlameUnavailable(f"FLAME: cannot read {pickles[0]} / {embeddingPath}: {e}") from e
-    return FlameModel(template, directions, triangles, embedding)
+    return FlameModel(template, directions, triangles, embedding, jaw=jaw)
 
 
 def _similarity(source, target, weights):
@@ -160,6 +178,21 @@ def _rotation(vector):
     return np.eye(3) + np.sin(angle) * cross + (1 - np.cos(angle)) * cross @ cross
 
 
+def _poseMatrix(pose, center):
+    """ The 4x4 move of a view (rotation vector pose[:3] around `center`, then translation pose[3:6]). """
+    rotation = _rotation(pose[:3])
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = center - rotation @ center + pose[3:6]
+    return matrix
+
+
+def _visible(view, indices):
+    pixels = view["pixels"]
+    hidden = set(int(i) for i in view.get("hidden") or [])
+    return np.array([i < len(pixels) and int(i) not in hidden for i in indices])
+
+
 def _reprojection(views, points, indices):
     """ The reprojection residuals (rows, 2) of landmark points (l, 3) (face space) in the views, the rows that count
     (each view's visible landmarks among `indices`), and their jacobians (rows, 2, 3) and landmark of each row. """
@@ -167,95 +200,164 @@ def _reprojection(views, points, indices):
     residuals, jacobians, which = [], [], []
     for view in views:
         width, height = view["size"]
-        pixels = view["pixels"]
-        hidden = set(int(i) for i in view.get("hidden") or [])
-        keep = np.array([i < len(pixels) and int(i) not in hidden for i in indices])
+        keep = _visible(view, indices)
         if not keep.any():
             continue
         xy, depth, jacobian = _projection(view["camera"], points[keep], width, height)
-        residuals.append(xy - pixels[indices[keep]])
+        residuals.append(xy - view["pixels"][indices[keep]])
         jacobians.append(jacobian)
         which.append(np.where(keep)[0])
     return np.concatenate(residuals), np.concatenate(jacobians), np.concatenate(which)
 
 
-def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[np.ndarray] = None, iterations: int = 10,
-                    regularization: float = 1.0, faceWeight: float = 5.0, surfaceWeight: float = 10.0,
+def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 15, regularization: float = 0.1,
+                    jawRegularization: float = 5.0, viewRotation: float = 2.0, viewTranslation: float = 0.3,
                     exact: bool = True, radius: float = 2.0, cancel=None, progress=None) -> dict:
     """
-    FLAME fitted on the landmarks of the photos (their reprojection in every view: what makes it fit the images), from
-    `start` (fitFlame on the face of the photos): its coefficients and its placement (similarity) by Gauss-Newton,
-    regularized (`regularization`: a coefficient of 1 against 1 pixel of error per landmark and view); then, with
-    `exact`, its surface moved around each landmark (gaussians of `radius` cm, solved together) so that each lands on
-    its pixel in every view. `faceTarget` (the face of the photos, 468 x 3, fitted on all the landmarks of the views):
-    its landmarks held near it too (`faceWeight` pixels per centimeter: what the views do not see, e.g. the depth with
-    a single view), the whole face on the surface of FLAME (`surfaceWeight` pixels per centimeter), and, with `exact`,
-    the face of FLAME then warped onto it (onPhotoFace): FLAME on the face of the images everywhere, not only at its
-    landmarks.
+    FLAME fitted on its own on the landmarks of the photos (their reprojection in every view: nothing else, no face of
+    the FaceBuilder), from `start` (fitFlame: only where it begins): its coefficients (identity and expression), its
+    jaw, its placement (similarity) and a rigid move of the head in each view (the cameras of the views are only
+    estimates: FLAME places itself in each), by Gauss-Newton, regularized (`regularization`: a coefficient of 1 against
+    1 pixel of error per landmark and view; `jawRegularization` the same for a jaw turned by 1 radian; a move of a view
+    of `viewRotation` degrees or `viewTranslation` cm against 1 pixel); then, with `exact`, its surface moved around each
+    landmark (gaussians of `radius` cm, solved together) so that each lands on its pixel in every view.
 
     Args:
         views: [{"camera", "size": (w, h), "pixels": (n, 2) the landmarks (Nuke pixels), "hidden": [indices]}].
 
     Returns:
-        fitFlame's dict, with "pixels": the RMS reprojection error (pixels) before and after.
+        fitFlame's dict, with "pixels": the RMS reprojection error (pixels) before and after, "jaw": its rotation
+        vector, "views": the 4x4 move of the head (face space) in each view (the camera of a view sees the head moved
+        by it: camera matrix inv(move) @ matrix).
     """
     corners, weights = model.landmarkRows()
     indices = model.embeddingIndices
     count = model.directions.shape[2]
+    hasJaw = model.jawWeights is not None
     scale0, rotation0, translation0 = start["similarity"]
     coefficients = np.asarray(start["coefficients"], dtype=np.float64).copy()
-    pose = np.zeros(7)  # rotation vector, translation (cm), log of the scale
+    jaw = np.zeros(3)
+    pose = np.zeros(7)  # the placement: rotation vector, translation (cm), log of the scale
+    viewPoses = np.zeros((len(views), 6))  # each view: rotation vector, translation (cm)
+    jawDirections = model.jawRegressor @ model.directions.reshape(len(model.template), -1) if hasJaw else None
+    if hasJaw:
+        jawDirections = jawDirections.reshape(3, count)
+    basis = model.directions[corners]  # (l, 3 corners, 3, k) meters
+    cornerJaw = model.jawWeights[corners] if hasJaw else np.zeros(corners.shape)
+    center = (scale0 * (model.vertices(coefficients)[corners] * weights[:, :, None]).sum(1) @ rotation0.T
+              + translation0).mean(0)
 
-    def landmarkPoints(c, p):
-        local = (model.vertices(c)[corners] * weights[:, :, None]).sum(1)
+    def local(c, j):
+        """ The landmarks in the FLAME space (meters), the jaw turned. """
+        vertices = model.posed(model.vertices(c), j) if hasJaw else model.vertices(c)
+        return (vertices[corners] * weights[:, :, None]).sum(1)
+
+    def placed(points, p):
         rotation = _rotation(p[:3]) @ rotation0
-        return scale0 * np.exp(p[6]) * local @ rotation.T + translation0 + p[3:6], rotation
+        return scale0 * np.exp(p[6]) * points @ rotation.T + translation0 + p[3:6], rotation
 
-    points, rotation = landmarkPoints(coefficients, pose)
-    residuals, _, _ = _reprojection(views, points, indices)
-    before = float(np.sqrt((residuals ** 2).sum(1).mean()))
-    basis = (model.directions[corners] * weights[:, :, None, None]).sum(1)          # (l, 3, k) meters
+    def inView(points, viewPose):
+        """ The landmarks moved as the head is in a view. """
+        return (points - center) @ _rotation(viewPose[:3]).T + center + viewPose[3:6]
+
+    def viewResiduals(points, view, keep):
+        from .headFit import _projection
+        width, height = view["size"]
+        xy, _, jacobian = _projection(view["camera"], points[keep], width, height)
+        return xy - view["pixels"][indices[keep]], jacobian
+
+    keeps = [_visible(view, indices) for view in views]
+    active = [v for v in range(len(views)) if keeps[v].any()]
+    if not active:
+        raise ValueError("FLAME: no landmark seen in the views")
+    rows = sum(int(keeps[v].sum()) for v in active)
+    perView = [max(int(keeps[v].sum()), 1) for v in range(len(views))]
+
+    def allResiduals(c, j, p, vp):
+        points, _ = placed(local(c, j), p)
+        return np.concatenate([viewResiduals(inView(points, vp[v]), views[v], keeps[v])[0] for v in active])
+
+    before = float(np.sqrt((allResiduals(coefficients, jaw, pose, viewPoses) ** 2).sum(1).mean()))
+    size = count + 3 + 7 + 6 * len(views)
+    step = 1e-4
     for iteration in range(iterations):
         if cancel:
             cancel()
-        points, rotation = landmarkPoints(coefficients, pose)
-        residuals, jacobians, which = _reprojection(views, points, indices)
+        points0 = local(coefficients, jaw)
+        points, rotation = placed(points0, pose)
         scale = scale0 * np.exp(pose[6])
-        # The coefficients: d xy / d c = J (2, 3) . scale R basis (3, k)
-        rowsC = np.einsum("rij,jk,rkm->rim", jacobians, scale * rotation, basis[which])
-        # The placement: numerically
-        rowsP = np.zeros((len(residuals), 2, 7))
-        for k in range(7):
-            step = np.zeros(7)
-            step[k] = 1e-4
-            moved, _ = landmarkPoints(coefficients, pose + step)
-            movedResiduals, _, _ = _reprojection(views, moved, indices)
-            rowsP[:, :, k] = (movedResiduals - residuals) / 1e-4
-        a = np.concatenate([rowsC, rowsP], axis=2).reshape(-1, count + 7)
-        b = -residuals.reshape(-1)
-        if faceTarget is not None:
-            # The landmarks near those of the face of the photos (in 3D)
-            offsets = points - np.asarray(faceTarget, dtype=np.float64)[indices]
-            rows3C = faceWeight * np.einsum("ij,ljk->lik", scale * rotation, basis)
-            rows3P = np.zeros((len(points), 3, 7))
-            for k in range(7):
-                step = np.zeros(7)
-                step[k] = 1e-4
-                moved, _ = landmarkPoints(coefficients, pose + step)
-                rows3P[:, :, k] = faceWeight * (moved - points) / 1e-4
-            a = np.concatenate([a, np.concatenate([rows3C, rows3P], axis=2).reshape(-1, count + 7)])
-            b = np.concatenate([b, -faceWeight * offsets.reshape(-1)])
-            # The whole face of the photos on the surface of FLAME (not only its landmarks: its width, its jaw...),
-            # point to plane at the nearest FLAME vertex
-            rowsS, rightS = _surfaceRows(model, coefficients, scale, rotation, translation0 + pose[3:6],
-                                         np.asarray(faceTarget, dtype=np.float64), surfaceWeight)
-            if len(rowsS):
-                a = np.concatenate([a, np.concatenate([rowsS, np.zeros((len(rowsS), 7))], axis=1)])
-                b = np.concatenate([b, rightS])
-        damping = np.r_[np.full(count, regularization * len(residuals)), np.full(7, 1e-6)]
-        delta = np.linalg.solve(a.T @ a + np.diag(damping), a.T @ b - damping * np.r_[coefficients, np.zeros(7)])
+        # d landmark (FLAME space) / d coefficients: the corners turned with the jaw (linear blend), and its joint moved
+        if hasJaw and np.any(jaw):
+            turn = _rotation(jaw)
+            w = cornerJaw[:, :, None, None]
+            turned = np.einsum("ij,lcjk->lcik", turn, basis)
+            moved = np.einsum("ij,jk->ik", np.eye(3) - turn, jawDirections)
+            cornerBasis = (1 - w) * basis + w * (turned + moved[None, None])
+        else:
+            cornerBasis = basis
+        landmarkBasis = (cornerBasis * weights[:, :, None, None]).sum(1)  # (l, 3, k)
+        blocks, right = [], []
+        for v in active:
+            view, keep = views[v], keeps[v]
+            seen = inView(points, viewPoses[v])
+            residual, jacobian = viewResiduals(seen, view, keep)
+            viewRotationMatrix = _rotation(viewPoses[v, :3])
+            block = np.zeros((len(residual), 2, size))
+            # The coefficients: J (2, 3) . Rv s R basis (3, k)
+            block[:, :, :count] = np.einsum("rij,jk,rkm->rim", jacobian, viewRotationMatrix @ (scale * rotation),
+                                            landmarkBasis[keep])
+            # The jaw, the placement, the move of the view: numerically
+            for k in range(3 + 7 + 6):
+                j, p, vp = jaw.copy(), pose.copy(), viewPoses[v].copy()
+                if k < 3:
+                    j[k] += step
+                elif k < 10:
+                    p[k - 3] += step
+                else:
+                    vp[k - 10] += step
+                if k < 3 and not hasJaw:
+                    continue
+                movedPoints, _ = placed(local(coefficients, j) if k < 3 else points0, p)
+                movedResidual, _ = viewResiduals(inView(movedPoints, vp), view, keep)
+                column = count + k if k < 10 else count + 10 + 6 * v + (k - 10)
+                block[:, :, column] = (movedResidual - residual) / step
+            blocks.append(block.reshape(-1, size))
+            right.append(-residual.reshape(-1))
+        a, b = np.concatenate(blocks), np.concatenate(right)
+        # Damping: the coefficients and the jaw toward 0 (a likely face), the moves of the views toward none (each
+        # against its own landmarks), the placement free
+        damping = np.zeros(size)
+        damping[:count] = regularization * rows
+        damping[count:count + 3] = jawRegularization * rows if hasJaw else 1.0
+        # (the placement nearly free: its depth and its size, that a single view hardly tells apart, held a little:
+        # 10% of size or 5 cm against 1 pixel)
+        damping[count + 3:count + 9] = 1e-6
+        damping[count + 6:count + 9] = rows / 5.0 ** 2
+        damping[count + 9] = rows / 0.1 ** 2
+        for v in range(len(views)):
+            first = count + 10 + 6 * v
+            damping[first:first + 3] = perView[v] / np.radians(viewRotation) ** 2
+            damping[first + 3:first + 6] = perView[v] / viewTranslation ** 2
+        current = np.r_[coefficients, jaw, np.zeros(7), viewPoses.ravel()]
+        current[count + 3:count + 10] = 0.0
+        delta = np.linalg.solve(a.T @ a + np.diag(damping), a.T @ b - damping * current)
+
+        def cost(d):
+            r = allResiduals(coefficients + d[:count], jaw + d[count:count + 3], pose + d[count + 3:count + 10],
+                             viewPoses + d[count + 10:].reshape(-1, 6))
+            return float((r ** 2).sum() + (damping * (current + d) ** 2).sum())
+        # (a step that makes it worse: shortened)
+        now = cost(np.zeros(size))
+        for _ in range(4):
+            if cost(delta) <= now:
+                break
+            delta = 0.5 * delta
+        else:
+            break
         coefficients += delta[:count]
-        pose += delta[count:]
+        jaw += delta[count:count + 3]
+        pose += delta[count + 3:count + 10]
+        viewPoses += delta[count + 10:].reshape(-1, 6)
         if progress:
             progress(0.8 * (iteration + 1) / float(iterations))
         if np.abs(delta).max() < 1e-5:
@@ -263,61 +365,23 @@ def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[
     rotation = _rotation(pose[:3]) @ rotation0
     scale = scale0 * np.exp(pose[6])
     translation = translation0 + pose[3:6]
-    vertices = scale * model.vertices(coefficients) @ rotation.T + translation
+    vertices = scale * model.posed(model.vertices(coefficients), jaw) @ rotation.T + translation
+    moves = [_poseMatrix(viewPoses[v], center) for v in range(len(views))]
+    # The views seen by their cameras with the head moved there
+    posedViews = [dict(view, camera=view["camera"].copy(matrix=np.linalg.inv(move) @ view["camera"].matrix))
+                  for view, move in zip(views, moves)]
     if exact:
-        if faceTarget is not None:
-            vertices = onPhotoFace(vertices, model.triangles, np.asarray(faceTarget, dtype=np.float64))
-        # (what the warp left: each landmark on its pixel)
-        vertices = _exactLandmarks(vertices, model, views, radius)
+        # (what FLAME could not: each landmark on its pixel)
+        vertices = _exactLandmarks(vertices, model, posedViews, radius)
     landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
     landmarks[indices] = (vertices[corners] * weights[:, :, None]).sum(1)
-    residuals, _, _ = _reprojection(views, landmarks[indices], indices)
+    residuals, _, _ = _reprojection(posedViews, landmarks[indices], indices)
     after = float(np.sqrt((residuals ** 2).sum(1).mean()))
     if progress:
         progress(1.0)
     return {"vertices": vertices, "triangles": model.triangles, "landmarks": landmarks, "coefficients": coefficients,
-            "error": start.get("error", 0.0), "similarity": (scale, rotation, translation), "pixels": (before, after)}
-
-
-def _photoFaceGeometry(faceTarget):
-    """ (triangles of the face of the FaceBuilder, its oval vertices). """
-    head = face.canonicalHead()
-    triangles = head.triangles()
-    faceTriangles = triangles[(triangles < face.MESH_VERTICES).all(1)]
-    oval = np.unique(np.asarray(face.headData()["holeEdges"]).ravel())
-    return faceTriangles, oval[oval < face.MESH_VERTICES]
-
-
-def _surfaceRows(model, coefficients, scale, rotation, translation, faceTarget, weight, maxDistance=1.5):
-    """ Rows (k, coefficients) and right sides (k,) of the face of the photos on the surface of FLAME placed by the
-    similarity: each face vertex (not on the oval) along the normal of its nearest FLAME vertex, in centimeters. """
-    from scipy.spatial import cKDTree
-    vertices = model.vertices(coefficients)
-    placed = scale * vertices @ rotation.T + translation
-    _, oval = _photoFaceGeometry(faceTarget)
-    inner = np.setdiff1d(np.arange(len(faceTarget)), oval)
-    distance, nearest = cKDTree(placed).query(faceTarget[inner])
-    close = distance < maxDistance
-    if not close.any():
-        return np.zeros((0, len(coefficients))), np.zeros(0)
-    nearest = nearest[close]
-    normals = _vertexNormals(placed, model.triangles)[nearest]
-    residual = ((faceTarget[inner][close] - placed[nearest]) * normals).sum(1)
-    rows = np.einsum("pi,ij,pjk->pk", normals, scale * rotation, model.directions[nearest])
-    return weight * rows, weight * residual
-
-
-def onPhotoFace(vertices, triangles, faceTarget, maxDistance=1.5):
-    """ The FLAME head with its face warped onto the face of the photos (aiHead.warpOntoSurface: its vertices near the
-    face, not near its oval, to their nearest points; the rest of the head carried smoothly). """
-    from scipy.spatial import cKDTree
-    from .aiHead import warpOntoSurface
-    faceTriangles, oval = _photoFaceGeometry(faceTarget)
-    distance, nearest = cKDTree(faceTarget).query(vertices)
-    data = ((distance < maxDistance) & ~np.isin(nearest, oval)).astype(np.float64)
-    moves = warpOntoSurface(vertices, triangles, faceTarget, faceTriangles, data, np.zeros(len(vertices)),
-                            stiffness=(10.0, 4.0, 1.5, 0.6), maxDistance=maxDistance)
-    return vertices + moves
+            "error": start.get("error", 0.0), "similarity": (scale, rotation, translation), "pixels": (before, after),
+            "jaw": jaw, "views": moves}
 
 
 def _exactLandmarks(vertices, model, views, radius, iterations=3):

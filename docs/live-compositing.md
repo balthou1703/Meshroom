@@ -779,15 +779,19 @@ fondu sur 2 cm autour de l'ovale ; sans refaire l'ajustement). « AI Model » fl
 réseau (`meshroom/live/flameFit.py`) : sa forme (toutes ses directions, variance unité) et une similitude ajustées sur
 le visage des photos, alternativement ; ses landmarks MediaPipe (son embedding) sur ceux du visage, puis (à partir de
 la 4e itération) chaque sommet du visage sur la surface de FLAME (le long de la normale du sommet le plus proche, à
-moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 par correspondance). Puis FLAME est
-ajusté sur les landmarks de toutes les vues (`fitFlameToViews` : leur reprojection par les caméras des vues,
-Gauss-Newton sur ses coefficients et sa pose, régularisé ; ses landmarks tenus près de ceux du visage des photos en
-3D, 5 px par cm : la profondeur qu'une vue seule ne voit pas) ; enfin sa surface est déplacée autour de chaque landmark
-(gaussiennes de 2 cm, résolues ensemble) pour qu'il tombe sur son pixel dans chaque vue : FLAME calé exactement sur le
-visage des images. Pas seulement en ses landmarks : tout le visage des photos (ses 468 sommets, ajustés sur tous les
-landmarks des vues) tire aussi la surface de FLAME pendant l'ajustement (point à plan, 10 px par cm), puis le visage de
-FLAME est déformé sur lui (`flameFit.onPhotoFace`, ICP non rigide ; l'ovale exclu) avant la dernière retouche de ses
-landmarks. La tête FLAME obtenue
+moins de 1 cm) ; régularisé (un coefficient de 1 contre 1 mm d'erreur × 0,1 par correspondance) : seulement son
+point de départ. Puis FLAME est ajusté seul sur les landmarks de toutes les vues (`fitFlameToViews` : leur
+reprojection, rien d'autre ; aucun visage du FaceBuilder ne le tient) : Gauss-Newton sur ses coefficients (identité et
+expression ; un coefficient de 1 contre 0,1 px), sa mâchoire (rotation autour de son articulation, skinning linéaire
+de FLAME : bouche ouverte), sa similitude, et un déplacement rigide de la tête dans chaque vue (les caméras des vues
+ne sont que des estimations : FLAME se place lui-même dans chacune ; 2° ou 3 mm contre 1 px), pas raccourcis quand
+ils empirent ; enfin sa surface est déplacée autour de chaque landmark (gaussiennes de 2 cm, résolues ensemble) pour
+qu'il tombe sur son pixel dans chaque vue. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
+`views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
+tête du FaceBuilder aussi quand « Use AI Head » (`headCamera`, sous les pins ; la sortie Camera aussi). La tête FLAME
+obtenue est dans l'espace du visage (pas d'alignement) ; le visage de la tête riggée est d'abord posé sur elle
+(`aiHead.faceOnHead` : similitude sur ses landmarks, puis ICP non rigide, landmarks tenus), puis la tête entière est
+recalée et déformée sur FLAME comme sur une tête générée. La tête FLAME obtenue
 (crâne, oreilles, cou, sans cheveux) est ensuite traitée comme une tête générée (posée par ses landmarks, crâne
 compris). Fichiers à mettre à la main dans `MESHROOM_MODELS_PATH/flame` : le .pkl de « FLAME 2023 Open » et
 `mediapipe_landmark_embedding.npz` (ou dans `mica/`), https://flame.is.tue.mpg.de. Sur une tête synthétique (FLAME

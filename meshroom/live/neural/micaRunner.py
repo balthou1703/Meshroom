@@ -145,6 +145,27 @@ def loadFlame(path, components=300):
             array(faces).astype(np.int64))
 
 
+def loadFlameJaw(path):
+    """ (skinning weights of the jaw (n,), regressor of the jaw joint from the vertices (n,)) of a FLAME pickle (its
+    joint 2: global, neck, jaw, eyes), or None when it has no skinning. """
+    import numpy as np
+    with open(path, "rb") as f:
+        data = _FlameUnpickler(f, encoding="latin1").load()
+    if "weights" not in data or "J_regressor" not in data:
+        return None
+
+    def array(value):
+        if isinstance(value, _ChumpyStub):
+            return value.array()
+        if hasattr(value, "toarray"):
+            return value.toarray()
+        return np.asarray(value)
+    weights, regressor = array(data["weights"]).astype(np.float64), array(data["J_regressor"]).astype(np.float64)
+    if weights.ndim != 2 or weights.shape[1] < 3 or regressor.ndim != 2 or regressor.shape[0] < 3:
+        return None
+    return weights[:, 2], regressor[2]
+
+
 def readMediapipeEmbedding(path):
     """ (faces (k,), barycentric coordinates (k, 3), MediaPipe landmark indices (k,)) of the FLAME MediaPipe landmark
     embedding (.npz of the FLAME site), or None without the file. """

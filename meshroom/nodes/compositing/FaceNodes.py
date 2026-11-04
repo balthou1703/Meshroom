@@ -1269,7 +1269,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         if not views or all(text.strip() in ("", "[]") for text in texts):
             return None, {}
         key = hashlib.sha1(np.ascontiguousarray(fitted.vertices).tobytes() + repr(
-            (texts, ctx.value("views"), ctx.value("pinRadius"))).encode()).hexdigest()
+            (texts, ctx.value("views"), ctx.value("pinRadius"),
+             ctx.value("aiHeadFit") if ctx.value("useAiHead") else "")).encode()).hexdigest()
         cached = FaceBuilder._PINNED.get(key)
         if cached is None:
             locations, targets, cameras, sizes, viewOf, inputs = [], [], [], [], [], []
@@ -1277,7 +1278,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 points, positions = self.viewPins(ctx, view)
                 if not len(points):
                     continue
-                camera = self.baseCamera(view)
+                camera = self.headCamera(ctx, view)
                 index = len(inputs)
                 inputs.append(view["input"])
                 for location, position in zip(face.pinLocations(original, points), positions):
@@ -1351,9 +1352,26 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         return face.viewCamera(view["focal"], width, height).copy(
             matrix=np.array(view["cameraToFace"], dtype=np.float64).reshape(4, 4))
 
+    def aiViewMove(self, ctx, view):
+        """ The move of the AI head in a view (FLAME placed on its own in each view), identity without. """
+        fit = self.aiFit(ctx)
+        move = ((fit or {}).get("views") or {}).get(view["input"])
+        return np.array(move, dtype=np.float64).reshape(4, 4) if move and len(move) == 16 else np.eye(4)
+
+    def aiCamera(self, ctx, view):
+        """ The camera of a stored view that sees the AI head where it was placed in it. """
+        camera = self.baseCamera(view)
+        move = self.aiViewMove(ctx, view)
+        return camera if np.allclose(move, np.eye(4)) else camera.copy(matrix=np.linalg.inv(move) @ camera.matrix)
+
+    def headCamera(self, ctx, view):
+        """ The camera of a stored view before the pins: that of the AI head when the head comes from it ("Use AI
+        Head": the head warped onto it, seen as it is), else the base one. """
+        return self.aiCamera(ctx, view) if ctx.value("useAiHead") else self.baseCamera(view)
+
     def viewCamera(self, ctx, view):
         """ The camera of a stored view, the head at the origin, corrected by its pins (viewPose). """
-        camera = self.baseCamera(view)
+        camera = self.headCamera(ctx, view)
         pose = self.viewPose(ctx, view)
         if np.allclose(pose, np.eye(4)):
             return camera
@@ -1388,8 +1406,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 shown = ctx.value("showGeometry")
                 aiGeo = self.aiHeadGeo(ctx) if shown in ("ai head", "both") else None
                 if aiGeo is not None:
-                    # Drawn as the head is ("Display"), in orange
-                    geoRender.drawGeometry(rgba, image.bbox, aiGeo, camera, width, height, display, (1.0, 0.55, 0.15),
+                    # Drawn as the head is ("Display"), in orange, where it was placed in this view (no pins)
+                    geoRender.drawGeometry(rgba, image.bbox, aiGeo, self.aiCamera(ctx, view), width, height, display,
+                                           (1.0, 0.55, 0.15),
                                            alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx), quads=True)
                 if shown in ("head", "both") or aiGeo is None:
                     geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
@@ -1534,19 +1553,23 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             flame = flameFit.loadModel()
         except flameFit.FlameUnavailable as e:
             raise RuntimeError(str(e)) from e
+        # (where it starts: on the face of the photos)
         start = flameFit.fitFlame(flame, faceTarget, cancel=context.checkCancelled,
                                   progress=lambda done: context.progress(0.1 + 0.2 * done, "Fit FLAME on the face"))
-        # Then on the landmarks of every view (their reprojection): FLAME on the face of the images
-        views = []
+        # Then on its own on the landmarks of every view (their reprojection; its jaw and its move in each view free):
+        # FLAME on the face of the images, nothing of the face of the FaceBuilder holding it
+        views, inputs = [], []
         for view in self.storedViews(context):
             if not view.get("cameraToFace") or not view.get("landmarks"):
                 continue
             width, height = view["size"]
+            inputs.append(view["input"])
             views.append({"camera": self.baseCamera(view), "size": (width, height), "hidden": view.get("hidden") or [],
                           "pixels": face.toPixels(np.array(view["landmarks"], dtype=np.float64), width, height)})
-        fit = flameFit.fitFlameToViews(flame, views, start, faceTarget=faceTarget, cancel=context.checkCancelled,
+        fit = flameFit.fitFlameToViews(flame, views, start, cancel=context.checkCancelled,
                                        progress=lambda done: context.progress(0.3 + 0.4 * done,
                                                                               "Fit FLAME on the views")) if views else start
+        moves = np.array(fit.get("views") or np.zeros((0, 4, 4)), dtype=np.float64).reshape(-1, 4, 4)
         folder = os.environ.get("MESHROOM_AIHEAD_FOLDER") or os.path.join(os.path.expanduser("~"), ".cache", "meshroom",
                                                                           "aiHeads")
         os.makedirs(folder, exist_ok=True)
@@ -1555,10 +1578,17 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         np.savez_compressed(output, vertices=fit["vertices"].astype(np.float32), faces=fit["triangles"].astype(np.int32),
                             colors=np.full((len(fit["vertices"]), 3), 190, np.uint8),
                             landmarks=fit["landmarks"].astype(np.float32),
-                            coefficients=fit["coefficients"].astype(np.float32))
+                            coefficients=fit["coefficients"].astype(np.float32),
+                            # In the face space (no alignment), seen moved in each view
+                            faceSpace=np.array(True), viewInputs=np.array(inputs[:len(moves)], dtype=str),
+                            viewMoves=moves)
         import logging
         before, after = fit.get("pixels", (0.0, 0.0))
-        logging.info(f"[FaceBuilder] FLAME fitted on the views: landmarks {before:.2f} -> {after:.2f} px RMS")
+        jaw = np.degrees(np.linalg.norm(fit.get("jaw", np.zeros(3))))
+        logging.info(f"[FaceBuilder] FLAME fitted on the views: landmarks {before:.2f} -> {after:.2f} px RMS, "
+                     f"jaw {jaw:.1f} deg, moves in the views " + ", ".join(
+                         f"{name}: {np.degrees(np.arccos(np.clip((np.trace(m[:3, :3]) - 1) / 2, -1, 1))):.1f} deg "
+                         f"{np.linalg.norm(m[:3, 3]):.2f} cm" for name, m in zip(inputs, moves)))
         result = self.fitAiHead(context, path=output, start=0.7)
         result["aiHeadFile"] = output
         return result
@@ -1604,9 +1634,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 landmarks = aiHead.findLandmarks(vertices, triangles, colors, cancel=context.checkCancelled)
         except (aiHead.AIHeadUnavailable, face.FaceUnavailable) as e:
             raise RuntimeError(str(e)) from e
-        # On the face fitted on the views (its size and place: those of the cameras)
         faceVertices = self.photoFace(ctx)
-        matrix = aiHead.alignment(landmarks, faceVertices)
+        viewMoves = aiHead.storedViewMoves(path)
+        if viewMoves is not None:
+            # Placed on its own on the views (FLAME): already in the face space; the face of the head put on it (its
+            # landmarks on FLAME's, the rest on its surface), not that of the photos
+            matrix = np.eye(4)
+            faceVertices = aiHead.faceOnHead(faceVertices, vertices, triangles, landmarks)
+        else:
+            # On the face fitted on the views (its size and place: those of the cameras)
+            matrix = aiHead.alignment(landmarks, faceVertices)
         registration = aiHead.registerHead(
             original.vertices, original.topology, aiHead.transform(vertices, matrix), triangles,
             aiHead.transform(landmarks, matrix), faceTarget=faceVertices, earDetail=context.value("aiModel") != "triposr",
@@ -1629,6 +1666,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         registration["warp"] = {int(v): [round(float(c), 4) for c in moves[v]]
                                 for v in np.where(np.abs(moves).max(axis=1) > 1e-4)[0]}
         fit = {"matrix": [[round(float(v), 7) for v in row] for row in matrix], "registration": registration}
+        if viewMoves:
+            # The move of the head in each view (the cameras of the views as FLAME placed itself in them)
+            fit["views"] = {name: [round(float(v), 7) for v in move.ravel()] for name, move in viewMoves.items()}
         return {"aiHeadFit": json.dumps(fit)}
 
     def fitHeadContours(self, context):

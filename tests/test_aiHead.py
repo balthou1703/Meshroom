@@ -364,30 +364,58 @@ def test_flameFittedOnTheFace():
 
 
 def test_flameFittedOnTheViews():
-    """ FLAME fitted on the landmarks of the views (their reprojection), from its fit on a face that is a bit off:
-    its landmarks then land on their pixels in every view. """
+    """ FLAME fitted on its own on the landmarks of the views (their reprojection), from its fit on a face that is a
+    bit off and with cameras a bit off (a view turned and moved): its landmarks then land on their pixels in every view,
+    the cameras corrected by its moves in the views. """
     from tests.test_faceBuilder import _headViews
-    from meshroom.live import flameFit
+    from meshroom.live import flameFit, scene3d
     model = _fakeFlame()
     n = face.MESH_VERTICES
     actor = _actor(7, out=0.0, back=0.0)
     size = (640, 480)
     views = []
-    for camera in _headViews((0, 50, -50), size):
+    for index, camera in enumerate(_headViews((0, 50, -50), size)):
         xy, _, _ = camera.project(actor[:n], *size)
+        if index == 1:
+            # (the camera estimated for that view: off by 3 degrees and 5 mm)
+            camera = camera.copy(matrix=scene3d.composeTRS((0.5, 0, 0), (3.0, 0, 0)) @ camera.matrix)
         views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
-    # The face of the photos: off by a few millimeters (a smooth error)
     off = actor[:n] + 0.3 * np.sin(actor[:n] / 3.0)
     start = flameFit.fitFlame(model, off)
-    # Without the face: its landmarks put on their pixels
+    fit = flameFit.fitFlameToViews(model, views, start, exact=False)
+    before, after = fit["pixels"]
+    print(f"FLAME alone on the views: {before:.2f} -> {after:.2f} px")
+    assert after < 1.0 and after < 0.2 * before and len(fit["views"]) == 3
     fit = flameFit.fitFlameToViews(model, views, start)
     before, after = fit["pixels"]
-    print(f"FLAME on the views: {before:.2f} -> {after:.2f} px")
-    assert after < 0.5 and after < 0.2 * before
-    # With the face of the photos (fitted on all their landmarks: here the actor's): FLAME on it everywhere
-    fit = flameFit.fitFlameToViews(model, views, start, faceTarget=actor[:n])
+    print(f"FLAME on the views, exact: {before:.2f} -> {after:.2f} px")
+    assert after < 0.5
+
+
+def test_flameJawFittedOnTheViews():
+    """ A FLAME with a jaw (skinning weights below the mouth, its joint behind it): an open mouth in the views found
+    by the jaw (not by the shape). """
+    from tests.test_faceBuilder import _headViews
+    from meshroom.live import flameFit
+    base = _fakeFlame()
+    template = base.template
+    # (centimeters: below the upper lip, the more the lower)
+    y = template[:, 1] * 100.0
+    jawWeights = np.clip((-3.0 - y) / 2.0, 0.0, 1.0) * (template[:, 2] * 100.0 > -2.0)
+    regressor = np.zeros(len(template))
+    behind = np.argsort(np.linalg.norm(template * 100.0 - np.array([0.0, -2.5, -6.0]), axis=1))[:8]
+    regressor[behind] = 1.0 / len(behind)
+    model = flameFit.FlameModel(template, base.directions, base.triangles,
+                                (base.embeddingFaces, base.embeddingWeights, base.embeddingIndices), jaw=(jawWeights, regressor))
+    n = face.MESH_VERTICES
+    truth = 100.0 * model.posed(model.template, np.array([0.15, 0.0, 0.0]))
+    size = (640, 480)
+    views = []
+    for camera in _headViews((0, 40, -40), size):
+        xy, _, _ = camera.project(truth[:n], *size)
+        views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
+    start = flameFit.fitFlame(model, 100.0 * model.template[:n])
+    fit = flameFit.fitFlameToViews(model, views, start, exact=False)
     before, after = fit["pixels"]
-    print(f"FLAME on the views and the face: {before:.2f} -> {after:.2f} px")
-    assert after < 0.5 and after < 0.2 * before
-    from scipy.spatial import cKDTree
-    assert cKDTree(fit["vertices"]).query(actor[:n])[0].mean() < 0.1
+    print(f"FLAME jaw: {before:.2f} -> {after:.2f} px, jaw {fit['jaw']}")
+    assert after < 0.3 * before and 0.08 < fit["jaw"][0] < 0.22

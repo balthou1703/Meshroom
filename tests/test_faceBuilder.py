@@ -787,6 +787,8 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
         elif model == "flame":
             # Fitted, not generated
             assert not inputs and np.load(result["aiHeadFile"])["landmarks"].shape == (n, 3)
+            # Placed on its own in the view: its move there kept (the camera of the head)
+            assert set(json.loads(result["aiHeadFit"])["views"]) == {"input"}
         else:
             assert len(inputs) == 1 and inputs[0].shape[2] == 4 and 0.0 < inputs[0][:, :, 3].mean() < 1.0
         assert os.path.exists(result["aiHeadFile"]) and json.loads(result["aiHeadFit"])["registration"]

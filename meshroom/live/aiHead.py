@@ -303,6 +303,38 @@ def storedLandmarks(path: str) -> Optional[np.ndarray]:
     return np.asarray(data["landmarks"], dtype=np.float64)
 
 
+def storedViewMoves(path: str) -> Optional[dict]:
+    """ {input: 4x4 move of the head in that view} of a head placed on its own in the views, in the face space (a FLAME
+    head fitted on them: no alignment), or None. """
+    if not path or not path.lower().endswith(".npz") or not os.path.exists(path):
+        return None
+    data = np.load(path)
+    if "faceSpace" not in data or not bool(data["faceSpace"]):
+        return None
+    inputs = [str(name) for name in data["viewInputs"]] if "viewInputs" in data else []
+    moves = np.asarray(data["viewMoves"], dtype=np.float64).reshape(-1, 4, 4) if "viewMoves" in data else np.zeros((0, 4, 4))
+    return {name: move for name, move in zip(inputs, moves)}
+
+
+def faceOnHead(faceVertices: np.ndarray, aiVertices: np.ndarray, aiTriangles: np.ndarray,
+               landmarks: np.ndarray) -> np.ndarray:
+    """ The face (468, 3) of the FaceBuilder put on a generated head whose landmarks are known (FLAME): moved by a
+    similarity onto them, then warped (warpOntoSurface): its vertices on the landmarks, the others on its surface. """
+    n = face.MESH_VERTICES
+    faceVertices = np.asarray(faceVertices, dtype=np.float64)[:n]
+    known = np.isfinite(landmarks[:n]).all(1)
+    if known.sum() < 10:
+        return faceVertices
+    scale, rotation, translation = similarity(faceVertices[known], landmarks[:n][known])
+    placed = scale * faceVertices @ rotation.T + translation
+    triangles = face.canonicalHead().triangles()
+    faceTriangles = triangles[(triangles < n).all(1)]
+    moves = warpOntoSurface(placed, faceTriangles, aiVertices, aiTriangles, np.ones(n), np.zeros(n),
+                            stiffness=(10.0, 4.0, 1.5, 0.6), maxDistance=1.5,
+                            anchors=(np.where(known)[0], landmarks[:n][known]))
+    return placed + moves
+
+
 def geometry(vertices: np.ndarray, triangles: np.ndarray, name: str = "aiHead") -> scene3d.GeoData:
     triangles = np.asarray(triangles, dtype=np.int64)
     return scene3d.GeoData(vertices, np.full(len(triangles), 3), triangles.ravel(), name=name)
