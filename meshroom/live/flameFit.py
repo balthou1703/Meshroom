@@ -180,7 +180,7 @@ def _reprojection(views, points, indices):
 
 
 def fitFlameToViews(model: FlameModel, views, start: dict, faceTarget: Optional[np.ndarray] = None, iterations: int = 10,
-                    regularization: float = 1.0, faceWeight: float = 5.0, exact: bool = True, radius: float = 1.0,
+                    regularization: float = 1.0, faceWeight: float = 5.0, exact: bool = True, radius: float = 2.0,
                     cancel=None, progress=None) -> dict:
     """
     FLAME fitted on the landmarks of the photos (their reprojection in every view: what makes it fit the images), from

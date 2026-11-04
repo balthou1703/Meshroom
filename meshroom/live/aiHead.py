@@ -588,9 +588,18 @@ def registeredHead(rest: np.ndarray, registration: dict) -> np.ndarray:
         vertices[int(vertex)] += offset
     # The neck keeps its shape toward its base: there it only follows the face (no identity, no ear move)
     followed = face.HeadFollow.of(rest).follow(np.asarray(registration["face"], dtype=np.float64))
-    weight = headFit.neckIdentityWeight(rest)
-    weight = np.clip((weight - headFit.NECK_IDENTITY_BASE) / (1.0 - headFit.NECK_IDENTITY_BASE), 0.0, 1.0)[:, None]
-    return followed + weight * (vertices - followed)
+    return followed + neckRigid(vertices - followed)
+
+
+def neckRigid(moves: np.ndarray) -> np.ndarray:
+    """ The moves of a head with its neck kept in shape: toward its base, the move of each neck vertex fades into the
+    mean move of the top of the neck (the neck carried along as a whole: neither sheared nor broken). """
+    fade = neckWarpFade(len(moves))
+    if np.all(fade == 1.0):
+        return moves
+    top = (fade > 0.85) & (fade < 1.0)
+    carried = moves[top].mean(axis=0) if top.any() else np.zeros(3)
+    return fade[:, None] * moves + (1.0 - fade)[:, None] * carried[None, :]
 
 
 # The whole head onto the generated one: a smooth warp (non-rigid ICP), the correspondence by position
@@ -703,5 +712,4 @@ def warpedHead(vertices: np.ndarray, registration: dict, aiFace: float = 1.0) ->
     moves = np.zeros_like(vertices)
     for vertex, move in warp.items():
         moves[int(vertex)] = move
-    weights = faceBlend(len(vertices), float(aiFace)) * neckWarpFade(len(vertices))
-    return vertices + weights[:, None] * moves
+    return vertices + neckRigid(faceBlend(len(vertices), float(aiFace))[:, None] * moves)

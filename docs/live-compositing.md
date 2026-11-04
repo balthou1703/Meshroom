@@ -718,6 +718,13 @@ seule jusqu'au col. Débogage : avec `MESHROOM_HEADFIT_DEBUG=<dossier>`, « Fit 
 vue `fitDebug_<n>.png` (le recadrage, la segmentation : cheveux en rouge, peau du visage en bleu, du corps en vert ;
 les sommets de la tête avant l'ajustement en jaune, après en cyan) et `fit.json`.
 
+L'ordre des actions du FaceBuilder est celui de ses paramètres : « 1. Build Head » (puis « 1. Fit Again » après
+avoir changé ses réglages), « 2. AI Model » et « 2. Generate AI Head » (« AI Face », « Use AI Head » ; « Fit Again To
+AI Head » sans regénérer), « 3. Pin Radius » et les pins ; puis l'affichage (« Show Geometry » : la tête IA est dessinée
+comme la tête, en orange) ; les ajustements sans IA (« Without AI: ... ») et « Clear All » en dernier. Le cou est
+porté en bloc vers sa base (`aiHead.neckRigid` : le mouvement de chaque sommet s'y fond dans celui du haut du cou) :
+ni cisaillé ni cassé par l'ajustement ou la déformation.
+
 Tête IA (FaceBuilder, `meshroom/live/aiHead.py`) : « Generate AI Head » génère une tête complète colorée depuis la
 vue affichée avec le modèle « AI Model ». TripoSR (Stability AI et Tripo AI, MIT ; par défaut) est léger : ~6 Go de
 GPU, ou le CPU (une à quelques minutes) quand le GPU est trop petit ou trop ancien pour PyTorch ; il tourne dans le

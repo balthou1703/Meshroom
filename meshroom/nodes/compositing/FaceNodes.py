@@ -926,6 +926,11 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                              "order, or a head of the FaceBuilder). Without it: the canonical head."),
         desc.ChoiceParam(name="meshType", label="Mesh", value="head", values=["head", "face"],
                          description="head: the face with ears, skull and neck following it. face: the face only."),
+        desc.PushButtonParam(name="buildHead", label="1. Build Head", semantic="liveAction",
+                             description="Find the face in each view and fit the head on all of them."),
+        desc.PushButtonParam(name="refitHead", label="1. Fit Again", semantic="liveAction",
+                             description="Fit the head again on the landmarks found by 'Build Head' (after changing "
+                                         "the parameters of the fit)."),
         desc.FloatParam(name="minConfidence", label="Min Confidence", value=0.5, range=(0.1, 0.95, 0.05),
                         invalidate=False, description="A face is found when MediaPipe is at least this confident."),
         desc.IntParam(name="maxFrames", label="Max Frames", value=12, range=(1, 60, 1), invalidate=False,
@@ -942,36 +947,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                         description="How much the change of shape stays symmetric."),
         desc.FloatParam(name="closeness", label="Stay Near Base", value=0.05, range=(0.0, 1.0, 0.01), invalidate=False,
                         description="How much the shape stays near the base face."),
-        desc.FloatParam(name="pinRadius", label="Pin Radius", value=4.0, range=(0.5, 20.0, 0.1),
-                        description="How far around a pin the head moves (centimeters on the canonical head: an ear "
-                                    "is about 6 cm high). More: a wider, smoother move."),
-        *[desc.StringParam(name=pinsName, label=f"Pins (View {index + 1})", value="[]", semantic="tracks",
-                           advanced=True,
-                           description=f"Pins of View {index + 1} (JSON): a point of the base head (\"point\") and "
-                                       "where it is in the view (its key). Edited in the viewer.")
-          for index, pinsName in enumerate(_VIEW_PINS.values())],
-        desc.PushButtonParam(name="buildHead", label="Build Head", semantic="liveAction",
-                             description="Find the face in each view and fit the head on all of them."),
-        desc.BoolParam(name="predictHead", label="Head From Face", value=True,
-                       description="The skull, ears and neck take the proportions that go with the face (the identity "
-                                   "model of ICT-FaceKit: 50 modes learned on scans of whole heads, the face fitted on "
-                                   "the landmarks); off: they only follow the face (stretched with it)."),
-        desc.PushButtonParam(name="fitHeadContours", label="Fit Ears, Neck And Skull", semantic="liveAction",
-                             description="After 'Build Head': fit the ears, the neck and the skull on the views, as "
-                                         "the pins would (MediaPipe segmentation: the outlines of the ears and neck "
-                                         "on the skin, the skull inside the hair; with 'Use Depth', the depth of the "
-                                         "Depth Anything network). The pins still apply after it."),
-        desc.FloatParam(name="fitRadius", label="Fit Radius", value=3.0, range=(1.0, 10.0, 0.1), invalidate=False,
-                        enabled=lambda node: not node.predictHead.value,
-                        description="'Fit Ears, Neck And Skull' without 'Head From Face': how smooth the move is "
-                                    "(centimeters around each control point; more: smoother, less detail)."),
-        desc.BoolParam(name="fitDepth", label="Use Depth", value=True, invalidate=False,
-                       description="'Fit Ears, Neck And Skull' also uses the depth of the views (Depth Anything V2: "
-                                   "pip install transformers, python -m meshroom.live.neural.download depthanything); "
-                                   "without the network, only the outlines."),
-        desc.StringParam(name="headFit", label="Head Fit", value="", advanced=True,
-                         description="The fit of the ears, neck and skull (JSON: control points and their moves)."),
-        desc.ChoiceParam(name="aiModel", label="AI Model", value="triposr", values=["triposr", "trellis2", "flame", "mica"],
+        desc.ChoiceParam(name="aiModel", label="2. AI Model", value="triposr", values=["triposr", "trellis2", "flame", "mica"],
                          invalidate=False,
                          description="The model of 'Generate AI Head': TripoSR (image to 3D, light: 6 GB of GPU or "
                                      "the CPU, in Meshroom's Python, its weights in the models folder: python -m "
@@ -981,45 +957,69 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                      "landmark embedding in MESHROOM_MODELS_PATH/flame) or MICA (a FLAME head from the "
                                      "faces of all the views, without hair; NON-COMMERCIAL, a reference: its weights and "
                                      "FLAME 2020 in MESHROOM_MODELS_PATH/mica)."),
-        desc.PushButtonParam(name="generateAiHead", label="Generate AI Head", semantic="liveAction",
+        desc.PushButtonParam(name="generateAiHead", label="2. Generate AI Head", semantic="liveAction",
                              description="After 'Build Head': a whole head generated from the view shown by the AI "
                                          "model ('AI Model', in another process), then 'Fit To AI Head'. Takes a "
                                          "minute or more."),
-        desc.File(name="aiHeadFile", label="AI Head", value="", invalidate=False,
-                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh generated "
-                              "elsewhere (.glb, as image-to-3D services export it, or .obj); then 'Fit To AI Head'."),
-        desc.PushButtonParam(name="fitAiHead", label="Fit To AI Head", semantic="liveAction",
-                             description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
-                                         "then the head on it: the face on its eyes, nose and mouth, the proportions "
-                                         "and the ears on its surface."),
         desc.FloatParam(name="aiFace", label="AI Face", value=1.0, range=(0.0, 1.0, 0.05),
                         description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
                                     "1: that of the AI head (FLAME: fitted on the landmarks of the views), 0: the face fitted on "
                                     "the photos (for a generated head that fits them less: TripoSR). The ears always "
                                     "follow it."),
-        desc.BoolParam(name="useAiHead", label="Head From AI", value=True,
+        desc.BoolParam(name="useAiHead", label="Use AI Head", value=True,
                        description="The head is the one fitted to the AI head ('Fit To AI Head'), when there is one."),
+        desc.PushButtonParam(name="fitAiHead", label="Fit Again To AI Head", semantic="liveAction",
+                             description="Put the AI head on the face (its face found on renders of it by MediaPipe), "
+                                         "then the head on it: the face on its eyes, nose and mouth, the proportions "
+                                         "and the ears on its surface."),
+        desc.File(name="aiHeadFile", label="AI Head File", value="", invalidate=False,
+                  description="The generated head (.npz of 'Generate AI Head'), or any head mesh generated "
+                              "elsewhere (.glb, as image-to-3D services export it, or .obj); then 'Fit To AI Head'."),
         desc.StringParam(name="aiHeadFit", label="AI Head Fit", value="", advanced=True,
                          description="The fit to the AI head (JSON: its placement on the face, the head on it)."),
-        desc.ChoiceParam(name="showGeometry", label="Show Geometry", value="head", values=["head", "ai head", "both"],
-                         description="What is drawn over the view: the head (MediaPipe face, ears, skull, neck), the "
-                                     "AI head (shaded, its colors), or both."),
-        desc.PushButtonParam(name="refitHead", label="Fit Again", semantic="liveAction",
-                             description="Fit the head again on the landmarks found by 'Build Head' (after changing "
-                                         "the parameters of the fit)."),
-        desc.PushButtonParam(name="clearHead", label="Clear", semantic="liveAction",
-                             description="Back to the base head."),
-        desc.StringParam(name="faceShape", label="Face Shape", value="", semantic="faceShape", advanced=True,
-                         description="The shape of the actor: offsets of the vertices of the base face (JSON)."),
-        desc.StringParam(name="views", label="Views", value="", visible=False, advanced=True,
-                         description="The views (JSON): their input, frame, size, landmarks, focal length and pose."),
+        desc.FloatParam(name="pinRadius", label="3. Pin Radius", value=4.0, range=(0.5, 20.0, 0.1),
+                        description="How far around a pin the head moves (centimeters on the canonical head: an ear "
+                                    "is about 6 cm high). More: a wider, smoother move."),
+        *[desc.StringParam(name=pinsName, label=f"Pins (View {index + 1})", value="[]", semantic="tracks",
+                           advanced=True,
+                           description=f"Pins of View {index + 1} (JSON): a point of the base head (\"point\") and "
+                                       "where it is in the view (its key). Edited in the viewer.")
+          for index, pinsName in enumerate(_VIEW_PINS.values())],
         desc.ChoiceParam(name="showView", label="Show View", value="input", values=list(_VIEW_INPUTS),
                          description="The view output (and drawn on): input (View 1), input1 (View 2)..."),
+        desc.ChoiceParam(name="showGeometry", label="Show Geometry", value="head", values=["head", "ai head", "both"],
+                         description="What is drawn over the view: the head (MediaPipe face, ears, skull, neck), the "
+                                     "AI head (drawn the same way, in orange), or both."),
         desc.ChoiceParam(name="display", label="Display", value="wireframe",
                          values=["shaded", "edges", "wireframe", "points", "landmarks", "none"],
                          description="What is drawn over the view: the head, the landmarks, or nothing."),
         desc.FloatParam(name="opacity", label="Opacity", value=0.6, range=(0.0, 1.0, 0.01),
                         description="Opacity of the head drawn over the view."),
+        desc.BoolParam(name="predictHead", label="Without AI: Head From Face", value=True,
+                       description="The skull, ears and neck take the proportions that go with the face (the identity "
+                                   "model of ICT-FaceKit: 50 modes learned on scans of whole heads, the face fitted on "
+                                   "the landmarks); off: they only follow the face (stretched with it)."),
+        desc.PushButtonParam(name="fitHeadContours", label="Without AI: Fit Ears, Neck, Skull", semantic="liveAction",
+                             description="After 'Build Head': fit the ears, the neck and the skull on the views, as "
+                                         "the pins would (MediaPipe segmentation: the outlines of the ears and neck "
+                                         "on the skin, the skull inside the hair; with 'Use Depth', the depth of the "
+                                         "Depth Anything network). The pins still apply after it."),
+        desc.FloatParam(name="fitRadius", label="Without AI: Fit Radius", value=3.0, range=(1.0, 10.0, 0.1), invalidate=False,
+                        enabled=lambda node: not node.predictHead.value,
+                        description="'Fit Ears, Neck And Skull' without 'Head From Face': how smooth the move is "
+                                    "(centimeters around each control point; more: smoother, less detail)."),
+        desc.BoolParam(name="fitDepth", label="Without AI: Use Depth", value=True, invalidate=False,
+                       description="'Fit Ears, Neck And Skull' also uses the depth of the views (Depth Anything V2: "
+                                   "pip install transformers, python -m meshroom.live.neural.download depthanything); "
+                                   "without the network, only the outlines."),
+        desc.StringParam(name="headFit", label="Head Fit", value="", advanced=True,
+                         description="The fit of the ears, neck and skull (JSON: control points and their moves)."),
+        desc.PushButtonParam(name="clearHead", label="Clear All", semantic="liveAction",
+                             description="Back to the base head."),
+        desc.StringParam(name="faceShape", label="Face Shape", value="", semantic="faceShape", advanced=True,
+                         description="The shape of the actor: offsets of the vertices of the base face (JSON)."),
+        desc.StringParam(name="views", label="Views", value="", visible=False, advanced=True,
+                         description="The views (JSON): their input, frame, size, landmarks, focal length and pose."),
     ]
     outputs = [
         desc.Geo(name="geoOutput", label="Head", description="The head of the actor (face space)."),
@@ -1388,9 +1388,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 shown = ctx.value("showGeometry")
                 aiGeo = self.aiHeadGeo(ctx) if shown in ("ai head", "both") else None
                 if aiGeo is not None:
-                    geoRender.drawGeometry(rgba, image.bbox, aiGeo, camera, width, height, "shaded", (0.8, 0.8, 0.8),
-                                           alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
-                                           vertexColors=getattr(aiGeo, "colors", None))
+                    # Drawn as the head is ("Display"), in orange
+                    geoRender.drawGeometry(rgba, image.bbox, aiGeo, camera, width, height, display, (1.0, 0.55, 0.15),
+                                           alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx))
                 if shown in ("head", "both") or aiGeo is None:
                     geoRender.drawGeometry(rgba, image.bbox, self.head(ctx), camera, width, height, display,
                                            (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
