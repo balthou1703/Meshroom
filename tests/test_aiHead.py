@@ -543,6 +543,10 @@ def test_flameLearnedCorrespondence(monkeypatch):
         fit = flameFit.fitFlameToViews(model, views, start, correspondence=correspondence)
         errors.append(np.linalg.norm(fit["vertices"][:n] - actor[:n], axis=1).mean())
     print(f"FLAME face: {errors[0]:.3f} cm with the embedding, {errors[1]:.3f} cm with the learned correspondence")
+    # All the landmarks on the head where the landmarker puts them (on its main surface)
+    points = flameFit.learnedLandmarks(model, learned, fit["vertices"])
+    assert points.shape == (n, 3) and np.isfinite(points).all()
+    assert np.linalg.norm(points - fit["vertices"][:n], axis=1).mean() < 0.2
     assert errors[1] < 0.1
 
 

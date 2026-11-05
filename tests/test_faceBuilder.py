@@ -763,8 +763,13 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
         from meshroom.live import flameFit
         from tests.test_aiHead import _fakeFlame
         monkeypatch.setattr(flameFit, "loadModel", lambda folder=None: _fakeFlame())
-        # (the learned correspondence: tested on its own, test_aiHead)
-        monkeypatch.setattr(flameFit, "loadCorrespondence", lambda *args, **kwargs: None)
+        # The learned correspondence (tested on its own, test_aiHead): each landmark on its vertex, seen from the front
+        fake = _fakeFlame()
+        found = np.array([int(np.where((fake.triangles == i).any(1))[0][0]) for i in range(n)])
+        weights = (fake.triangles[found] == np.arange(n)[:, None]).astype(np.float64)
+        correspondence = {"rotations": np.eye(3)[None], "triangles": found[None], "weights": weights[None],
+                          "valid": np.ones((1, n), bool), "averageTriangles": found, "averageWeights": weights}
+        monkeypatch.setattr(flameFit, "loadCorrespondence", lambda *args, **kwargs: correspondence)
         size = (640, 480)
         cameras = _headViews((0, 60, -60), size)
         graph = Graph("builderAi")

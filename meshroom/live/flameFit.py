@@ -279,7 +279,11 @@ def learnCorrespondence(model: FlameModel, detector=None, pitches=(-30, -15, 0, 
         raise FlameUnavailable("FLAME: MediaPipe found no face on the renders of FLAME")
     points = np.array(points)
     counts = np.isfinite(points).all(2).sum(0)
-    mean = np.where(counts[:, None] > 0, np.nansum(np.nan_to_num(points), 0) / np.maximum(counts, 1)[:, None], 0.0)
+    # (the median over the views: a landmark hidden in a view is lifted onto what hides it there)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean = np.where(counts[:, None] > 0, np.nan_to_num(np.nanmedian(points, axis=0)), 0.0)
     averageTriangles, averageWeights = _nearestOnSurface(vertices, triangles, mean)
     return {"rotations": np.array(rotations), "triangles": np.array(found), "weights": np.array(foundWeights),
             "valid": np.array(valid) & (counts > 0)[None], "averageTriangles": averageTriangles,
@@ -320,18 +324,30 @@ def loadCorrespondence(model: FlameModel, detector=None, learn: bool = True, can
 
 
 def learnedLandmarks(model: FlameModel, correspondence: dict, vertices: np.ndarray) -> np.ndarray:
-    """ (468, 3) all the MediaPipe landmarks on a FLAME head (`vertices`) where the learned correspondence puts them on
-    average (learnCorrespondence), those on its eyeballs moved onto its main surface (the eyelids). """
+    """ (468, 3) all the MediaPipe landmarks on a FLAME head (`vertices`) where the learned correspondence puts them
+    (learnCorrespondence: the median over its views), those off its main surface (its eyeballs) moved onto it (the
+    eyelids). """
     from scipy.spatial import cKDTree
     from .aiHead import mainSurface
-    corners = model.triangles[np.asarray(correspondence["averageTriangles"], dtype=np.int64)]
-    points = (vertices[corners] * np.asarray(correspondence["averageWeights"])[:, :, None]).sum(1)
+    # Each landmark where the views put it, the median over them (a landmark hidden in a view is lifted onto what hides
+    # it there), else its average place
+    corners = model.triangles[np.asarray(correspondence["triangles"], dtype=np.int64)]  # (k, 468, 3)
+    perView = (vertices[corners] * np.asarray(correspondence["weights"])[..., None]).sum(2)
+    perView = np.where(np.asarray(correspondence["valid"], dtype=bool)[..., None], perView, np.nan)
+    averageCorners = model.triangles[np.asarray(correspondence["averageTriangles"], dtype=np.int64)]
+    average = (vertices[averageCorners] * np.asarray(correspondence["averageWeights"])[:, :, None]).sum(1)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        points = np.nanmedian(perView, axis=0)
+    points = np.where(np.isfinite(points).all(1)[:, None], points, average)
     surface, surfaceTriangles = mainSurface(vertices, model.triangles)
     distance, _ = cKDTree(surface).query(points)
     # (on another part than the main one: the nearest point of the main surface)
     far = distance > 1e-6
     _, nearestTriangle = cKDTree(surface[surfaceTriangles].mean(1)).query(points[far], k=8)
-    for row, (point, near) in zip(np.where(far)[0], np.atleast_2d(nearestTriangle)):
+    for row, near in zip(np.where(far)[0], np.atleast_2d(nearestTriangle)):
+        point = points[row]
         local, weights = face.surfaceLocation(surface, surfaceTriangles[near], point)
         projected = surface[surfaceTriangles[near[local]]].T @ weights
         if np.linalg.norm(projected - point) > 1e-4:
