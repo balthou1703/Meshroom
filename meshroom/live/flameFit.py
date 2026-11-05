@@ -268,25 +268,53 @@ def _earFalloff(model: FlameModel, ears: np.ndarray, faceVertices: np.ndarray, r
     return falloff
 
 
-def _earOutline(vertices, triangles, ears, view, camera, search):
-    """ The ears on the outline of the head in a view and the border of the skin there: [(vertex, direction (2,) out
-    of the head, offset (pixels) of the border along it)] (headFit.contourConstraints: the vertices between the
-    triangles facing the camera and the others, nothing of the head beyond them; the nearest border of the skin from
-    inside to outside within `search` pixels). """
-    from . import headFit
-    regions = {"ear": ears, "upperNeck": np.zeros(len(vertices), bool), "skull": np.zeros(len(vertices), bool),
-               "neck": np.zeros(len(vertices), bool)}
-    fitView = headFit.FitView(camera, view.size, view.labels, view.origin)
-    found = headFit.contourConstraints(vertices, triangles, fitView, regions, np.ones(len(vertices)), search)
+def _earOutline(vertices, triangles, ears, view, camera, search, faceVertices=None):
+    """
+    The rims of the ears in a view and the border of the skin there: [(vertex, direction (2,) out of the ear, offset
+    (pixels) of the border along it)]. The vertices of the ears between the triangles facing the camera and the others
+    with, just beyond them, nothing of the ear nor of the face (nothing, or the skull: under the hair, not skin); the
+    nearest border of the skin (the segmenter's face or body skin) from inside to outside within `search` pixels.
+    """
+    from .geoRender import rasterize
     width, height = view.size
-    xy, depth, jacobians = headFit._projection(camera, vertices, width, height)
-    focal = camera.focalPixels(width)
+    xy, depth, _ = camera.project(vertices, width, height)
+    a, b, c = (vertices[triangles[:, i]] for i in range(3))
+    facing = (np.cross(b - a, c - a) * (camera.position - (a + b + c) / 3.0)).sum(1) > 0
+    front, back = np.zeros(len(vertices), bool), np.zeros(len(vertices), bool)
+    for i in range(3):
+        front[triangles[facing, i]] = True
+        back[triangles[~facing, i]] = True
+    candidates = np.where(ears & front & back & (depth > 0))[0]
+    if not len(candidates):
+        return []
+    normals = _vertexNormals(vertices, triangles)
+    ahead, _, _ = camera.project(vertices[candidates] + 0.1 * normals[candidates], width, height)
+    directions = ahead - xy[candidates]
+    lengths = np.linalg.norm(directions, axis=1)
+    keep = lengths > 1e-6
+    candidates, directions = candidates[keep], directions[keep] / lengths[keep, None]
+    # What is just beyond: nothing, or a triangle that is neither of the ear nor of the face
+    _, ids = rasterize(xy[:, 0], height - xy[:, 1], depth, triangles, (height, width))
+    blocking = ears.copy()
+    if faceVertices is not None:
+        blocking[faceVertices] = True
+    blockingTriangles = blocking[triangles].any(1)
+    beyond = xy[candidates] + 2.5 * directions
+    columns = np.clip(np.floor(beyond[:, 0]).astype(int), 0, width - 1)
+    rows = np.clip(np.floor(height - beyond[:, 1]).astype(int), 0, height - 1)
+    hit = ids[rows, columns]
+    free = (hit < 0) | ~blockingTriangles[np.maximum(hit, 0)]
+    candidates, directions = candidates[free], directions[free]
+    steps = np.arange(-int(search), int(search) + 1, dtype=np.float64)
     result = []
-    for vertex, row, offset, _ in found:
-        scale = max(float(depth[vertex]), 1e-6) / max(focal, 1e-6)
-        # (back to pixels: the row is the direction times the jacobian, in centimeters at the vertex)
-        direction = np.linalg.lstsq(jacobians[vertex].T, row / scale, rcond=None)[0]
-        result.append((vertex, direction / max(np.linalg.norm(direction), 1e-12), offset / scale))
+    for vertex, direction in zip(candidates, directions):
+        line = xy[vertex][None, :] + steps[:, None] * direction[None, :]
+        skin = view.skin(line)
+        crossings = np.where(skin[:-1] & ~skin[1:])[0]
+        if not len(crossings):
+            continue
+        offsets = steps[crossings] + 0.5
+        result.append((int(vertex), direction, float(offsets[np.argmin(np.abs(offsets))])))
     return result
 
 
@@ -450,7 +478,7 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         view = views[v]
         width, height = view["size"]
         moved = inView(vertices, viewPoses[v])
-        found = _earOutline(moved, model.triangles, ears, segmentations[v], view["camera"], earSearch)
+        found = _earOutline(moved, model.triangles, ears, segmentations[v], view["camera"], earSearch, flameFace)
         if not found:
             return np.zeros((0, size)), np.zeros(0)
         indices = np.array([vertex for vertex, _, _ in found])
@@ -465,13 +493,7 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         first = identityCount + v * perView
         rows[:, :identityCount] = coefficientRows[:, :identityCount]
         rows[:, first:first + expressionCount] = coefficientRows[:, identityCount:]
-        # The placement, the move of the view: numerically
-        for k in range(13):
-            p, vp = pose.copy(), viewPoses[v].copy()
-            (p if k < 7 else vp)[k if k < 7 else k - 7] += step
-            shifted = inView(headVertices(coefficients, jaw, p)[indices], vp)
-            column = placementColumn + k if k < 7 else placementColumn + 7 + 6 * v + (k - 7)
-            rows[:, column] = (across * (shifted - moved[indices])).sum(1) / step
+        # (not the placement nor the move of the view: the landmarks place the head, the ears do not)
         # The moves of the ears: the falloff at the vertex, turned by the move of the view
         viewRotation = _rotation(viewPoses[v, :3])
         for side in range(2):

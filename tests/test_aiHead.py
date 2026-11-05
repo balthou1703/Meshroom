@@ -423,14 +423,17 @@ def test_flameJawFittedOnTheViews():
     assert after < 0.3 * before and 0.08 < fit["jaw"][0] < 0.22
 
 
-def _skinView(camera, vertices, triangles, size):
-    """ A segmentation (headFit.FitView) of a head seen by a camera: its skin where it is, the background elsewhere. """
+def _skinView(camera, vertices, triangles, size, hair=None):
+    """ A segmentation (headFit.FitView) of a head seen by a camera: its skin where it is (its `hair` vertices: hair),
+    the background elsewhere. """
     from meshroom.live import geoRender
     width, height = size
     xy, depth, _ = camera.project(vertices, width, height)
     _, ids = geoRender.rasterize(xy[:, 0], height - xy[:, 1], depth, triangles, (height, width))
+    hairTriangles = np.zeros(len(triangles), bool) if hair is None else hair[triangles].any(1)
     labels = np.zeros((height, width, 6), np.float32)
-    labels[:, :, headFit.FACE_SKIN] = ids >= 0
+    labels[:, :, headFit.FACE_SKIN] = (ids >= 0) & ~hairTriangles[np.maximum(ids, 0)]
+    labels[:, :, headFit.HAIR] = (ids >= 0) & hairTriangles[np.maximum(ids, 0)]
     labels[:, :, headFit.BACKGROUND] = ids < 0
     return headFit.FitView(camera, size, labels)
 
@@ -449,7 +452,7 @@ def test_flameEarsOnTheSegmentation():
     for camera in _headViews((0, 70, -70), size):
         xy, _, _ = camera.project(actor[:n], *size)
         views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
-        segmentations.append(_skinView(camera, actor, head.triangles(), size))
+        segmentations.append(_skinView(camera, actor, head.triangles(), size, hair=headFit.headRegions(head)["skull"]))
     start = flameFit.fitFlame(model, actor[:n])
     ears = flameFit.earVertices(model)
     assert ears.sum() > 50
@@ -458,4 +461,4 @@ def test_flameEarsOnTheSegmentation():
         fit = flameFit.fitFlameToViews(model, views, start, segmentations=seg)
         errors.append(np.linalg.norm(fit["vertices"][ears] - actor[ears], axis=1).mean())
     print(f"FLAME ears: {errors[0]:.3f} cm without the segmentation, {errors[1]:.3f} cm with it")
-    assert errors[1] < 0.7 * errors[0]
+    assert errors[1] < 0.5 * errors[0]

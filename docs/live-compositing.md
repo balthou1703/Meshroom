@@ -794,9 +794,10 @@ ne sont que des estimations : FLAME se place lui-même dans chacune ; 30° ou 5 
 ils empirent (le recalage exact des landmarks, `exact`, n'est plus fait par défaut : sur de vraies vues il plissait
 le visage). Les landmarks hors embedding ne comptent plus que sur l'ovale (poids 0,2) : ailleurs leur
 correspondence grossière tirait le nez (5 px d'erreur) et les sourcils. Avec la segmentation des vues (MediaPipe,
-comme « Fit Ears, Neck, Skull »), les oreilles de FLAME sur le contour de la tête dans une vue vont sur le bord de la
-peau (`flameFit.earVertices`, `_earOutline` : `headFit.contourConstraints`), par les formes de FLAME et un
-déplacement de chaque oreille en bloc (`_earFalloff` : gaussienne de 3,5 cm, nulle sur le visage) ; le bord de la peau
+comme « Fit Ears, Neck, Skull »), le bord des oreilles de FLAME dans une vue va sur le bord de la peau quand rien de
+l'oreille ni du visage n'est juste au-delà (le crâne, lui, est sous les cheveux : pas de la peau ;
+`flameFit.earVertices`, `_earOutline`), par les formes de FLAME et un déplacement de chaque oreille en bloc (ces
+contraintes ne bougent ni la pose ni le placement : les landmarks placent la tête) (`_earFalloff` : gaussienne de 3,5 cm, nulle sur le visage) ; le bord de la peau
 est dessiné en cyan dans les images de debug. Sur les vues d'un acteur (FLAME 2023 Open réel) : 8,2 px → 1,1 / 1,5 /
 1,5 px RMS par vue (nez 0,7 à 1,8 px). Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
