@@ -168,6 +168,7 @@ def test_faceTrackerNode(tmp_path, monkeypatch):
     assert image.rgba()[:, :, 2].max() > 0.5
     # (no irises in the fake landmarks: no eyes)
     assert evaluator.data(plan, plan.target, "eyesOutput", 1).isEmpty
+    assert not evaluator.data(plan, plan.target, "teethOutput", 1).isEmpty
 
 
 class SquareFinder:
@@ -741,3 +742,29 @@ def test_superpointNetwork():
     with torch.no_grad():
         semi, desc = net(torch.zeros(1, 1, 64, 48))
     assert semi.shape == (1, 65, 8, 6) and desc.shape == (1, 256, 8, 6)
+
+
+def test_teethFollowTheJaw():
+    """ The teeth behind the lips of the rest face; the lower ones turn with the jaw, the upper ones stay on the
+    skull. """
+    from meshroom.live import faceMouth
+    rest = face.canonicalHead().vertices[:face.MESH_VERTICES]
+    (upper, _, upperIndices), (lower, _, _) = faceMouth.teeth(rest)
+    lips = rest[[faceMouth.INNER_UPPER, faceMouth.INNER_LOWER]]
+    # Behind the lips, around their middle, as wide as most of the mouth
+    assert upper[:, 2].max() < lips[:, 2].min() and lower[:, 2].max() < lips[:, 2].min()
+    mouth = np.linalg.norm(rest[faceMouth.CORNERS[0]] - rest[faceMouth.CORNERS[1]])
+    assert 0.7 * mouth < np.ptp(upper[:, 0]) < mouth and upper[:, 1].min() > lower[:, 1].max() - 0.2
+    # The jaw opened by 12 degrees around a pivot behind it: found back
+    pivot = np.array([0.0, rest[faceMouth.INNER_LOWER, 1], rest[faceMouth.INNER_LOWER, 2] - 8.0])
+    jaw = scene3d.composeTRS(tuple(pivot), (12.0, 0.0, 0.0)) @ scene3d.composeTRS(tuple(-pivot), (0.0, 0.0, 0.0))
+    current = rest.copy()
+    current[list(faceMouth.JAW)] = rest[list(faceMouth.JAW)] @ jaw[:3, :3].T + jaw[:3, 3]
+    np.testing.assert_allclose(faceMouth.jawMove(rest, current), jaw, atol=1e-6)
+    head = scene3d.composeTRS((0.0, 0.0, -60.0), (0.0, 10.0, 0.0))
+    geo = faceMouth.teethAt(rest, current, head)
+    expectedUpper = upper @ head[:3, :3].T + head[:3, 3]
+    np.testing.assert_allclose(geo.vertices[:len(upper)], expectedUpper, atol=1e-9)
+    expectedLower = (lower @ jaw[:3, :3].T + jaw[:3, 3]) @ head[:3, :3].T + head[:3, 3]
+    np.testing.assert_allclose(geo.vertices[len(upper):], expectedLower, atol=1e-9)
+    assert geo.faceIndices.max() < len(geo.vertices) and upperIndices.max() < len(upper)

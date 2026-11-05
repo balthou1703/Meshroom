@@ -39,7 +39,8 @@ Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools 
 Outputs: "Face" (the face mesh at each frame, in the world of the camera), "Head Matrix" (the rigid pose of the head:
 face space to world, e.g. for the "Input Matrix" of a ReadGeo), "Camera" (the plate camera), "Eyes" (the eyeballs: a
 sphere per eye behind its eyelids, turned so that its iris goes through MediaPipe's iris landmark: the gaze, after
-FaceCapture), and the plate with the face drawn. Pins help where MediaPipe is wrong or lost (occlusions, profile, motion blur), as in GeoTracker: in the viewer, "Add
+FaceCapture), "Teeth" (the upper arch on the skull, the lower one moved by the jaw), and the plate with the face
+drawn. Pins help where MediaPipe is wrong or lost (occlusions, profile, motion blur), as in GeoTracker: in the viewer, "Add
 pin" and click on the face, then drag the pin onto its place in the plate; track the pins forward / backward like
 tracks. They place the head with the landmarks (weighted more), then, with "Non Rigid", the face around each pin is
 moved until it goes through it (smoothly, over "Pin Radius"): a pin on a lip corner pulls the lip, not the head.
@@ -191,6 +192,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.BoolParam(name="showEyes", label="Show Eyes", value=True,
                        description="The eyeballs drawn (yellow) with their gaze: each turned so that its iris goes "
                                    "through MediaPipe's iris (its 478 landmarks)."),
+        desc.BoolParam(name="showTeeth", label="Show Teeth", value=True,
+                       description="The teeth drawn (white) with the face: the upper arch on the skull, the lower one "
+                                   "moved by the jaw."),
         desc.BoolParam(name="showSurfaceTracks", label="Show Surface Tracks", value=True, invalidate=False,
                        description="Some of the points followed on the head by 'Follow Head Surface' at the frame (one in "
                                    "ten): green where they fit the head pose, red where they were rejected."),
@@ -210,11 +214,27 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                  description="The eyeballs at each frame, in the world of the camera: a sphere per eye behind its "
                              "eyelids (on the rest face), its pole (the iris, its edge a ring) along its gaze, fitted on "
                              "MediaPipe's iris landmarks."),
+        desc.Geo(name="teethOutput", label="Teeth",
+                 description="The teeth at each frame, in the world of the camera: two arches behind the lips of the "
+                             "rest face, the upper one on the skull, the lower one moved by the jaw (its move fitted on "
+                             "the chin and the jaw line)."),
         desc.Image(name="output", label="Output", description="The plate, with the face drawn over it."),
     ]
 
     def isIdentity(self, ctx):
         return "input" if ctx.value("display") == "none" else None
+
+    def teeth(self, ctx, frame=None):
+        """ The teeth at a frame (faceMouth.teethAt), None before tracking. """
+        from meshroom.live import face, faceMouth
+        frame = ctx.frame if frame is None else frame
+        geo, head = self.solve(ctx, frame)
+        if geo.isEmpty:
+            return None
+        rest = self.mesh(ctx, frame).vertices[:face.MESH_VERTICES]
+        inverse = np.linalg.inv(head)
+        current = geo.vertices[:face.MESH_VERTICES] @ inverse[:3, :3].T + inverse[:3, 3]
+        return faceMouth.teethAt(rest, current, head)
 
     def eyes(self, ctx, frame=None):
         """ The eyeballs at a frame (faceEyes.eyesAt: (center, radius, gaze) in the world, each eye), None without
@@ -608,6 +628,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return self.solve(ctx)[1]
         if outputName == "shapeOutput":
             return self.headRest(ctx) or self.mesh(ctx)
+        if outputName == "teethOutput":
+            teeth = self.teeth(ctx)
+            return teeth if teeth is not None else scene3d.GeoData()
         if outputName == "eyesOutput":
             from meshroom.live import faceEyes
             eyes = self.eyes(ctx)
@@ -630,13 +653,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             if geo is not None and not geo.isEmpty:
                 from meshroom.live import gpu
                 colors = self.pinReachColors(ctx, image.info, len(geo.vertices))
-                eyes = ctx.ownData("eyesOutput", ctx.frame) if ctx.value("showEyes") else None
-                if eyes is not None and not eyes.isEmpty:
-                    # Drawn with the face (hidden by the eyelids), in yellow
+                # The eyes (yellow) and the teeth (white) drawn with the face: hidden by the eyelids and the lips
+                for output, shown, partColor in (("eyesOutput", "showEyes", (1.0, 0.85, 0.3)),
+                                                 ("teethOutput", "showTeeth", (0.95, 0.95, 0.9))):
+                    part = ctx.ownData(output, ctx.frame) if ctx.value(shown) else None
+                    if part is None or part.isEmpty:
+                        continue
                     faceColors = colors if colors is not None else np.tile([0.35, 0.8, 1.0], (len(geo.vertices), 1))
-                    colors = np.r_[faceColors, np.tile([1.0, 0.85, 0.3], (len(eyes.vertices), 1))]
-                    geo = scene3d.GeoData(np.r_[geo.vertices, eyes.vertices], np.r_[geo.faceCounts, eyes.faceCounts],
-                                          np.r_[geo.faceIndices, eyes.faceIndices + len(geo.vertices)], name="face")
+                    colors = np.r_[faceColors, np.tile(partColor, (len(part.vertices), 1))]
+                    geo = scene3d.GeoData(np.r_[geo.vertices, part.vertices], np.r_[geo.faceCounts, part.faceCounts],
+                                          np.r_[geo.faceIndices, part.faceIndices + len(geo.vertices)], name="face")
                 geoRender.drawGeometry(rgba, image.bbox, geo, self.camera(ctx), width, height, display,
                                        (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
                                        vertexColors=colors, quads=True)

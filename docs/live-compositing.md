@@ -636,6 +636,10 @@ dans l'espace du visage) ; « Show Eyes » les dessine en jaune avec le visage (
 les points de la peau détectés et décrits dans deux frames (autour du visage), appariés par leurs descripteurs (plus
 proches voisins mutuels, distincts), les appariements loin du déplacement médian de leurs voisins écartés ; chaque
 landmark suit la moyenne gaussienne des déplacements proches (`superpoint.carry`), Lucas-Kanade là où ils manquent.
+Dents (`meshroom/live/faceMouth.py`, d'après la bouche de FaceCapture) : deux arcades (bandes de quads) derrière les
+lèvres internes du visage de repos, larges de 0,85 × la bouche, l'arcade du haut fixée au crâne, celle du bas portée
+par la mâchoire (son déplacement rigide ajusté à chaque frame sur le menton et la ligne de la mâchoire : Kabsch,
+`faceMouth.jawMove`). Sortie « Teeth » ; « Show Teeth » les dessine en blanc avec le visage (cachées par les lèvres).
 Comme dans KeenTools FaceTracker, les pins du FaceTracker appartiennent à leurs keyframes : une frame où des pins
 ont une clé est une keyframe (le visage y est calé avec ses pins) ; ailleurs ils sont cachés et ne contraignent rien
 (teinte « Show Pin Reach » comprise), et ils ne sont pas trackés (pas de boutons de tracking de pins) : c'est le
