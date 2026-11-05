@@ -1108,6 +1108,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                    "(as FaceCapture does): one skin albedo shared by the views, lit by each view's light, "
                                    "gives the colors of every view (the nose, the brows, the cheeks the landmarks do not "
                                    "tell). A minute or so on the CPU."),
+        desc.ChoiceParam(name="aiExpression", label="FLAME Expression", value="first view",
+                         values=["first view", "neutral"], enabled=lambda node: node.aiModel.value == "flame",
+                         description="FLAME: the expression of the head the FaceBuilder head is warped onto: that of "
+                                     "the first view (the actor's face as it is there: its eyelids, its mouth), or "
+                                     "FLAME's neutral (no expression, the jaw closed: a statistical neutral, its eyes "
+                                     "and mouth may differ from the actor's)."),
         desc.FloatParam(name="aiFace", label="AI Face", value=1.0, range=(0.0, 1.0, 0.05),
                         description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
                                     "1: that of the AI head (FLAME: fitted on the landmarks of the views), 0: the face fitted on "
@@ -1816,6 +1822,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         os.makedirs(folder, exist_ok=True)
         digest = hashlib.sha1(np.ascontiguousarray(faceTarget).tobytes() + flame.template.tobytes()).hexdigest()[:16]
         output = os.path.join(folder, f"aiHead_{model}_{digest}.npz")
+        if context.values.get("aiExpression", "first view") == "first view" and fit.get("viewVertices"):
+            # The head as it is in the first view (its expression, its jaw): the actor's face there
+            vertices = np.asarray(fit["viewVertices"][0], dtype=np.float64)
+            corners, weights = flame.landmarkRows()
+            landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
+            landmarks[flame.embeddingIndices] = (vertices[corners] * weights[:, :, None]).sum(1)
+            fit = dict(fit, vertices=vertices, landmarks=landmarks)
+        if correspondence is not None:
+            # All the 468 landmarks on FLAME (where MediaPipe puts them): the whole face of the head put on them
+            fit = dict(fit, landmarks=flameFit.learnedLandmarks(flame, correspondence, fit["vertices"]))
         np.savez_compressed(output, vertices=fit["vertices"].astype(np.float32), faces=fit["triangles"].astype(np.int32),
                             colors=np.full((len(fit["vertices"]), 3), 190, np.uint8),
                             landmarks=fit["landmarks"].astype(np.float32),
@@ -2021,6 +2037,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             # Placed on its own on the views (FLAME): already in the face space; the face of the head put on it (its
             # landmarks on FLAME's, the rest on its surface), not that of the photos
             matrix = np.eye(4)
+            # (its eyeballs left out: the eyelids of the head on its eyelids)
+            vertices, triangles = aiHead.mainSurface(vertices, triangles)
             faceVertices = aiHead.faceOnHead(faceVertices, vertices, triangles, landmarks)
         else:
             # On the face fitted on the views (its size and place: those of the cameras)

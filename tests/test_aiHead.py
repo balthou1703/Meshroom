@@ -544,3 +544,14 @@ def test_flameLearnedCorrespondence(monkeypatch):
         errors.append(np.linalg.norm(fit["vertices"][:n] - actor[:n], axis=1).mean())
     print(f"FLAME face: {errors[0]:.3f} cm with the embedding, {errors[1]:.3f} cm with the learned correspondence")
     assert errors[1] < 0.1
+
+
+def test_mainSurfaceLeavesTheEyeballsOut():
+    """ The largest connected part of a mesh (a FLAME head, its eyeballs apart). """
+    head = face.canonicalHead()
+    triangles = head.triangles()
+    ball = np.array([[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]]) + len(head.vertices)
+    vertices = np.r_[head.vertices, np.eye(4)[:, :3] + [0.0, 0.0, 5.0]]
+    kept, keptTriangles = aiHead.mainSurface(vertices, np.r_[triangles, ball])
+    assert len(kept) == len(np.unique(triangles)) and keptTriangles.max() < len(kept)
+    np.testing.assert_allclose(kept[keptTriangles[0]], vertices[triangles[0]])

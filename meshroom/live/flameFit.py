@@ -319,6 +319,26 @@ def loadCorrespondence(model: FlameModel, detector=None, learn: bool = True, can
     return learned
 
 
+def learnedLandmarks(model: FlameModel, correspondence: dict, vertices: np.ndarray) -> np.ndarray:
+    """ (468, 3) all the MediaPipe landmarks on a FLAME head (`vertices`) where the learned correspondence puts them on
+    average (learnCorrespondence), those on its eyeballs moved onto its main surface (the eyelids). """
+    from scipy.spatial import cKDTree
+    from .aiHead import mainSurface
+    corners = model.triangles[np.asarray(correspondence["averageTriangles"], dtype=np.int64)]
+    points = (vertices[corners] * np.asarray(correspondence["averageWeights"])[:, :, None]).sum(1)
+    surface, surfaceTriangles = mainSurface(vertices, model.triangles)
+    distance, _ = cKDTree(surface).query(points)
+    # (on another part than the main one: the nearest point of the main surface)
+    far = distance > 1e-6
+    _, nearestTriangle = cKDTree(surface[surfaceTriangles].mean(1)).query(points[far], k=8)
+    for row, (point, near) in zip(np.where(far)[0], np.atleast_2d(nearestTriangle)):
+        local, weights = face.surfaceLocation(surface, surfaceTriangles[near], point)
+        projected = surface[surfaceTriangles[near[local]]].T @ weights
+        if np.linalg.norm(projected - point) > 1e-4:
+            points[row] = projected
+    return points
+
+
 def denseCorrespondence(model: FlameModel):
     """
     Where each of the 468 MediaPipe landmarks is on FLAME (corners (468, 3), weights (468, 3), from the embedding

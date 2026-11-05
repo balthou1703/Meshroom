@@ -316,6 +316,26 @@ def storedViewMoves(path: str) -> Optional[dict]:
     return {name: move for name, move in zip(inputs, moves)}
 
 
+def mainSurface(vertices: np.ndarray, triangles: np.ndarray):
+    """ (vertices, triangles) of the largest connected part of a mesh (a FLAME head without its eyeballs: the face
+    put on its eyelids, not on the eyes behind them). """
+    from scipy import sparse
+    from scipy.sparse.csgraph import connected_components
+    vertices, triangles = np.asarray(vertices), np.asarray(triangles, dtype=np.int64)
+    count = len(vertices)
+    edges = np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]]])
+    graph = sparse.coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(count, count))
+    parts, labels = connected_components(graph, directed=False)
+    if parts <= 1:
+        return vertices, triangles
+    main = np.argmax(np.bincount(labels[triangles[:, 0]], minlength=parts))
+    keep = labels == main
+    index = np.full(count, -1, np.int64)
+    index[keep] = np.arange(int(keep.sum()))
+    kept = triangles[keep[triangles[:, 0]]]
+    return vertices[keep], index[kept]
+
+
 def faceOnHead(faceVertices: np.ndarray, aiVertices: np.ndarray, aiTriangles: np.ndarray,
                landmarks: np.ndarray) -> np.ndarray:
     """ The face (468, 3) of the FaceBuilder put on a generated head whose landmarks are known (FLAME): moved by a
