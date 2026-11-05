@@ -204,3 +204,74 @@ def refineIdentity(verticesOf: Callable[[int, np.ndarray], np.ndarray],
         if progress:
             progress((iteration + 1) / float(iterations))
     return {"identity": identity, "albedo": albedo, "lights": lights, "error": (errors[0], errors[-1])}
+
+
+def refineRig(rig, params: np.ndarray, head: np.ndarray, camera, image: np.ndarray, albedo: np.ndarray,
+              triangles: np.ndarray, region: np.ndarray, iterations: int = 4, prior: float = 1e-2,
+              huber: float = 0.1, count: Optional[int] = None) -> dict:
+    """
+    A face rig (FaceRig, BlendshapeRig: deform, vertexJacobian, limits) refined on the colors of one frame: its
+    parameters from those fitted on the landmarks (`params`, held by `prior`: a parameter moved by 1 against this
+    squared color error per vertex), the head kept (`head`: face space to world), so that the actor's albedo
+    (`albedo` (n, 3), from another frame: albedoOf) lit by the frame's light (spherical harmonics, solved) gives the
+    colors of the image at the vertices it sees (`region`, the first `count` vertices of the rig).
+
+    Returns:
+        {"params", "light" (9, 3), "error": (before, after) RMS color error}.
+    """
+    params0 = np.asarray(params, dtype=np.float64).copy()
+    params = params0.copy()
+    low, high = rig.limits()
+    h, w = image.shape[:2]
+    rotation, translation = head[:3, :3], head[:3, 3]
+    count = count or len(region)
+    errors, light = [], None
+    for iteration in range(iterations + 1):
+        world = rig.deform(params)[:count] @ rotation.T + translation
+        mask = region & visibleVertices(world, triangles, camera, w, h)
+        xy, _, _ = camera.project(world, w, h)
+        colors, gradients, inside = sample(image, xy)
+        mask &= inside
+        if mask.sum() < 20:
+            break
+        basis = shBasis(vertexNormals(world, triangles))
+        light = solveLight(colors, albedo, basis, mask)
+        residual = (colors - albedo * (basis @ light))[mask]
+        errors.append(float(np.sqrt(np.mean(residual ** 2))))
+        if iteration == iterations:
+            break
+        indices = np.where(mask)[0]
+        _, _, projection = _projection(camera, world[indices], w, h)
+        jacobian = np.einsum("ij,kjm->kim", rotation, rig.vertexJacobian(params)[indices])
+        rows = np.einsum("kcp,kpj,kjm->kcm", gradients[indices], projection, jacobian)
+        weight = np.sqrt(np.minimum(1.0, huber / np.maximum(np.abs(residual), 1e-12)))
+        rows = (weight[:, :, None] * rows).reshape(-1, len(params))
+        right = (weight * residual).reshape(-1)
+        damping = prior * len(right)
+        delta = np.linalg.solve(rows.T @ rows + damping * np.eye(len(params)),
+                                -rows.T @ right - damping * (params - params0))
+        params = np.clip(params + delta, low, high)
+    return {"params": params, "light": light, "error": (errors[0], errors[-1]) if errors else (0.0, 0.0)}
+
+
+def albedoOf(vertices: np.ndarray, triangles: np.ndarray, camera, image: np.ndarray, region: np.ndarray,
+             rounds: int = 3) -> np.ndarray:
+    """ (n, 3) the albedo of a face seen in one frame (its vertices in the world): its colors divided by the shading of
+    a light solved with it (spherical harmonics, from a white light), smoothed over the mesh; the unseen vertices the
+    mean albedo. """
+    h, w = image.shape[:2]
+    mask = region & visibleVertices(vertices, triangles, camera, w, h)
+    xy, _, _ = camera.project(vertices, w, h)
+    colors, _, inside = sample(image, xy)
+    mask &= inside
+    basis = shBasis(vertexNormals(vertices, triangles))
+    adjacency, degree = _neighbors(np.asarray(triangles, dtype=np.int64), len(vertices))
+    light = np.r_[np.ones((1, 3)) / _SH[0], np.zeros((8, 3))]
+    albedo = None
+    for _ in range(rounds):
+        albedo = solveAlbedo([colors], [basis @ light], [mask], adjacency, degree)
+        light = solveLight(colors, albedo, basis, mask)
+        # (the light's scale given to the albedo: its constant term kept at a white light's)
+        gain = light[0] * _SH[0]
+        light = light / np.maximum(gain, 1e-6)
+    return solveAlbedo([colors], [basis @ light], [mask], adjacency, degree)

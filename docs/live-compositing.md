@@ -640,6 +640,14 @@ Dents (`meshroom/live/faceMouth.py`, d'après la bouche de FaceCapture) : deux a
 lèvres internes du visage de repos, larges de 0,85 × la bouche, l'arcade du haut fixée au crâne, celle du bas portée
 par la mâchoire (son déplacement rigide ajusté à chaque frame sur le menton et la ligne de la mâchoire : Kabsch,
 `faceMouth.jawMove`). Sortie « Teeth » ; « Show Teeth » les dessine en blanc avec le visage (cachées par les lèvres).
+« Photometric Refine » (modèles arkit et rig, `photometric.refineRig`, d'après l'étape dense de FaceCapture) : l'albédo
+de l'acteur est pris une fois sur la frame de référence (sinon la première suivie : ses couleurs divisées par
+l'ombrage d'une lumière résolue avec elles, `photometric.albedoOf`) ; à chaque frame, après l'ajustement sur les
+landmarks, la lumière de la frame est résolue (harmoniques sphériques) puis les paramètres du rig sont raffinés pour
+que cet albédo éclairé donne les couleurs de la plaque (Gauss-Newton, Huber 0,1, tenus vers ceux des landmarks : un
+paramètre de 1 contre 0,01 d'erreur de couleur² par sommet ; la tête gardée). Les bords des yeux et des lèvres (ce qui
+est derrière change) et les iris ne sont pas comparés ; pas aux keyframes à pins. Sur un visage synthétique texturé :
+1,07 mm → 0,43 mm.
 Comme dans KeenTools FaceTracker, les pins du FaceTracker appartiennent à leurs keyframes : une frame où des pins
 ont une clé est une keyframe (le visage y est calé avec ses pins) ; ailleurs ils sont cachés et ne contraignent rien
 (teinte « Show Pin Reach » comprise), et ils ne sont pas trackés (pas de boutons de tracking de pins) : c'est le

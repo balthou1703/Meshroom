@@ -181,6 +181,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                     "in face space (the expression), so that it moves as a face does: no jitter, no part "
                                     "turning back and forth in depth. The keyframes keep their own fit. 0: each frame on "
                                     "its own."),
+        desc.BoolParam(name="photometricRefine", label="Photometric Refine", value=False,
+                       enabled=lambda node: node.deformModel.value in ("arkit", "rig"),
+                       description="With the arkit or rig model: the expression of each frame refined on the colors of "
+                                   "the plate (after FaceCapture): the skin of the actor (its albedo, taken on the "
+                                   "reference frame, else the first tracked one) lit by the frame's light must give the "
+                                   "colors of the frame; finer lips, lids and cheeks than the landmarks alone. Slower; "
+                                   "not on the keyframes with pins."),
         desc.BoolParam(name="deform", label="Non Rigid", value=True,
                        description="The face follows the expressions (mouth, eyes); off: only the rigid head pose."),
         desc.ChoiceParam(name="display", label="Display", value="wireframe",
@@ -484,9 +491,58 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         """ The reference frame ("Use Reference Frame"), or None. """
         return int(ctx.value("referenceFrame")) if ctx.value("useReference") else None
 
-    def _fit(self, ctx, frame, rest, initial):
+    _ALBEDOS = {}
+
+    @staticmethod
+    def photometricRegion(count: int) -> np.ndarray:
+        """ (count,) the vertices of the face compared on the colors: not the irises, nor the rims of the eyes and
+        lips (what is behind them changes). """
+        from meshroom.live import face, faceRig
+        region = np.zeros(count, bool)
+        region[:face.MESH_VERTICES] = True
+        for lower, upper in faceRig.SLITS:
+            region[[i for i in lower + upper if i < count]] = False
+        return region
+
+    def plateRGB(self, ctx, frame):
+        """ The plate at a frame (h, w, 3) in [0, 1], rows from the top, or None. """
+        from meshroom.live import BBox
+        from meshroom.live.neural import displayRGB
+        info = ctx.inputInfo("input")
+        image = ctx.renderInput("input", frame)
+        if image is None or info is None:
+            return None
+        return np.clip(displayRGB(image, BBox.fromFormat(info.width, info.height))[:, :, :3], 0.0, 1.0)
+
+    def albedo(self, ctx, rest):
+        """ The albedo (n, 3) of the actor's face ("Photometric Refine"): on the reference frame, else the first tracked
+        one, its face fitted on the landmarks; cached. None without it. """
+        from meshroom.live import photometric
+        faces = self.faces(ctx)
+        if not faces:
+            return None
+        frame = self.reference(ctx)
+        frame = frame if frame in faces else min(faces)
+        key = (ctx.planNode.uid, frame, hash(rest.vertices.tobytes()))
+        albedo = FaceTracker._ALBEDOS.get(key)
+        if albedo is None:
+            fitted = self._fit(ctx, frame, rest, None, photometric=False)
+            image = self.plateRGB(ctx, frame)
+            if fitted is None or image is None:
+                return None
+            local, head = fitted
+            world = local @ head[:3, :3].T + head[:3, 3]
+            albedo = photometric.albedoOf(world, rest.triangles(), self.camera(ctx, frame), image,
+                                          self.photometricRegion(len(world)))
+            if len(FaceTracker._ALBEDOS) > 4:
+                FaceTracker._ALBEDOS.clear()
+            FaceTracker._ALBEDOS[key] = albedo
+        return albedo
+
+    def _fit(self, ctx, frame, rest, initial, photometric=True):
         """ The face fitted at a frame on the `rest` shape (the neutral face, or the face of the reference frame):
-        (vertices in face space, head matrix); None before tracking. """
+        (vertices in face space, head matrix); None before tracking. With "Photometric Refine" (and `photometric`), its
+        rig refined on the colors of the frame. """
         from meshroom.live import face
         faces = self.faces(ctx)
         info = ctx.inputInfo("input")
@@ -503,14 +559,36 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                          solvePins[1], solvePins[2])
         camera = self.camera(ctx, frame)
         prior, priorWeight = self.expressionPrior(ctx, rest, tracked)
+        report = {}
         geo, head, _, _ = face.solveFace(rest, pixels, camera, info.width, info.height, initial=initial,
                                          rigid=face.RIGID_LANDMARKS, deform=ctx.value("deform"),
                                          hidden=tracked.get("hidden") or (), pins=solvePins,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
                                          model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"),
-                                         pose=(faces.get(frame) or {}).get("pose"), prior=prior, priorWeight=priorWeight)
+                                         pose=(faces.get(frame) or {}).get("pose"), prior=prior, priorWeight=priorWeight,
+                                         report=report)
         inverse = np.linalg.inv(head)
-        return geo.vertices @ inverse[:3, :3].T + inverse[:3, 3], head
+        local = geo.vertices @ inverse[:3, :3].T + inverse[:3, 3]
+        if photometric and ctx.value("photometricRefine") and ctx.value("deform") and solvePins is None \
+                and ctx.value("deformModel") in ("arkit", "rig") and report.get("rigParams") is not None:
+            local = self._photometric(ctx, frame, rest, report["rigParams"], head, camera) or local
+        return local, head
+
+    def _photometric(self, ctx, frame, rest, params, head, camera):
+        """ The face of a frame with its rig refined on the colors of the plate (photometric.refineRig), None when it
+        cannot be. """
+        import logging
+        from meshroom.live import face, photometric
+        albedo = self.albedo(ctx, rest)
+        image = self.plateRGB(ctx, frame)
+        if albedo is None or image is None:
+            return None
+        rig = face.rigFor(rest, ctx.value("deformModel"))
+        result = photometric.refineRig(rig, params, head, camera, image, albedo, rest.triangles(),
+                                       self.photometricRegion(len(rest.vertices)), count=len(rest.vertices))
+        before, after = result["error"]
+        logging.debug(f"[FaceTracker] frame {frame}: photometric {before:.4f} -> {after:.4f}")
+        return rig.deform(result["params"])
 
     @staticmethod
     def expressionPrior(ctx, rest, tracked):
