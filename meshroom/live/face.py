@@ -504,7 +504,8 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
                 motion, support = _superpointMotion(imageA, imageB, np.c_[x, y], width, height)
                 if motion is not None and (support < 0.5).mean() > 0.3:
                     motion = None
-            if motion is None or flowMethod == "superpoint":
+            if motion is None or (support < 0.5).any():
+                # (the optical flow: alone, or where SuperPoint has too few points)
                 field = computeFlow(imageA, imageB, cancel=cancel, useGpu=useGpu,
                                     method="lucasKanade" if flowMethod == "superpoint" else flowMethod)
                 # The flow at each landmark (rows of the bbox from its top; Nuke y = height - y)
