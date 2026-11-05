@@ -625,6 +625,12 @@ avec lui : pas de dérive, et le flot là où MediaPipe se perd ; `face.propagat
 frame bien placée : boutons du viewer (et du nœud) en arrière / avant jusqu'au bout de la plage de tracking, ou une
 frame à la fois (le viewer passe à la frame trackée) ; les autres frames gardent leurs points. Les pistes ont aussi
 des boutons d'une frame (avant / arrière) dans la barre du viewer (Tracker, Resection).
+Yeux (`meshroom/live/faceEyes.py`, d'après FaceCapture de Technicolor : une sphère par œil, son regard ajusté sur
+l'image) : chaque globe est placé derrière l'ouverture de ses paupières sur le visage de repos (coins et paupières,
+rayon 0,42 × la largeur de l'œil, soit ~1,2 cm), suit la tête, et est tourné à chaque frame pour que le centre de son
+iris passe par le landmark d'iris de MediaPipe (468, 473 : le rayon de la caméra sur la sphère). Sortie « Eyes » (deux
+sphères, le pôle avant le long du regard, le bord de l'iris en anneau ; `faceEyes.gazeAngles` donne lacet et tangage
+dans l'espace du visage) ; « Show Eyes » les dessine en jaune avec le visage (cachées par les paupières).
 Comme dans KeenTools FaceTracker, les pins du FaceTracker appartiennent à leurs keyframes : une frame où des pins
 ont une clé est une keyframe (le visage y est calé avec ses pins) ; ailleurs ils sont cachés et ne contraignent rien
 (teinte « Show Pin Reach » comprise), et ils ne sont pas trackés (pas de boutons de tracking de pins) : c'est le

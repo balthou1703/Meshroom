@@ -166,6 +166,8 @@ def test_faceTrackerNode(tmp_path, monkeypatch):
     np.testing.assert_allclose(xy, face.toPixels(landmarksAt(1), W, H), atol=0.01)
     image = evaluator.render(plan, 1)
     assert image.rgba()[:, :, 2].max() > 0.5
+    # (no irises in the fake landmarks: no eyes)
+    assert evaluator.data(plan, plan.target, "eyesOutput", 1).isEmpty
 
 
 class SquareFinder:
@@ -683,3 +685,30 @@ def test_rigidAndExpressionPins():
     # An expression pin moves it onto the pin
     xy, _, _ = CAMERA.project(expression.vertices, W, H)
     assert np.hypot(*(xy[corner] - target)) < 0.5
+
+
+def test_eyesFollowTheIrises():
+    """ The eyeballs behind the eyelids of the rest face, turned so that their iris goes through the iris landmark. """
+    from meshroom.live import faceEyes
+    rest = face.canonicalHead().vertices[:face.MESH_VERTICES]
+    head = scene3d.composeTRS((1.0, -2.0, -60.0), (5.0, 20.0, 0.0))
+    eyes = faceEyes.eyeballs(rest)
+    for side, (center, radius) in eyes.items():
+        # About 1.2 cm, behind the eyelids, toward the side of its eye
+        assert 0.9 < radius < 1.6 and center[2] < rest[faceEyes.EYES[side]["lids"][0], 2]
+    assert eyes["right"][0][0] * eyes["left"][0][0] < 0
+    pixels = np.zeros((478, 2))
+    truth = {"right": np.array([0.2, 0.1, 1.0]), "left": np.array([0.25, 0.1, 1.0])}
+    for side, (center, radius) in eyes.items():
+        gaze = head[:3, :3] @ (truth[side] / np.linalg.norm(truth[side]))
+        iris = head[:3, :3] @ center + head[:3, 3] + radius * gaze
+        pixels[faceEyes.EYES[side]["iris"]] = CAMERA.project(iris[None], W, H)[0][0]
+    found = faceEyes.eyesAt(rest, head, pixels, CAMERA, W, H)
+    for (center, radius, gaze), side in zip(found, ("right", "left")):
+        expected = head[:3, :3] @ (truth[side] / np.linalg.norm(truth[side]))
+        assert np.degrees(np.arccos(np.clip(gaze @ expected, -1, 1))) < 0.5
+    yaw, pitch = faceEyes.gazeAngles(found[0][2], head)
+    assert abs(yaw - np.degrees(np.arctan2(0.2, 1.0))) < 0.5 and pitch > 0
+    geo = faceEyes.eyeGeometry(found)
+    assert len(geo.vertices) == 2 * (1 + 16 * 12) and geo.faceIndices.max() < len(geo.vertices)
+    assert faceEyes.eyesAt(rest, head, pixels[:468], CAMERA, W, H) is None

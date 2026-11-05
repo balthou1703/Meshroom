@@ -37,8 +37,9 @@ Tracks a face in the plate, mouth and eyes included (non rigid), like KeenTools 
   is, the rest of the head goes with it).
 
 Outputs: "Face" (the face mesh at each frame, in the world of the camera), "Head Matrix" (the rigid pose of the head:
-face space to world, e.g. for the "Input Matrix" of a ReadGeo), "Camera" (the plate camera), and the plate with the face
-drawn. Pins help where MediaPipe is wrong or lost (occlusions, profile, motion blur), as in GeoTracker: in the viewer, "Add
+face space to world, e.g. for the "Input Matrix" of a ReadGeo), "Camera" (the plate camera), "Eyes" (the eyeballs: a
+sphere per eye behind its eyelids, turned so that its iris goes through MediaPipe's iris landmark: the gaze, after
+FaceCapture), and the plate with the face drawn. Pins help where MediaPipe is wrong or lost (occlusions, profile, motion blur), as in GeoTracker: in the viewer, "Add
 pin" and click on the face, then drag the pin onto its place in the plate; track the pins forward / backward like
 tracks. They place the head with the landmarks (weighted more), then, with "Non Rigid", the face around each pin is
 moved until it goes through it (smoothly, over "Pin Radius"): a pin on a lip corner pulls the lip, not the head.
@@ -184,6 +185,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                      "its vertices), the landmarks, or nothing."),
         desc.FloatParam(name="opacity", label="Opacity", value=0.6, range=(0.0, 1.0, 0.01),
                         description="Opacity of the face drawn over the plate."),
+        desc.BoolParam(name="showEyes", label="Show Eyes", value=True,
+                       description="The eyeballs drawn (yellow) with their gaze: each turned so that its iris goes "
+                                   "through MediaPipe's iris (its 478 landmarks)."),
         desc.BoolParam(name="showSurfaceTracks", label="Show Surface Tracks", value=True, invalidate=False,
                        description="Some of the points followed on the head by 'Follow Head Surface' at the frame (one in "
                                    "ten): green where they fit the head pose, red where they were rejected."),
@@ -199,11 +203,32 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.Geo(name="shapeOutput", label="Shape",
                  description="The rest face (face space): the face mesh with the shape of the actor found by 'Fit "
                              "Shape' (e.g. to write it, and connect it to 'Face' of other FaceTrackers)."),
+        desc.Geo(name="eyesOutput", label="Eyes",
+                 description="The eyeballs at each frame, in the world of the camera: a sphere per eye behind its "
+                             "eyelids (on the rest face), its pole (the iris, its edge a ring) along its gaze, fitted on "
+                             "MediaPipe's iris landmarks."),
         desc.Image(name="output", label="Output", description="The plate, with the face drawn over it."),
     ]
 
     def isIdentity(self, ctx):
         return "input" if ctx.value("display") == "none" else None
+
+    def eyes(self, ctx, frame=None):
+        """ The eyeballs at a frame (faceEyes.eyesAt: (center, radius, gaze) in the world, each eye), None without
+        the irises (or before tracking). """
+        from meshroom.live import face, faceEyes
+        frame = ctx.frame if frame is None else frame
+        faces = self.faces(ctx)
+        if not faces:
+            return None
+        landmarks = face.landmarksAt(faces, frame, ctx.value("smoothing"))
+        info = ctx.inputInfo("input")
+        if landmarks is None or len(landmarks) < 478 or info is None:
+            return None
+        _, head = self.solve(ctx, frame)
+        rest = self.mesh(ctx, frame).vertices[:face.MESH_VERTICES]
+        pixels = face.toPixels(np.asarray(landmarks, dtype=np.float64), info.width, info.height)
+        return faceEyes.eyesAt(rest, head, pixels, self.camera(ctx, frame), info.width, info.height)
 
     # The face
 
@@ -580,6 +605,10 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return self.solve(ctx)[1]
         if outputName == "shapeOutput":
             return self.headRest(ctx) or self.mesh(ctx)
+        if outputName == "eyesOutput":
+            from meshroom.live import faceEyes
+            eyes = self.eyes(ctx)
+            return faceEyes.eyeGeometry(eyes) if eyes else scene3d.GeoData()
         return super().computeData(ctx, outputName)
 
     def render(self, ctx, inputs):
@@ -597,9 +626,17 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             geo = ctx.ownData("geoOutput", ctx.frame)
             if geo is not None and not geo.isEmpty:
                 from meshroom.live import gpu
+                colors = self.pinReachColors(ctx, image.info, len(geo.vertices))
+                eyes = ctx.ownData("eyesOutput", ctx.frame) if ctx.value("showEyes") else None
+                if eyes is not None and not eyes.isEmpty:
+                    # Drawn with the face (hidden by the eyelids), in yellow
+                    faceColors = colors if colors is not None else np.tile([0.35, 0.8, 1.0], (len(geo.vertices), 1))
+                    colors = np.r_[faceColors, np.tile([1.0, 0.85, 0.3], (len(eyes.vertices), 1))]
+                    geo = scene3d.GeoData(np.r_[geo.vertices, eyes.vertices], np.r_[geo.faceCounts, eyes.faceCounts],
+                                          np.r_[geo.faceIndices, eyes.faceIndices + len(geo.vertices)], name="face")
                 geoRender.drawGeometry(rgba, image.bbox, geo, self.camera(ctx), width, height, display,
                                        (0.35, 0.8, 1.0), alpha, creaseDegrees=60.0, useGpu=gpu.enabled(ctx),
-                                       vertexColors=self.pinReachColors(ctx, image.info, len(geo.vertices)), quads=True)
+                                       vertexColors=colors, quads=True)
         if ctx.value("showSurfaceTracks"):
             self.drawSurfaceTracks(ctx, rgba, image)
         # The pins: where the face puts their point, linked to where they are (the error)
