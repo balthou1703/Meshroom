@@ -764,7 +764,68 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
     return {"vertices": vertices, "triangles": model.triangles, "landmarks": landmarks, "coefficients": neutral,
             "error": start.get("error", 0.0), "similarity": (scale, rotation, translation), "pixels": (before, after),
             "jaw": jaws.mean(0), "jaws": jaws, "earMoves": earMoves, "expressions": expressions, "viewVertices": viewVertices,
-            "views": moves}
+            "views": moves, "identity": identity.copy(), "earOffsets": earFalloff.T @ earMoves}
+
+
+def viewHead(model: FlameModel, fit: dict, v: int, identity=None) -> np.ndarray:
+    """ The head of a view (face space, before its move "views"[v]) of a fit (fitFlameToViews) with another
+    `identity` (its first directions; default: the fit's). """
+    identity = fit["identity"] if identity is None else np.asarray(identity, dtype=np.float64)
+    coefficients = np.r_[identity, fit["expressions"][v]] if len(fit["expressions"]) else identity
+    vertices = model.vertices(coefficients)
+    if model.jawWeights is not None:
+        vertices = model.posed(vertices, fit["jaws"][v])
+    scale, rotation, translation = fit["similarity"]
+    return scale * vertices @ rotation.T + translation + fit.get("earOffsets", 0.0)
+
+
+def withIdentity(model: FlameModel, fit: dict, identity) -> dict:
+    """ A fit (fitFlameToViews) with another identity: its neutral head (no expression, the jaw closed), its heads in
+    the views and its landmarks again. """
+    identity = np.asarray(identity, dtype=np.float64)
+    fit = dict(fit)
+    expressionCount = model.directions.shape[2] - len(identity)
+    neutral = np.r_[identity, np.zeros(expressionCount)]
+    scale, rotation, translation = fit["similarity"]
+    fit["vertices"] = scale * model.vertices(neutral) @ rotation.T + translation + fit.get("earOffsets", 0.0)
+    fit["viewVertices"] = [viewHead(model, fit, v, identity) for v in range(len(fit["viewVertices"]))]
+    fit["identity"], fit["coefficients"] = identity, neutral
+    corners, weights = model.landmarkRows()
+    landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
+    landmarks[model.embeddingIndices] = (fit["vertices"][corners] * weights[:, :, None]).sum(1)
+    fit["landmarks"] = landmarks
+    return fit
+
+
+def photometricRegion(model: FlameModel) -> np.ndarray:
+    """ (n,) the vertices of FLAME whose colors are compared (photometric): its face (near the canonical MediaPipe face
+    put on its template by the embedding landmarks), not its eyeballs. """
+    from scipy.spatial import cKDTree
+    from . import faceEyes
+    head = face.canonicalHead()
+    n = face.MESH_VERTICES
+    corners, weights = model.landmarkRows()
+    keep = model.embeddingIndices < n
+    points = (model.template[corners[keep]] * weights[keep][:, :, None]).sum(1)
+    scale, rotation, translation = _similarity(head.vertices[model.embeddingIndices[keep]], points,
+                                               np.ones(int(keep.sum())))
+    placed = scale * head.vertices[:n] @ rotation.T + translation
+    distance, _ = cKDTree(placed).query(model.template)
+    region = distance < 0.01
+    for center, radius in faceEyes.eyeballs(head.vertices[:n]).values():
+        center = scale * rotation @ center + translation
+        region &= np.linalg.norm(model.template - center, axis=1) > 1.4 * radius * scale
+    return region
+
+
+def identityJacobian(model: FlameModel, fit: dict, v: int, indices=None) -> np.ndarray:
+    """ (k, 3, identity count) d vertex (in the world of view v: moved by "views"[v]) / d identity, the jaw left
+    aside (it moves little of the face). """
+    scale, rotation, _ = fit["similarity"]
+    count = len(fit["identity"])
+    directions = model.directions[:, :, :count] if indices is None else model.directions[indices][:, :, :count]
+    linear = np.asarray(fit["views"][v], dtype=np.float64)[:3, :3] @ (scale * rotation)
+    return np.einsum("ij,njk->nik", linear, directions)
 
 
 def _exactLandmarks(vertices, model, views, radius, iterations=3):

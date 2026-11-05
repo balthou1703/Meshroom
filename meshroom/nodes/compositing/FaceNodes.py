@@ -994,6 +994,12 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          "whole head made by the AI model ('AI Model': FLAME fitted on its own on the "
                                          "views, or generated from the view shown in another process), then the head "
                                          "of the FaceBuilder warped onto it ('Fit Again To AI Head')."),
+        desc.BoolParam(name="aiPhotometric", label="FLAME Photometric", value=True,
+                       enabled=lambda node: node.aiModel.value == "flame",
+                       description="FLAME: after its fit on the landmarks, its shape refined on the colors of the views "
+                                   "(as FaceCapture does): one skin albedo shared by the views, lit by each view's light, "
+                                   "gives the colors of every view (the nose, the brows, the cheeks the landmarks do not "
+                                   "tell). A minute or so on the CPU."),
         desc.FloatParam(name="aiFace", label="AI Face", value=1.0, range=(0.0, 1.0, 0.05),
                         description="How much of the face comes from the AI head (its surface, after 'Fit To AI Head'): "
                                     "1: that of the AI head (FLAME: fitted on the landmarks of the views), 0: the face fitted on "
@@ -1687,6 +1693,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                        cancel=context.checkCancelled,
                                        progress=lambda done: context.progress(0.3 + 0.4 * done,
                                                                               "Fit FLAME on the views")) if views else start
+        if views and context.values.get("aiPhotometric", False) and "identity" in fit:
+            fit = self._flamePhotometric(context, flame, fit, views, inputs, segmentations)
         moves = np.array(fit.get("views") or np.zeros((0, 4, 4)), dtype=np.float64).reshape(-1, 4, 4)
         viewVertices = fit.get("viewVertices") or [fit["vertices"]] * len(moves)
         corners, weights = flame.landmarkRows()
@@ -1721,6 +1729,41 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         result = self.fitAiHead(context, path=output, start=0.7)
         result["aiHeadFile"] = output
         return result
+
+    def _flamePhotometric(self, context, flame, fit, views, inputs, segmentations):
+        """ FLAME's identity refined on the colors of the views (photometric.refineIdentity): its face, where the
+        segmenter saw skin. """
+        import logging
+        from meshroom.live import BBox, flameFit, headFit, photometric
+        from meshroom.live.neural import displayRGB
+        stored = {view["input"]: view for view in self.storedViews(context)}
+        images, masks, cameras = [], [], []
+        for v, (name, view) in enumerate(zip(inputs, views)):
+            width, height = view["size"]
+            image = context.renderInput(name, int(stored[name]["frame"]))
+            images.append(np.clip(displayRGB(image, BBox.fromFormat(width, height))[:, :, :3], 0.0, 1.0))
+            cameras.append(view["camera"])
+            mask = None
+            segmentation = segmentations[v] if segmentations else None
+            if segmentation is not None:
+                # The skin of the face (its crop put back in the view)
+                mask = np.zeros((height, width), bool)
+                skin = segmentation.labels[:, :, headFit.FACE_SKIN] > 0.5
+                left, top = segmentation.origin
+                mask[top:top + skin.shape[0], left:left + skin.shape[1]] = skin[:height - top, :width - left]
+            masks.append(mask)
+
+        def verticesOf(v, identity):
+            move = np.asarray(fit["views"][v], dtype=np.float64)
+            return flameFit.viewHead(flame, fit, v, identity) @ move[:3, :3].T + move[:3, 3]
+        result = photometric.refineIdentity(
+            verticesOf, lambda v, indices: flameFit.identityJacobian(flame, fit, v, indices), fit["identity"],
+            flame.triangles, cameras, images, flameFit.photometricRegion(flame), masks=masks,
+            cancel=context.checkCancelled,
+            progress=lambda done: context.progress(0.7 + 0.05 * done, "Refine FLAME on the colors of the views"))
+        before, after = result["error"]
+        logging.info(f"[FaceBuilder] FLAME refined on the colors of the views: {before:.4f} -> {after:.4f} RMS")
+        return flameFit.withIdentity(flame, fit, result["identity"])
 
     def _segmentations(self, context, views, inputs, vertices):
         """ [headFit.FitView or None]: each view segmented around the head `vertices` (face space) seen by its camera:

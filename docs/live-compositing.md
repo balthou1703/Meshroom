@@ -818,7 +818,14 @@ ses poids `pretrain79999.pth` de faceCaptureData copiés dans `MESHROOM_MODELS_P
 bisenet`) : ses 19 classes (CelebAMask-HQ), dont les oreilles à part ; quand ses poids sont là, il remplace le
 segmenteur MediaPipe pour FLAME, et le bord des oreilles de FLAME va sur le bord de ses oreilles (même devant la
 joue : seul un autre morceau de l'oreille au-delà l'empêche). Les images de debug montrent alors le bord des
-oreilles en cyan. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
+oreilles en cyan.
+Raffinement photométrique (« FLAME Photometric », `meshroom/live/photometric.py`, d'après le « photo cost » de
+FaceCapture) : après l'ajustement sur les landmarks, l'identité de FLAME est raffinée sur les couleurs des vues : un
+albédo par sommet partagé par les vues (moindres carrés sur les vues qui le voient, lissé vers ses voisins), une lumière
+par vue (harmoniques sphériques d'ordre 2 par canal), puis Gauss-Newton sur l'identité le long des gradients des
+images (l'ombrage gardé ; robuste, Huber 0,2 ; tenu vers l'identité de départ). Comparés : le visage de FLAME
+(`flameFit.photometricRegion` : près du visage canonique, pas les globes oculaires), là où le segmenteur voit la peau.
+Sur une tête synthétique texturée à 3 vues : visage de 4,5 mm à 2,6 mm (12 itérations ; 1,9 mm à 30). Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
 tête du FaceBuilder aussi quand « Use AI Head » (`headCamera`, sous les pins ; la sortie Camera aussi). « Display »
 landmarks montre aussi ceux de FLAME (orange) dans chaque vue. L'ajustement est robuste (Huber, 3 px : un landmark MediaPipe faux, sous les cheveux ou sur
