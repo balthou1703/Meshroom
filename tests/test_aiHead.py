@@ -1,6 +1,7 @@
 """ The FaceBuilder head registered on a generated head (meshroom/live/aiHead.py), without the generator: a known
 head stands for it, and a fake landmarker finds its face on the renders. """
 import numpy as np
+import pytest
 
 from meshroom.live import aiHead, face, headFit
 
@@ -408,7 +409,8 @@ def test_flameJawFittedOnTheViews():
     behind = np.argsort(np.linalg.norm(template * 100.0 - np.array([0.0, -2.5, -6.0]), axis=1))[:8]
     regressor[behind] = 1.0 / len(behind)
     model = flameFit.FlameModel(template, base.directions, base.triangles,
-                                (base.embeddingFaces, base.embeddingWeights, base.embeddingIndices), jaw=(jawWeights, regressor))
+                                (base.embeddingFaces, base.embeddingWeights, base.embeddingIndices),
+                                jaw=(jawWeights, regressor))
     n = face.MESH_VERTICES
     truth = 100.0 * model.posed(model.template, np.array([0.15, 0.0, 0.0]))
     size = (640, 480)
@@ -460,8 +462,48 @@ def test_flameEarsOnTheSegmentation():
     for seg in (None, segmentations):
         fit = flameFit.fitFlameToViews(model, views, start, segmentations=seg)
         errors.append(np.linalg.norm(fit["vertices"][ears] - actor[ears], axis=1).mean())
-    print(f"FLAME ears: {errors[0]:.3f} cm without the segmentation, {errors[1]:.3f} cm with it")
-    assert errors[1] < 0.5 * errors[0]
+    # With the ears of a face parser (their own border, whatever is behind)
+    from meshroom.live import geoRender
+    earVertices = headFit.headRegions(head)["ear"]
+    for seg, camera in zip(segmentations, _headViews((0, 70, -70), size)):
+        xy, depth, _ = camera.project(actor, *size)
+        _, ids = geoRender.rasterize(xy[:, 0], size[1] - xy[:, 1], depth, head.triangles(), (size[1], size[0]))
+        seg.ears = ((ids >= 0) & earVertices[head.triangles()].all(1)[np.maximum(ids, 0)]).astype(np.float32)
+    fit = flameFit.fitFlameToViews(model, views, start, segmentations=segmentations)
+    errors.append(np.linalg.norm(fit["vertices"][ears] - actor[ears], axis=1).mean())
+    print(f"FLAME ears: {errors[0]:.3f} cm without the segmentation, {errors[1]:.3f} cm with it, {errors[2]:.3f} cm with "
+          f"the ears parsed")
+    assert errors[1] < 0.5 * errors[0] and errors[2] < 0.5 * errors[0]
+
+
+def test_faceParsingCategories():
+    """ The 19 classes of the face parser gathered into the categories of the MediaPipe segmenter, the ears apart. """
+    from meshroom.live.neural import faceParsing
+    confidences = np.zeros((2, 3, 19), np.float32)
+    confidences[0, 0, faceParsing.LEFT_EAR] = 1.0
+    confidences[0, 1, faceParsing.HAIR] = 1.0
+    confidences[0, 2, faceParsing.NECK] = 1.0
+    confidences[1, 0, faceParsing.NOSE] = 1.0
+    confidences[1, 1, faceParsing.CLOTH] = 1.0
+    confidences[1, 2, faceParsing.BACKGROUND] = 1.0
+    selfie = faceParsing.toSelfie(confidences)
+    assert selfie[0, 0, headFit.FACE_SKIN] == 1 and selfie[0, 1, headFit.HAIR] == 1 and selfie[0, 2, headFit.BODY_SKIN] == 1
+    assert selfie[1, 0, headFit.FACE_SKIN] == 1 and selfie[1, 1, headFit.CLOTHES] == 1
+    assert selfie[1, 2, headFit.BACKGROUND] == 1
+    assert faceParsing.ears(confidences)[0, 0] == 1 and faceParsing.ears(confidences)[1, 0] == 0
+
+
+def test_faceParsingNetwork():
+    """ The rebuilt BiSeNet: the module names of its weights, a face of 19 classes out. """
+    torch = pytest.importorskip("torch")
+    from meshroom.live.neural import faceParsing
+    net = faceParsing._network(torch).eval()
+    keys = set(net.state_dict())
+    for key in ("cp.resnet.layer4.1.bn2.running_var", "cp.arm32.conv_atten.weight", "ffm.conv2.weight",
+                "conv_out.conv_out.weight", "conv_out16.conv.conv.weight", "cp.resnet.layer2.0.downsample.0.weight"):
+        assert key in keys
+    with torch.no_grad():
+        assert net(torch.zeros(1, 3, 64, 64)).shape == (1, 19, 64, 64)
 
 
 def test_flameLearnedCorrespondence(monkeypatch):

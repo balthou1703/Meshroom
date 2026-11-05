@@ -56,7 +56,8 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   neural/triposr/tsr (MIT), weights in the models folder; or TRELLIS.2
 │   │                           #   in its own Python: neural/trellis2Runner.py; flameFit.py: FLAME 2023 Open (CC-BY-4.0) fitted on
 │   │                           #   the face, no network; MICA + FLAME 2020, a non-commercial reference:
-│   │                           #   neural/micaRunner.py) and the head registered on the generated one,
+│   │                           #   neural/micaRunner.py) and the head registered on the generated one; the ears by the face parsing of
+│   │                           #   FaceCapture: neural/faceParsing.py (BiSeNet), its weights in <models>/facecapture,
 │   │                           #   faceRig.py: the face rigs fitted by the FaceTracker (BlendshapeRig: the 51 ARKit
 │   │                           #   expression shapes; FaceRig: jaw, brows, lids, lips, cheeks controls),
 │   │                           #   data/: faceHead.npz, the MediaPipe face with ears, skull and neck (ICT-FaceKit, MIT)

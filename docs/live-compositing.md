@@ -806,7 +806,13 @@ est passé sur chaque rendu et chaque landmark trouvé est remonté sur la surfa
 la table est gardée dans le dossier de FLAME (`mediapipe_correspondence_<empreinte>.npz`, sinon
 `~/.cache/meshroom/flame`). L'ajustement prend alors, pour chaque vue, la table de l'orientation la plus proche de la
 tête : les 468 landmarks là où MediaPipe les met réellement sur FLAME (son contour, ses sourcils, son nez), au lieu de
-l'embedding et du visage canonique (l'ovale à 0,5). Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
+l'embedding et du visage canonique (l'ovale à 0,5).
+Oreilles par le face parsing de FaceCapture (BiSeNet, `meshroom/live/neural/faceParsing.py` : le réseau refait ici,
+ses poids `pretrain79999.pth` de faceCaptureData copiés dans `MESHROOM_MODELS_PATH/facecapture/face_segmentor/
+bisenet`) : ses 19 classes (CelebAMask-HQ), dont les oreilles à part ; quand ses poids sont là, il remplace le
+segmenteur MediaPipe pour FLAME, et le bord des oreilles de FLAME va sur le bord de ses oreilles (même devant la
+joue : seul un autre morceau de l'oreille au-delà l'empêche). Les images de debug montrent alors le bord des
+oreilles en cyan. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
 tête du FaceBuilder aussi quand « Use AI Head » (`headCamera`, sous les pins ; la sortie Camera aussi). « Display »
 landmarks montre aussi ceux de FLAME (orange) dans chaque vue. L'ajustement est robuste (Huber, 3 px : un landmark MediaPipe faux, sous les cheveux ou sur

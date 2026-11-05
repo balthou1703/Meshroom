@@ -11,6 +11,9 @@ Weights are read from the folder of MESHROOM_MODELS_PATH (never downloaded while
     <models>/triposr/                 TripoSR (config.yaml, model.ckpt, the config of its DINO encoder): AI head
     <models>/flame/                   FLAME 2023 Open (.pkl) and its MediaPipe landmark embedding: AI head (CC-BY-4.0)
     <models>/mica/                    MICA (mica.tar) and FLAME 2020 (generic_model.pkl): AI head, non-commercial
+    <models>/facecapture/             FaceCapture's networks (Technicolor, faceCaptureData/models copied as they are):
+                                      face_segmentor/bisenet (FaceBuilder: the ears), keypoints/superpoints_retrain
+                                      (FaceTracker)
 
 Fill it once, on a machine with internet access: python -m meshroom.live.neural.download --path <models> [names]
 """
@@ -87,6 +90,16 @@ MODELS = {
                   "(https://flame.is.tue.mpg.de, an account), both into <models>/mica by hand", "torch", "torch",
                   "MPI non-commercial (MICA, FLAME 2020)", ["mica/mica.tar", "mica/generic_model.pkl"], {},
                   nonCommercial=True),
+    "faceparsing": Model("faceparsing", "BiSeNet face parsing of FaceCapture (FaceBuilder: the ears): "
+                         "faceCaptureData models/face_segmentor/bisenet/pretrain79999.pth into "
+                         "<models>/facecapture/face_segmentor/bisenet by hand", "torch", "torch",
+                         "MIT (code), weights trained on CelebAMask-HQ (non-commercial dataset)",
+                         ["facecapture/face_segmentor/bisenet/pretrain79999.pth"], {}),
+    "superpoint": Model("superpoint", "SuperPoint of FaceCapture (FaceTracker: points tracked on the face): "
+                        "faceCaptureData models/keypoints/superpoints_retrain/superpoint_retrain.pth into "
+                        "<models>/facecapture/keypoints/superpoints_retrain by hand", "torch", "torch",
+                        "FaceCapture (Technicolor); SuperPoint (Magic Leap) architecture",
+                        ["facecapture/keypoints/superpoints_retrain/superpoint_retrain.pth"], {}),
     "depthanything": Model("depthanything", "Depth Anything V2 Small (FaceBuilder: depth of the views)", "transformers",
                            "transformers", "Apache-2.0",
                            ["depthanything/config.json", "depthanything/model.safetensors",

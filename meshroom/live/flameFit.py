@@ -382,7 +382,8 @@ def _earOutline(vertices, triangles, ears, view, camera, search, faceVertices=No
     The rims of the ears in a view and the border of the skin there: [(vertex, direction (2,) out of the ear, offset
     (pixels) of the border along it)]. The vertices of the ears between the triangles facing the camera and the others
     with, just beyond them, nothing of the ear nor of the face (nothing, or the skull: under the hair, not skin); the
-    nearest border of the skin (the segmenter's face or body skin) from inside to outside within `search` pixels.
+    nearest border of the skin (the segmenter's face or body skin; of the ears when the view has `ears` (h, w): a face
+    parser's) from inside to outside within `search` pixels.
     """
     from .geoRender import rasterize
     width, height = view.size
@@ -402,10 +403,12 @@ def _earOutline(vertices, triangles, ears, view, camera, search, faceVertices=No
     lengths = np.linalg.norm(directions, axis=1)
     keep = lengths > 1e-6
     candidates, directions = candidates[keep], directions[keep] / lengths[keep, None]
-    # What is just beyond: nothing, or a triangle that is neither of the ear nor of the face
+    # What is just beyond: nothing, or a triangle that is neither of the ear nor of the face (with the ears of a face
+    # parser, `view.ears`: their border is theirs whatever is behind, but another part of the ear)
+    earMask = getattr(view, "ears", None)
     _, ids = rasterize(xy[:, 0], height - xy[:, 1], depth, triangles, (height, width))
     blocking = ears.copy()
-    if faceVertices is not None:
+    if faceVertices is not None and earMask is None:
         blocking[faceVertices] = True
     blockingTriangles = blocking[triangles].any(1)
     beyond = xy[candidates] + 2.5 * directions
@@ -418,7 +421,11 @@ def _earOutline(vertices, triangles, ears, view, camera, search, faceVertices=No
     result = []
     for vertex, direction in zip(candidates, directions):
         line = xy[vertex][None, :] + steps[:, None] * direction[None, :]
-        skin = view.skin(line)
+        if earMask is not None:
+            rows, columns, inside = view._rowsColumns(line)
+            skin = inside & (earMask[rows, columns] > 0.5)
+        else:
+            skin = view.skin(line)
         crossings = np.where(skin[:-1] & ~skin[1:])[0]
         if not len(crossings):
             continue

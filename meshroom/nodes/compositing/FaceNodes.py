@@ -1686,16 +1686,23 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         return result
 
     def _segmentations(self, context, views, inputs, vertices):
-        """ [headFit.FitView or None]: each view segmented (MediaPipe), around the head `vertices` (face space) seen by
-        its camera; all None without the segmenter. """
+        """ [headFit.FitView or None]: each view segmented around the head `vertices` (face space) seen by its camera:
+        by the face parser of FaceCapture when its weights are there (BiSeNet: the ears apart, `.ears` of each view),
+        else by the MediaPipe segmenter (the skin); all None without either. """
         import logging
         from meshroom.live import BBox, face, headFit
-        from meshroom.live.neural import displayRGB
+        from meshroom.live.neural import NeuralUnavailable, displayRGB, faceParsing
+        parser = segmenter = None
         try:
-            segmenter = headFit.headSegmenter()
-        except face.FaceUnavailable as e:
-            logging.warning(f"[FaceBuilder] FLAME without the segmentation of the views (the ears from FLAME only): {e}")
-            return [None] * len(views)
+            parser = faceParsing.faceParser()
+        except NeuralUnavailable as e:
+            logging.info(f"[FaceBuilder] FLAME ears on the MediaPipe skin (no face parser: {e})")
+            try:
+                segmenter = headFit.headSegmenter()
+            except face.FaceUnavailable as e:
+                logging.warning(f"[FaceBuilder] FLAME without the segmentation of the views (the ears from FLAME only): "
+                                f"{e}")
+                return [None] * len(views)
         stored = {view["input"]: view for view in self.storedViews(context)}
         segmentations = []
         try:
@@ -1714,10 +1721,17 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                     continue
                 image = context.renderInput(name, int(stored[name]["frame"]))
                 rgb = displayRGB(image, BBox.fromFormat(width, height))[top:bottom, left:right]
-                labels = segmenter.segment((np.clip(rgb[:, :, :3], 0, 1) * 255).astype(np.uint8))
-                segmentations.append(headFit.FitView(view["camera"], (width, height), labels, (left, top)))
+                pixels = (np.clip(rgb[:, :, :3], 0, 1) * 255).astype(np.uint8)
+                if parser is not None:
+                    confidences = parser.segment(pixels)
+                    fitView = headFit.FitView(view["camera"], (width, height), faceParsing.toSelfie(confidences),
+                                              (left, top))
+                    fitView.ears = faceParsing.ears(confidences)
+                else:
+                    fitView = headFit.FitView(view["camera"], (width, height), segmenter.segment(pixels), (left, top))
+                segmentations.append(fitView)
         finally:
-            segmenter.close()
+            (parser or segmenter).close()
         return segmentations
 
     def _writeFlameDebug(self, context, output, views, inputs, moves, viewVertices, viewLandmarks, segmentations=None):
@@ -1749,6 +1763,9 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             if segmentation is not None:
                 # The border of the skin the segmenter saw (cyan)
                 skin = segmentation.labels[:, :, headFit.FACE_SKIN] + segmentation.labels[:, :, headFit.BODY_SKIN] > 0.5
+                if getattr(segmentation, "ears", None) is not None:
+                    # (the ears of the face parser: their border)
+                    skin = segmentation.ears > 0.5
                 border = skin & ~(np.roll(skin, 1, 0) & np.roll(skin, -1, 0) & np.roll(skin, 1, 1) & np.roll(skin, -1, 1))
                 rows, columns = np.where(border)
                 rows, columns = rows + segmentation.origin[1], columns + segmentation.origin[0]
