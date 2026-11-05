@@ -844,9 +844,10 @@ images (l'ombrage gardé ; robuste, Huber 0,2 ; tenu vers l'identité de départ
 (`flameFit.photometricRegion` : près du visage canonique, pas les globes oculaires), là où le segmenteur voit la peau.
 Sur une tête synthétique texturée à 3 vues : visage de 4,5 mm à 2,6 mm (12 itérations ; 1,9 mm à 30).
 « FLAME Expression » : la tête du FaceBuilder est déformée sur FLAME tel qu'il est dans la première vue (son expression,
-sa mâchoire : les paupières et la bouche de l'acteur ; par défaut) ou sur son neutre statistique (« neutral »). Avec la
-correspondance apprise, les 468 landmarks sont gardés sur FLAME là où MediaPipe les met (`flameFit.learnedLandmarks`,
-ceux tombés sur un globe oculaire ramenés sur les paupières) : tout le visage de la tête est tenu sur eux. Les globes
+sa mâchoire : les paupières et la bouche de l'acteur ; par défaut) ou sur son neutre statistique (« neutral »).  La tête est tenue sur les landmarks
+de l'embedding de FLAME (exacts) ; les 468 de la correspondance apprise (`flameFit.learnedLandmarks`, médiane sur
+ses vues, ceux d'un globe oculaire ramenés sur les paupières) placent FLAME mais sont trop approximatifs pour y épingler
+le visage (ils le déformaient). Les globes
 oculaires de FLAME (ses parties séparées) sont retirés de la surface visée (`aiHead.mainSurface`) : les paupières de la
 tête vont sur ses paupières. Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la

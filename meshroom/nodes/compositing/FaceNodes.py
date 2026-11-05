@@ -1829,9 +1829,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             landmarks = np.full((face.MESH_VERTICES, 3), np.nan)
             landmarks[flame.embeddingIndices] = (vertices[corners] * weights[:, :, None]).sum(1)
             fit = dict(fit, vertices=vertices, landmarks=landmarks)
-        if correspondence is not None:
-            # All the 468 landmarks on FLAME (where MediaPipe puts them): the whole face of the head put on them
-            fit = dict(fit, landmarks=flameFit.learnedLandmarks(flame, correspondence, fit["vertices"]))
+        # (the landmarks the head is held on: those of FLAME's embedding, exact; the learned ones, from renders and
+        # several views, place FLAME but are too rough to pin the face of the head on)
         np.savez_compressed(output, vertices=fit["vertices"].astype(np.float32), faces=fit["triangles"].astype(np.int32),
                             colors=np.full((len(fit["vertices"]), 3), 190, np.uint8),
                             landmarks=fit["landmarks"].astype(np.float32),
