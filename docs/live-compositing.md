@@ -799,7 +799,14 @@ l'oreille ni du visage n'est juste au-delà (le crâne, lui, est sous les cheveu
 `flameFit.earVertices`, `_earOutline`), par les formes de FLAME et un déplacement de chaque oreille en bloc (ces
 contraintes ne bougent ni la pose ni le placement : les landmarks placent la tête) (`_earFalloff` : gaussienne de 3,5 cm, nulle sur le visage) ; le bord de la peau
 est dessiné en cyan dans les images de debug. Sur les vues d'un acteur (FLAME 2023 Open réel) : 8,2 px → 1,1 / 1,5 /
-1,5 px RMS par vue (nez 0,7 à 1,8 px). Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
+1,5 px RMS par vue (nez 0,7 à 1,8 px).
+Correspondance apprise (l'idée du « landmarks matcher model » de FaceCapture, Technicolor) : à la première
+génération, FLAME (sa tête moyenne) est rendu sous 45 orientations (tangage −30° à 30°, lacet −60° à 60°), MediaPipe
+est passé sur chaque rendu et chaque landmark trouvé est remonté sur la surface (`flameFit.learnCorrespondence`) ;
+la table est gardée dans le dossier de FLAME (`mediapipe_correspondence_<empreinte>.npz`, sinon
+`~/.cache/meshroom/flame`). L'ajustement prend alors, pour chaque vue, la table de l'orientation la plus proche de la
+tête : les 468 landmarks là où MediaPipe les met réellement sur FLAME (son contour, ses sourcils, son nez), au lieu de
+l'embedding et du visage canonique (l'ovale à 0,5). Ses déplacements dans les vues sont gardés (`viewMoves` du .npz, puis
 `views` de « AI Head Fit ») : la tête IA est dessinée par la caméra de chaque vue corrigée d'eux (`aiCamera`), et la
 tête du FaceBuilder aussi quand « Use AI Head » (`headCamera`, sous les pins ; la sortie Camera aussi). « Display »
 landmarks montre aussi ceux de FLAME (orange) dans chaque vue. L'ajustement est robuste (Huber, 3 px : un landmark MediaPipe faux, sous les cheveux ou sur

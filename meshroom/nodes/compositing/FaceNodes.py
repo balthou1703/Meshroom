@@ -1638,7 +1638,16 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                           "pixels": face.toPixels(np.array(view["landmarks"], dtype=np.float64), width, height)})
         # What the segmenter sees in each view: where the skin is (the ears on its border)
         segmentations = self._segmentations(context, views, inputs, start["vertices"])
-        fit = flameFit.fitFlameToViews(flame, views, start, segmentations=segmentations, cancel=context.checkCancelled,
+        # Where MediaPipe puts its landmarks on FLAME, learned once on renders of it (models folder or cache)
+        import logging
+        correspondence = flameFit.loadCorrespondence(
+            flame, cancel=context.checkCancelled,
+            progress=lambda done: context.progress(0.3 + 0.1 * done, "Learn where MediaPipe sees FLAME (once)"))
+        if correspondence is None:
+            logging.warning("[FaceBuilder] FLAME without the learned correspondence (MediaPipe unavailable): its "
+                            "MediaPipe embedding")
+        fit = flameFit.fitFlameToViews(flame, views, start, segmentations=segmentations, correspondence=correspondence,
+                                       cancel=context.checkCancelled,
                                        progress=lambda done: context.progress(0.3 + 0.4 * done,
                                                                               "Fit FLAME on the views")) if views else start
         moves = np.array(fit.get("views") or np.zeros((0, 4, 4)), dtype=np.float64).reshape(-1, 4, 4)

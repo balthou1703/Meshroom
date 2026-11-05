@@ -210,6 +210,115 @@ def _reprojection(views, points, indices):
     return np.concatenate(residuals), np.concatenate(jacobians), np.concatenate(which)
 
 
+def _turn(pitch: float, yaw: float) -> np.ndarray:
+    """ The rotation (rows: the mesh axes seen as right, up, toward the camera) of a head facing the camera (+Z, Y up)
+    turned by `yaw` degrees around its up axis then tilted by `pitch` degrees. """
+    a, b = np.radians(yaw), np.radians(pitch)
+    turnY = np.array([[np.cos(a), 0.0, np.sin(a)], [0.0, 1.0, 0.0], [-np.sin(a), 0.0, np.cos(a)]])
+    turnX = np.array([[1.0, 0.0, 0.0], [0.0, np.cos(b), -np.sin(b)], [0.0, np.sin(b), np.cos(b)]])
+    return turnX @ turnY
+
+
+def _nearestOnSurface(vertices, triangles, points, candidates: int = 24):
+    """ (triangles (k,), barycentric coordinates (k, 3)) of the surface points nearest to `points` (k, 3) (among the
+    triangles whose centers are nearest). """
+    from scipy.spatial import cKDTree
+    centers = vertices[triangles].mean(1)
+    _, near = cKDTree(centers).query(points, k=min(candidates, len(triangles)))
+    found, weights = np.zeros(len(points), np.int64), np.zeros((len(points), 3))
+    for index, (point, near) in enumerate(zip(points, np.atleast_2d(near))):
+        local, coordinates = face.surfaceLocation(vertices, triangles[near], point)
+        found[index], weights[index] = near[local], coordinates
+    return found, weights
+
+
+def learnCorrespondence(model: FlameModel, detector=None, pitches=(-30, -15, 0, 15, 30),
+                        yaws=(-60, -45, -30, -15, 0, 15, 30, 45, 60), size: int = 512, color=(0.80, 0.66, 0.58),
+                        cancel=None, progress=None) -> dict:
+    """
+    Where MediaPipe puts its 468 landmarks on FLAME, as it sees it turned each way (faceCapture's "landmarks matcher
+    model", for MediaPipe and FLAME): FLAME (its mean head, neutral) rendered at each `pitches` x `yaws` (aiHead._render,
+    lit from the camera), MediaPipe run on each render, each landmark found lifted onto the surface. The detector's own
+    way of placing its landmarks on a face (its contour on the outline of the cheeks, its brows...) learned on FLAME
+    itself, for each view.
+
+    Returns:
+        {"rotations": (k, 3, 3) the turns rendered (mesh to camera), "triangles": (k, 468) int, "weights": (k, 468, 3)
+        barycentric coordinates, "valid": (k, 468) bool, "averageTriangles" (468,), "averageWeights" (468, 3): the
+        landmarks' mean place over the views (on the surface)}.
+    """
+    from . import aiHead
+    detector = detector or face.landmarker()
+    n = face.MESH_VERTICES
+    vertices = model.template * 100.0
+    triangles = model.triangles
+    colors = np.tile(np.asarray(color, dtype=np.float64), (len(vertices), 1))
+    turns = [(pitch, yaw) for pitch in pitches for yaw in yaws]
+    rotations, found, foundWeights, valid, points = [], [], [], [], []
+    for index, (pitch, yaw) in enumerate(turns):
+        if cancel:
+            cancel()
+        rotation = _turn(pitch, yaw)
+        image, buffer, frame = aiHead._render(vertices, triangles, colors, rotation, size)
+        landmarks, _ = detector.detect(image)
+        if progress:
+            progress((index + 1) / float(len(turns)))
+        if landmarks is None:
+            continue
+        lifted = aiHead._lift(np.asarray(landmarks)[:n], buffer, frame)
+        seen = np.isfinite(lifted).all(1)
+        where, coordinates = np.zeros(n, np.int64), np.zeros((n, 3))
+        if seen.any():
+            where[seen], coordinates[seen] = _nearestOnSurface(vertices, triangles, lifted[seen])
+        rotations.append(rotation)
+        found.append(where)
+        foundWeights.append(coordinates)
+        valid.append(seen)
+        points.append(np.where(seen[:, None], lifted, np.nan))
+    if not rotations:
+        raise FlameUnavailable("FLAME: MediaPipe found no face on the renders of FLAME")
+    points = np.array(points)
+    counts = np.isfinite(points).all(2).sum(0)
+    mean = np.where(counts[:, None] > 0, np.nansum(np.nan_to_num(points), 0) / np.maximum(counts, 1)[:, None], 0.0)
+    averageTriangles, averageWeights = _nearestOnSurface(vertices, triangles, mean)
+    return {"rotations": np.array(rotations), "triangles": np.array(found), "weights": np.array(foundWeights),
+            "valid": np.array(valid) & (counts > 0)[None], "averageTriangles": averageTriangles,
+            "averageWeights": averageWeights}
+
+
+def correspondenceFile(model: FlameModel) -> str:
+    """ Where the learned correspondence of a FLAME is kept: next to it in the models folder when it can be written
+    there, else in the user's cache (keyed by its template). """
+    import hashlib
+    digest = hashlib.sha1(np.ascontiguousarray(model.template).tobytes()).hexdigest()[:12]
+    name = f"mediapipe_correspondence_{digest}.npz"
+    folder = modelFolder()
+    if os.path.isfile(os.path.join(folder, name)) or (os.path.isdir(folder) and os.access(folder, os.W_OK)):
+        return os.path.join(folder, name)
+    return os.path.join(os.path.expanduser("~"), ".cache", "meshroom", "flame", name)
+
+
+def loadCorrespondence(model: FlameModel, detector=None, learn: bool = True, cancel=None, progress=None):
+    """ The learned correspondence of a FLAME (learnCorrespondence), from its file, learned and saved when missing
+    (`learn`); None when it cannot be (no MediaPipe). """
+    path = correspondenceFile(model)
+    if os.path.isfile(path):
+        data = np.load(path)
+        return {key: data[key] for key in data.files}
+    if not learn:
+        return None
+    try:
+        learned = learnCorrespondence(model, detector, cancel=cancel, progress=progress)
+    except (face.FaceUnavailable, FlameUnavailable):
+        return None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.savez_compressed(path, **learned)
+    except OSError:
+        pass
+    return learned
+
+
 def denseCorrespondence(model: FlameModel):
     """
     Where each of the 468 MediaPipe landmarks is on FLAME (corners (468, 3), weights (468, 3), from the embedding
@@ -323,7 +432,8 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
                     denseWeight: float = 0.2, innerWeight: float = 0.0, outlineFacing: float = 0.3,
                     expressionRegularization: float = 0.01,
                     rigidIterations: int = 5, huber: float = 3.0, exact: bool = False, radius: float = 2.0,
-                    segmentations=None, earWeight: float = 1.0, earSearch: float = 25.0,
+                    segmentations=None, earWeight: float = 1.0, earSearch: float = 25.0, correspondence=None,
+                    learnedOvalWeight: float = 0.5,
                     earMoveRegularization: float = 0.05, cancel=None,
                     progress=None) -> dict:
     """
@@ -340,10 +450,13 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
     landmarks of the face oval that a view sees on the outline of the face (FLAME turned away there) on the outline of
     FLAME in that view (its vertex nearest to them there, the error across the outline only). With `exact`, the surface
     of each view then moved around each landmark of the embedding (gaussians of `radius` cm) so that each lands on its
-    pixel. With `segmentations` (one per view, a headFit.FitView or None: its labels, what the segmenter saw), the
-    ears of FLAME on the outline of the head in a view also on the border of the skin there (`earWeight` against a
-    landmark, within `earSearch` pixels), FLAME's shapes and each ear moved as a whole (an ear moved by 1 cm against
-    `earMoveRegularization` pixels squared per landmark): the ears seen in the images, that no landmark gives.
+    pixel. With `correspondence` (learnCorrespondence: where MediaPipe puts each landmark on FLAME for each turn of
+    the head), all the 468 landmarks on their learned places for the turn of the head in each view (the oval by
+    `learnedOvalWeight`), instead of the embedding and the canonical face. With `segmentations` (one per view, a
+    headFit.FitView or None: its labels, what the segmenter saw), the ears of FLAME on the outline of the head in a
+    view also on the border of the skin there (`earWeight` against a landmark, within `earSearch` pixels), FLAME's
+    shapes and each ear moved as a whole (an ear moved by 1 cm against `earMoveRegularization` pixels squared per
+    landmark): the ears seen in the images, that no landmark gives.
 
     Args:
         views: [{"camera", "size": (w, h), "pixels": (n, 2) the landmarks (Nuke pixels), "hidden": [indices]}].
@@ -375,6 +488,14 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
     corners, weights, embedded, oval = denseCorrespondence(model)
     isOval = np.zeros(len(corners), bool)
     isOval[oval] = True
+    if correspondence is not None:
+        # Learned (learnCorrespondence): where MediaPipe puts each landmark on FLAME, for each turn of the head
+        learnedRotations = np.asarray(correspondence["rotations"], dtype=np.float64)
+        learnedCorners = model.triangles[np.asarray(correspondence["triangles"], dtype=np.int64)]
+        learnedWeights = np.asarray(correspondence["weights"], dtype=np.float64)
+        learnedValid = np.asarray(correspondence["valid"], dtype=bool)
+        averageCorners = model.triangles[np.asarray(correspondence["averageTriangles"], dtype=np.int64)]
+        averageWeights = np.asarray(correspondence["averageWeights"], dtype=np.float64)
     center = (scale0 * (model.vertices(startCoefficients)[corners[embedded]] * weights[embedded][:, :, None]).sum(1)
               @ rotation0.T + translation0).mean(0)
     flameFace = np.unique(corners)
@@ -422,6 +543,17 @@ def fitFlameToViews(model: FlameModel, views, start: dict, iterations: int = 20,
         normals = _vertexNormals(moved, model.triangles)
         eye = np.asarray(view["camera"].matrix, dtype=np.float64)[:3, 3]
         landmarks = np.where(seen[v])[0]
+        if correspondence is not None:
+            # The table of the turn of the head nearest to its turn in this view (mesh to camera)
+            cameraRotation = np.linalg.inv(np.asarray(view["camera"].matrix, dtype=np.float64))[:3, :3]
+            turn = cameraRotation @ _rotation(viewPoses[v, :3]) @ _rotation(pose[:3]) @ rotation0
+            nearest = int(np.argmin(((learnedRotations - turn[None]) ** 2).sum((1, 2))))
+            known = learnedValid[nearest][landmarks]
+            rowCorners = np.where(known[:, None], learnedCorners[nearest][landmarks], averageCorners[landmarks])
+            rowWeights = np.where(known[:, None], learnedWeights[nearest][landmarks], averageWeights[landmarks])
+            pixelWeights = np.where(isOval[landmarks], learnedOvalWeight, 1.0)
+            # (the outline handled by the table: MediaPipe's contour there, as seen on FLAME)
+            return landmarks, rowCorners, rowWeights, pixelWeights, np.full((len(landmarks), 2), np.nan)
         rowCorners, rowWeights = corners[landmarks].copy(), weights[landmarks].copy()
         # (the oval: the outline of the face, that the embedding lacks; the others where the canonical MediaPipe face is
         # on FLAME, a rough correspondence: little, it would pull the nose and the brows off)

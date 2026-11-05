@@ -462,3 +462,43 @@ def test_flameEarsOnTheSegmentation():
         errors.append(np.linalg.norm(fit["vertices"][ears] - actor[ears], axis=1).mean())
     print(f"FLAME ears: {errors[0]:.3f} cm without the segmentation, {errors[1]:.3f} cm with it")
     assert errors[1] < 0.5 * errors[0]
+
+
+def test_flameLearnedCorrespondence(monkeypatch):
+    """ Where the landmarker puts its landmarks on FLAME, learned on renders of it turned each way (a stand-in
+    landmarker that sees the face vertices: each landmark found on its vertex), then used to fit the views. """
+    from tests.test_faceBuilder import _headViews
+    from meshroom.live import flameFit
+    model = _fakeFlame()
+    n = face.MESH_VERTICES
+    detector = _FakeLandmarker(model.template[:n] * 100.0)
+    render = aiHead._render
+
+    def recording(*args, **kwargs):
+        image, buffer, frame = render(*args, **kwargs)
+        detector.frame = frame
+        return image, buffer, frame
+    monkeypatch.setattr(aiHead, "_render", recording)
+    learned = flameFit.learnCorrespondence(model, detector, pitches=(-15, 0, 15), yaws=(-45, 0, 45), size=256)
+    assert len(learned["rotations"]) >= 5
+    # Each landmark on (a triangle of) its own vertex, in the views where it is seen
+    front = int(np.argmin([np.abs(r - np.eye(3)).sum() for r in learned["rotations"]]))
+    triangles = model.triangles[learned["triangles"][front]]
+    seen = learned["valid"][front]
+    onIt = (triangles == np.arange(n)[:, None]).any(1)
+    assert onIt[seen].mean() > 0.9
+    # The views of an actor fitted with it (here the embedding is exact: the stand-in has the topology of the
+    # landmarks; the learned places, from renders, are nearly as good)
+    actor = _actor(7, out=0.0, back=0.0)
+    size = (640, 480)
+    views = []
+    for camera in _headViews((0, 40, -40), size):
+        xy, _, _ = camera.project(actor[:n], *size)
+        views.append({"camera": camera, "size": size, "pixels": xy, "hidden": []})
+    start = flameFit.fitFlame(model, actor[:n] + 0.3 * np.sin(actor[:n] / 3.0))
+    errors = []
+    for correspondence in (None, learned):
+        fit = flameFit.fitFlameToViews(model, views, start, correspondence=correspondence)
+        errors.append(np.linalg.norm(fit["vertices"][:n] - actor[:n], axis=1).mean())
+    print(f"FLAME face: {errors[0]:.3f} cm with the embedding, {errors[1]:.3f} cm with the learned correspondence")
+    assert errors[1] < 0.1

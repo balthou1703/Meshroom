@@ -763,6 +763,8 @@ def test_faceBuilderAiHead(monkeypatch, tmp_path, model):
         from meshroom.live import flameFit
         from tests.test_aiHead import _fakeFlame
         monkeypatch.setattr(flameFit, "loadModel", lambda folder=None: _fakeFlame())
+        # (the learned correspondence: tested on its own, test_aiHead)
+        monkeypatch.setattr(flameFit, "loadCorrespondence", lambda *args, **kwargs: None)
         size = (640, 480)
         cameras = _headViews((0, 60, -60), size)
         graph = Graph("builderAi")
