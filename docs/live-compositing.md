@@ -631,6 +631,11 @@ rayon 0,42 × la largeur de l'œil, soit ~1,2 cm), suit la tête, et est tourné
 iris passe par le landmark d'iris de MediaPipe (468, 473 : le rayon de la caméra sur la sphère). Sortie « Eyes » (deux
 sphères, le pôle avant le long du regard, le bord de l'iris en anneau ; `faceEyes.gazeAngles` donne lacet et tangage
 dans l'espace du visage) ; « Show Eyes » les dessine en jaune avec le visage (cachées par les paupières).
+« Optical Flow » superpoint (`meshroom/live/neural/superpoint.py`, SuperPoint ré-entraîné par FaceCapture, ses poids
+`superpoint_retrain.pth` de faceCaptureData dans `MESHROOM_MODELS_PATH/facecapture/keypoints/superpoints_retrain`) :
+les points de la peau détectés et décrits dans deux frames (autour du visage), appariés par leurs descripteurs (plus
+proches voisins mutuels, distincts), les appariements loin du déplacement médian de leurs voisins écartés ; chaque
+landmark suit la moyenne gaussienne des déplacements proches (`superpoint.carry`), Lucas-Kanade là où ils manquent.
 Comme dans KeenTools FaceTracker, les pins du FaceTracker appartiennent à leurs keyframes : une frame où des pins
 ont une clé est une keyframe (le visage y est calé avec ses pins) ; ailleurs ils sont cachés et ne contraignent rien
 (teinte « Show Pin Reach » comprise), et ils ne sont pas trackés (pas de boutons de tracking de pins) : c'est le

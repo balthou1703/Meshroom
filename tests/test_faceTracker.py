@@ -712,3 +712,32 @@ def test_eyesFollowTheIrises():
     geo = faceEyes.eyeGeometry(found)
     assert len(geo.vertices) == 2 * (1 + 16 * 12) and geo.faceIndices.max() < len(geo.vertices)
     assert faceEyes.eyesAt(rest, head, pixels[:468], CAMERA, W, H) is None
+
+
+def test_superpointMatchesCarryTheLandmarks():
+    """ Keypoints matched by their descriptors (mutual nearest, distinct), their moves carrying the points near them;
+    a wrong match among them ignored. """
+    from meshroom.live.neural import superpoint
+    rng = np.random.default_rng(0)
+    descriptors = rng.normal(size=(60, 32)).astype(np.float32)
+    descriptors /= np.linalg.norm(descriptors, axis=1, keepdims=True)
+    order = rng.permutation(60)
+    matches = superpoint.match(descriptors, descriptors[order])
+    assert len(matches) == 60 and (order[matches[:, 1]] == matches[:, 0]).all()
+    sources = rng.uniform(0, 200, (60, 2))
+    targets = sources + [3.0, -2.0]
+    targets[5] += [40.0, 40.0]
+    moves, support = superpoint.carry(np.array([[100.0, 100.0], [50.0, 150.0]]), sources, targets, sigma=30.0)
+    np.testing.assert_allclose(moves, [[3.0, -2.0], [3.0, -2.0]], atol=1e-6)
+    assert (support > 0.5).all()
+    assert superpoint.carry(np.zeros((1, 2)), sources[:3], targets[:3], 30.0)[1][0] == 0
+
+
+def test_superpointNetwork():
+    torch = pytest.importorskip("torch")
+    from meshroom.live.neural import superpoint
+    net = superpoint._network(torch).eval()
+    assert {"vgg_conv1_1.weight", "convDet_2.bias", "convDesc_2.weight"} <= set(net.state_dict())
+    with torch.no_grad():
+        semi, desc = net(torch.zeros(1, 1, 64, 48))
+    assert semi.shape == (1, 65, 8, 6) and desc.shape == (1, 256, 8, 6)

@@ -463,8 +463,9 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
                    startPose: Optional[np.ndarray] = None) -> Tuple[Dict[int, dict], str]:
     """
     The face followed from its landmarks `start` (n, 3) normalized at frames[0] through `frames` (consecutive, forward or
-    backward) by the optical flow of the plate (`flowMethod`: "lucasKanade" or "raft"): each landmark moves with the
-    flow. With a `detector` (MediaPipe, see trackFaces), the face it finds around the flowed landmarks is taken when it
+    backward) by the optical flow of the plate (`flowMethod`: "lucasKanade" or "raft"; "superpoint": the keypoints of
+    the skin matched between the frames, Lucas-Kanade where they are too few): each landmark moves with the flow.
+    With a `detector` (MediaPipe, see trackFaces), the face it finds around the flowed landmarks is taken when it
     agrees with them (its landmarks within `agreement` x the size of the face, in median): MediaPipe does not drift,
     the flow keeps the face where MediaPipe is lost or wrong (occlusions, profile, blur). Masked out landmarks are
     "hidden" (as in trackFaces). `regularize(frame, landmarks, hidden)`: the landmarks of the face model fitted on the
@@ -494,12 +495,26 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
             if cancel:
                 cancel()
             imageB = imageAt(frame)
-            field = computeFlow(imageA, imageB, cancel=cancel, useGpu=useGpu, method=flowMethod)
             bbox = imageA.bbox
             x, y = current[:, 0] * width, current[:, 1] * height  # Pixels from the top left corner
-            # The flow at each landmark (rows of the bbox from its top; Nuke y = height - y)
-            motion = sampleRows(field, (bbox.y1 - (height - y) - 0.5).astype(np.float32),
-                                (x - bbox.x0 - 0.5).astype(np.float32)).astype(np.float64)
+            motion = None
+            if flowMethod == "superpoint":
+                # The keypoints of the skin matched between the frames carry the landmarks (rows down: y negated as
+                # the flow's), the optical flow where they are too few
+                motion, support = _superpointMotion(imageA, imageB, np.c_[x, y], width, height)
+                if motion is not None and (support < 0.5).mean() > 0.3:
+                    motion = None
+            if motion is None or flowMethod == "superpoint":
+                field = computeFlow(imageA, imageB, cancel=cancel, useGpu=useGpu,
+                                    method="lucasKanade" if flowMethod == "superpoint" else flowMethod)
+                # The flow at each landmark (rows of the bbox from its top; Nuke y = height - y)
+                flow = sampleRows(field, (bbox.y1 - (height - y) - 0.5).astype(np.float32),
+                                  (x - bbox.x0 - 0.5).astype(np.float32)).astype(np.float64)
+                if motion is None:
+                    motion = flow
+                else:
+                    weak = support < 0.5
+                    motion[weak] = flow[weak]
         except EvaluationCancelled:
             return faces, "cancelled"
         except EvaluationError as e:
@@ -545,6 +560,28 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
             progress(index, len(frames) - 1)
         current, imageA, currentPose = landmarks, imageB, pose
     return faces, ""
+
+
+def _superpointMotion(imageA, imageB, points: np.ndarray, width: int, height: int):
+    """ (motion (n, 2) in Nuke pixels (y up), support (n,)) of points (pixels from the top left corner) from image A to
+    image B by SuperPoint (FaceCapture's keypoints: neural/superpoint.py); (None, None) without it or with too few
+    matches. """
+    from .imageBuffer import BBox
+    from .neural import NeuralUnavailable, displayRGB, superpoint
+    try:
+        detector = superpoint.superPoint()
+    except NeuralUnavailable as e:
+        import logging
+        logging.info(f"[FaceTracker] SuperPoint unavailable, the optical flow instead: {e}")
+        return None, None
+    bbox = BBox.fromFormat(width, height)
+    grayA = displayRGB(imageA, bbox)[:, :, :3].mean(2)
+    grayB = displayRGB(imageB, bbox)[:, :, :3].mean(2)
+    found = superpoint.landmarkMoves(detector, grayA, grayB, points)
+    if found is None:
+        return None, None
+    moves, support = found
+    return np.c_[moves[:, 0], -moves[:, 1]], support
 
 
 # Storage (the "faceTrack" parameter): {"format": [w, h], "frames": {"1001": {"l": [x, y, z, ...], "b": {...},

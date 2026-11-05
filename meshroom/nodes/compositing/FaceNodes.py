@@ -86,10 +86,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                      "mediapipe+flow: followed by the flow, MediaPipe taken where it agrees with it (no "
                                      "drift, and the flow where MediaPipe is lost or wrong: occlusions, profile, blur). "
                                      "With flow, start from a well placed frame."),
-        desc.ChoiceParam(name="flowMethod", label="Optical Flow", value="lucasKanade", values=["lucasKanade", "raft"],
+        desc.ChoiceParam(name="flowMethod", label="Optical Flow", value="lucasKanade",
+                         values=["lucasKanade", "raft", "superpoint"],
                          invalidate=False,
-                         description="The optical flow followed: Lucas-Kanade, or the RAFT network (large motions, "
-                                     "sharp edges; PyTorch and its weights needed, else Lucas-Kanade)."),
+                         description="The optical flow followed: Lucas-Kanade, the RAFT network (large motions, "
+                                     "sharp edges; PyTorch and its weights needed, else Lucas-Kanade), or SuperPoint "
+                                     "(FaceCapture's keypoints of the skin matched from frame to frame; its weights in "
+                                     "<models>/facecapture, else Lucas-Kanade; Lucas-Kanade where it has too few)."),
         desc.BoolParam(name="followSurface", label="Follow Head Surface", value=True, invalidate=False,
                        description="With flow or mediapipe+flow: the pose of the head is followed by the surface of "
                                    "its rigid parts (forehead, nose bridge, temples, cheekbones: many textured points, "
@@ -714,7 +717,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 raise RuntimeError(f"Track Face: {e}") from e
             detector.turnLying = bool(context.values.get("detectLying", True))
         keyframes = self.keyframes(context)
-        flowMethod = "raft" if context.value("flowMethod") == "raft" else "lucasKanade"
+        flowMethod = context.value("flowMethod") if context.value("flowMethod") in ("raft", "superpoint") else \
+            "lucasKanade"
         useGpu = bool(context.value("useGpu")) if "useGpu" in context.values else True
 
         def startAt(f):
