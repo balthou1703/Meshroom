@@ -7,13 +7,15 @@ import MaterialIcons 2.2
 /**
  * List of the tracks of a Tracker node (JSON "tracks" attribute, see meshroom/live/tracking.py):
  * enabled, name, pattern and search sizes, number of keys, delete. The tracks are placed and
- * tracked in the viewer.
+ * tracked in the viewer. The list is folded by default (a header with their count).
  */
 ColumnLayout {
     id: root
 
     required property var attribute
     property bool editable: true
+    // The list unfolded (the header toggles it)
+    property bool expanded: false
     readonly property var tracks: {
         try {
             var parsed = JSON.parse(attribute.value || "[]")
@@ -34,6 +36,32 @@ ColumnLayout {
         _currentScene.setAttribute(root.attribute, JSON.stringify(tracks))
     }
 
+    RowLayout {
+        visible: root.tracks.length > 0
+        Layout.fillWidth: true
+        spacing: 2
+
+        MaterialToolButton {
+            text: root.expanded ? MaterialIcons.expand_less : MaterialIcons.expand_more
+            font.pointSize: 10
+            padding: 2
+            ToolTip.text: root.expanded ? "Hide the list" : "Show the list"
+            onClicked: root.expanded = !root.expanded
+        }
+        Label {
+            Layout.fillWidth: true
+            text: root.tracks.length + " " + root.attribute.label.toLowerCase() + ", "
+                  + root.tracks.filter(function(t) { return t.enabled !== false }).length + " enabled"
+            font.pointSize: 8
+            opacity: 0.7
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.expanded = !root.expanded
+            }
+        }
+    }
+
     Label {
         visible: root.tracks.length === 0
         text: "No track: select the node, then 'Add track' in the viewer toolbar"
@@ -42,7 +70,7 @@ ColumnLayout {
     }
 
     Repeater {
-        model: root.tracks
+        model: root.expanded ? root.tracks : []
 
         RowLayout {
             id: trackRow
