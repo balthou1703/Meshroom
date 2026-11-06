@@ -781,3 +781,86 @@ def test_teethFollowTheJaw():
     expectedLower = (lower @ jaw[:3, :3].T + jaw[:3, 3]) @ head[:3, :3].T + head[:3, 3]
     np.testing.assert_allclose(geo.vertices[len(upper):], expectedLower, atol=1e-9)
     assert geo.faceIndices.max() < len(geo.vertices) and upperIndices.max() < len(upper)
+
+
+def test_solveLayerMovesADoubtfulKeyframe(tmp_path, monkeypatch):
+    """ "Solve": the poses of the range solved together; a keyframe of low confidence whose rigid pins are wrong moves
+    to agree with the motion of the landmarks; the layer is switched on and off. """
+    monkeypatch.setattr(face, "RIGID_LANDMARKS", tuple(RIGID))
+    graph, plate, tracker = faceGraph(tmp_path)
+    frames = list(range(1, 9))
+    faces = {}
+    for f in frames:
+        xy, _, _ = CAMERA.project(scene3d.transformPoints(headAt(0.5 * f), FACE.vertices), W, H)
+        faces[f] = {"landmarks": np.c_[xy[:, 0] / W, (H - xy[:, 1]) / H, np.zeros(len(xy))], "blendshapes": {}}
+    tracker.faceTrack.value = face.dumpFaces(faces, (W, H))
+    tracker.deform.value = False
+    tracker.smoothing.value = 0.0
+    tracker.temporalSmoothing.value = 0.0
+    tracker.keyConfidence.value = 30.0
+    # Rigid pins at frame 6, all 15 pixels to the right of where the face is: a doubtful keyframe
+    pinned = RIGID[::8]
+    xy, _, _ = CAMERA.project(scene3d.transformPoints(headAt(3.0), FACE.vertices[pinned]), W, H)
+    tracker.pins.value = json.dumps([{"name": f"pin{i}", "enabled": True, "point": list(FACE.vertices[v]),
+                                      "format": [W, H], "keys": {"6": [x + 15.0, y]}, "keyframes": [6]}
+                                     for i, (v, (x, y)) in enumerate(zip(pinned, xy))])
+    graph.update()
+
+    def faceAt(frame):
+        plan = buildPlan(tracker)
+        return Evaluator().data(plan, plan.target, "geoOutput", frame).vertices[:len(FACE.vertices)]
+
+    def pixelError(vertices):
+        """ The mean distance (pixels) of the face seen at frame 6 to the true one. """
+        truth = scene3d.transformPoints(headAt(3.0), FACE.vertices)
+        return float(np.linalg.norm(CAMERA.project(vertices, W, H)[0] - CAMERA.project(truth, W, H)[0], axis=1).mean())
+    tracked = faceAt(6)
+    assert pixelError(tracked) > 5.0
+    values = {attr.name: _snapshotValue(attr) for attr in tracker.attributes
+              if not attr.isOutput and attr.type not in ("Image", "PushButtonParam")}
+    context = ActionContext(values, Evaluator(), buildPlan(plate), 1, nodePlan=buildPlan(tracker))
+    monkeypatch.setattr(ActionContext, "frames", property(lambda self: frames))
+    result = tracker.nodeDesc.runAction("solveFace", context)
+    assert result["useSolve"] and "key 6 (30%)" in result["solveReport"]
+    assert set(json.loads(result["solvedPoses"])) == {str(f) for f in frames}
+    tracker.solvedPoses.value = result["solvedPoses"]
+    tracker.useSolve.value = True
+    graph.update()
+    assert pixelError(faceAt(6)) < 0.4 * pixelError(tracked)
+    # The layer off: the tracking as it was
+    tracker.useSolve.value = False
+    graph.update()
+    np.testing.assert_allclose(faceAt(6), tracked, atol=1e-6)
+
+
+def test_solvePosesHoldsSureKeysAndRemovesDrift():
+    """ faceSolve.solvePoses: a drifting track is brought back on its landmarks, a keyframe sure at 100% keeps its pins,
+    one at 30% with wrong pins agrees with the motion instead. """
+    from meshroom.live import faceSolve
+    rng = np.random.default_rng(0)
+    points = rng.normal(size=(30, 3)) * [6.0, 7.0, 3.0]
+
+    def headOf(f):
+        move = faceSolve._moved(np.eye(4), np.array([0.0, 0.3 * np.sin(f / 10.0), 0.0, 2.0 * np.sin(f / 7.0), 0.0, 0.0]),
+                                np.zeros(3))
+        move[2, 3] -= 60.0
+        return move
+    frames = list(range(100, 140))
+    truth = {f: headOf(f) for f in frames}
+    landmarks = {f: faceSolve._project(CAMERA, truth[f], points, W, H) + rng.normal(scale=0.5, size=(30, 2))
+                 for f in frames}
+    drifted = {f: faceSolve._moved(truth[f], np.r_[0.0, 0.0, 0.002 * (f - 100), 0.02 * (f - 100), 0.0, 0.0], np.zeros(3))
+               for f in frames}
+    pins = points[:6]
+    wrong = faceSolve._moved(truth[130], np.r_[0.0, 0.05, 0.0, 1.0, 0.0, 0.0], np.zeros(3))
+    keys = {110: (pins, faceSolve._project(CAMERA, truth[110], pins, W, H), 1.0),
+            130: (pins, faceSolve._project(CAMERA, wrong, pins, W, H), 0.3)}
+    result = faceSolve.solvePoses(frames, {f: CAMERA for f in frames}, landmarks, {}, drifted, points, range(30), W, H,
+                                  keys=keys)
+
+    def error(heads):
+        return np.mean([np.linalg.norm(heads[f][:3, 3] - truth[f][:3, 3]) for f in frames])
+    assert error(result["heads"]) < 0.3 * error(drifted)
+    assert result["keys"][110][1] < 0.5
+    assert result["keys"][130][1] > 0.5 * result["keys"][130][0]
+    assert result["error"][1] < result["error"][0]

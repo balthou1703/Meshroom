@@ -112,6 +112,29 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.PushButtonParam(name="refineFace", label="Refine", semantic="liveAction",
                              description="Track the face again between each pair of keyframes (frames with pins), from "
                                          "both ends, and blend the two."),
+        desc.PushButtonParam(name="solveFace", label="Solve", semantic="liveAction",
+                             description="The head poses of the track range solved together (after Track / Refine): from "
+                                         "the poses tracked, the most coherent sequence: the moves of the landmarks from "
+                                         "frame to frame, their places, a smooth motion and the rigid pins of the "
+                                         "keyframes, each keyframe as strong as its 'Key Confidence' (a keyframe less "
+                                         "sure than the others moves to agree with them). Shown with 'Solve Layer' "
+                                         "(turned on by the solve)."),
+        desc.BoolParam(name="useSolve", label="Solve Layer", value=False,
+                       description="The head poses of 'Solve' used (a layer over the tracking, kept as it is: off, the "
+                                   "poses tracked again). On the keyframes too: their rigid pins are then only one of the "
+                                   "constraints of the solve (the expression pins still deform the face)."),
+        desc.FloatParam(name="keyConfidence", label="Key Confidence", value=100.0, range=(0.0, 100.0, 1.0),
+                        description="How sure the rigid pins of a keyframe are, for 'Solve' (%): animate it, its value at "
+                                    "each keyframe being taken (e.g. 100 at the keyframes you are sure of, 50 at a doubtful "
+                                    "one). 0: the keyframe does not constrain the solve."),
+        desc.FloatParam(name="solveSmoothness", label="Solve Smoothness", value=1.0, range=(0.0, 20.0, 0.1),
+                        description="How smooth the motion of the head found by 'Solve' is (its accelerations against "
+                                    "the landmarks, in pixels). 0: none."),
+        desc.StringParam(name="solvedPoses", label="Solved Poses", value="", visible=False, advanced=True,
+                         description="The head poses found by 'Solve' (JSON: camera-to-face matrix per frame)."),
+        desc.StringParam(name="solveReport", label="Solve Report", value="", invalidate=False,
+                         description="What the last 'Solve' did: the error of the landmarks, and how far the rigid pins of "
+                                     "each keyframe are from the face (in pixels) before and after it."),
         desc.PushButtonParam(name="trackFace", label="Track Face", semantic="liveAction",
                              description="Find the face at every frame of the plate (MediaPipe Face Landmarker)."),
         desc.PushButtonParam(name="clearFace", label="Clear", semantic="liveAction",
@@ -557,7 +580,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         landmarks = face.landmarksAt(faces, frame, ctx.value("smoothing"))
         pixels = face.toPixels(landmarks, info.width, info.height)
         tracked = faces.get(frame) or faces[min(faces, key=lambda f: (abs(f - frame), f))]
-        solvePins = self.solvePinsAt(self.pins(ctx, info), frame)
+        pins = self.pins(ctx, info)
+        pose = (faces.get(frame) or {}).get("pose")
+        solved = self.solvedPose(ctx, frame)
+        if solved is not None:
+            # The solve layer: the pose solved, the rigid pins are in it (the expression pins still deform the face)
+            pose = solved
+            pins = [pin for pin in pins if self.isExpressionPin(pin)]
+        solvePins = self.solvePinsAt(pins, frame)
         neutral = self.baseMesh(ctx, frame)
         if solvePins is not None and rest is not neutral:
             # The pins are points of the base face mesh: the same places on the rest shape
@@ -571,7 +601,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                                          hidden=tracked.get("hidden") or (), pins=solvePins,
                                          pinRadius=ctx.value("pinRadius"), stiffness=ctx.value("stiffness"),
                                          model=ctx.value("deformModel"), exactPins=ctx.value("exactPins"),
-                                         pose=(faces.get(frame) or {}).get("pose"), prior=prior, priorWeight=priorWeight,
+                                         pose=pose, prior=prior, priorWeight=priorWeight,
                                          report=report)
         inverse = np.linalg.inv(head)
         local = geo.vertices @ inverse[:3, :3].T + inverse[:3, 3]
@@ -610,6 +640,24 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return None, 0.0
         # 1: as much as the landmarks (the prior is one row per shape, the landmarks 468 points)
         return (prior, weight * EXPRESSION_PRIOR_SCALE) if prior is not None else (None, 0.0)
+
+    @staticmethod
+    def solvedPoses(ctx) -> dict:
+        """ {frame: camera-to-face matrix} of "Solve" (empty without it, or with "Solve Layer" off). """
+        import json
+        text = ctx.value("solvedPoses") if ctx.value("useSolve") else ""
+        if not text:
+            return {}
+        try:
+            return {int(f): np.array(m, dtype=np.float64).reshape(4, 4) for f, m in json.loads(text).items()}
+        except (ValueError, TypeError, AttributeError) as e:
+            raise RuntimeError(f"Invalid solved poses: {e}") from e
+
+    def solvedPose(self, ctx, frame):
+        """ The camera-to-face matrix of "Solve" at a frame (the solve layer), or None. """
+        if int(frame) != frame:
+            return None
+        return self.solvedPoses(ctx).get(int(frame))
 
     def rawSolve(self, ctx, frame):
         """
@@ -680,6 +728,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         sigma = float(ctx.value("temporalSmoothing"))
         info = ctx.inputInfo("input")
         keyed = len(self.pinsAt(self.pins(ctx, info), frame)[0]) > 0 or frame == self.reference(ctx)
+        # The solve layer: its pose is already smooth (only the expression is smoothed)
+        solvedHead = self.solvedPose(ctx, frame) is not None
         local, head = raw
         if sigma > 0 and not keyed:
             faces = self.faces(ctx)
@@ -693,6 +743,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 weights /= weights.sum()
                 local = np.einsum("k,knd->nd", weights, np.stack([value[0] for _, value in samples]))
                 heads = np.stack([value[1] for _, value in samples])
+            if len(samples) > 1 and not solvedHead:
                 head = np.eye(4)
                 # The rotations averaged (quaternions), the translations too; the scale of the head kept
                 scales = np.linalg.norm(heads[:, :3, :3], axis=1)
@@ -788,6 +839,8 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
             return {"faceShape": ""}
         if name == "fitShape":
             return self.fitShape(context)
+        if name == "solveFace":
+            return self.solveSequence(context)
         if name not in self._TRACK_ACTIONS:
             raise RuntimeError(f"Unknown action: {name}")
         if context.info is None:
@@ -942,6 +995,63 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         offsets = face.fitShape(base, observations, width, height, cancel=context.checkCancelled,
                                 progress=lambda done: context.progress(done, "Fit Shape"))
         return {"faceShape": face.dumpShape(offsets)}
+
+    def solveSequence(self, context):
+        """
+        "Solve": the head poses of the tracked frames of the track range solved together (faceSolve.solvePoses), from
+        the poses shown (tracked, or of the previous solve), the rigid pins of each keyframe weighted by its "Key
+        Confidence". Returns the poses ("Solved Poses", "Solve Layer" turned on) and the report.
+        """
+        import json
+        import logging
+        from meshroom.live import face, faceSolve
+        if context.info is None:
+            raise RuntimeError("Connect the plate to the input.")
+        width, height = context.info.width, context.info.height
+        ctx = context.nodeContext()
+        faces = self.faces(ctx)
+        frames = [f for f in context.frames if f in faces]
+        if len(frames) < 2:
+            raise RuntimeError("Solve needs the face tracked on the track range (Track Face first).")
+        rest, neutral = self.mesh(ctx), self.baseMesh(ctx)
+        rigidIndices = [i for i in face.RIGID_LANDMARKS if i < len(rest.vertices)]
+        rigidPoints = rest.vertices[rigidIndices]
+        pins = [pin for pin in self.pins(ctx, context.info) if not self.isExpressionPin(pin)]
+        smoothing = ctx.value("smoothing")
+        cameras, landmarks, hidden, heads, keys = {}, {}, {}, {}, {}
+        for done, f in enumerate(frames):
+            context.checkCancelled()
+            frameCtx = context.nodeContext(f)
+            geo, head = self.solve(frameCtx, f)
+            if geo.isEmpty:
+                continue
+            heads[f] = head
+            cameras[f] = self.camera(frameCtx, f)
+            landmarks[f] = face.toPixels(face.landmarksAt(faces, f, smoothing), width, height)
+            hidden[f] = set(int(i) for i in ((faces.get(f) or {}).get("hidden") or ()))
+            points, positions = self.pinsAt(pins, f)
+            if len(points):
+                if rest is not neutral:
+                    points = face._onSurface(rest.vertices, rest.triangles(), face.pinLocations(neutral, points))
+                confidence = float(np.clip(frameCtx.value("keyConfidence"), 0.0, 100.0)) / 100.0
+                keys[f] = (points, positions, confidence)
+            context.progress(0.5 * (done + 1) / len(frames), "Solve: the poses tracked")
+        try:
+            result = faceSolve.solvePoses(sorted(heads), cameras, landmarks, hidden, heads, rigidPoints, rigidIndices,
+                                          width, height, keys=keys, smoothness=float(ctx.value("solveSmoothness")),
+                                          cancel=context.checkCancelled,
+                                          progress=lambda done: context.progress(0.5 + 0.5 * done, "Solve"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        poses = {str(f): (np.linalg.inv(head) @ cameras[f].matrix).ravel().round(9).tolist()
+                 for f, head in result["heads"].items()}
+        before, after = result["error"]
+        lines = [f"Frames {min(poses, key=int)}-{max(poses, key=int)}: landmarks {before:.2f} -> {after:.2f} px"]
+        for f, (pinsBefore, pinsAfter) in sorted(result["keys"].items()):
+            lines.append(f"key {f} ({100.0 * keys[f][2]:.0f}%): pins {pinsBefore:.1f} -> {pinsAfter:.1f} px")
+        report = "; ".join(lines)
+        logging.info(f"[FaceTracker] Solve: {report}")
+        return {"solvedPoses": json.dumps(poses), "useSolve": True, "solveReport": report}
 
     @staticmethod
     def _sequence(name, frame, frames, keyframes=()):

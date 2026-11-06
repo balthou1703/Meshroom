@@ -655,6 +655,18 @@ glisser y ajoute une clé), sans rien contraindre (teinte « Show Pin Reach » c
 visage qui est tracké, de la keyframe courante jusqu'à la suivante (exclue) ou le bout de la plage. « Refine »
 retracke entre chaque paire de keyframes depuis les deux bouts et mélange les deux suivis, pondérés vers la keyframe
 la plus proche.
+« Solve » (`faceSolve.solvePoses`, une couche par-dessus le suivi, qui est gardé) : les poses de la tête de toutes les
+frames suivies de la plage résolues ensemble, à partir des poses montrées (6 degrés de liberté par frame, Gauss-Newton,
+jacobien numérique creux : un paramètre d'une frame sur trois bougé à la fois). Ce qui les lie : les déplacements des
+landmarks rigides d'une frame à la suivante (relatifs : ils ne dérivent pas, poids 1), leurs places (0,5), Huber 3 px ;
+les accélérations de la tête (« Solve Smoothness », en pixels) ; les pins rigides des keyframes, chacune pondérée par
+« Key Confidence » à cette frame (à animer : 100 % aux keyframes sûres, 50 % à une douteuse ; poids c / (1 − c) : 1 à
+50 %, ~100 à 100 %, une keyframe sûre est tenue, une douteuse bouge pour s'accorder au mouvement). Le solve écrit
+« Solved Poses » (caméra-vers-visage par frame), active « Solve Layer » et décrit dans « Solve Report » l'erreur des
+landmarks et celle des pins de chaque keyframe avant / après. « Solve Layer » activé : ces poses sont gardées
+(`solveFace(pose=…)`) à toutes les frames, keyframes comprises (leurs pins rigides ne sont plus qu'une contrainte du
+solve ; les pins d'expression déforment toujours le visage), seule l'expression est lissée dans le temps ; désactivé :
+le suivi tel qu'il était.
 « Stiffness » (non rigide, `face.regularizedShifts`) : le visage n'est pas amené sommet par sommet sur ses points
 mais comme une surface lisse passant par eux (moindres carrés pondérés + laplacien des déplacements sur le maillage,
 repondérés de façon robuste) : un point faux (dérive, détection ratée) est ignoré, les points masqués suivent leurs
