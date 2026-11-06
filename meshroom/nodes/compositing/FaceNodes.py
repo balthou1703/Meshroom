@@ -203,8 +203,14 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                        description="The teeth drawn (white) with the face: the upper arch on the skull, the lower one "
                                    "moved by the jaw."),
         desc.BoolParam(name="showSurfaceTracks", label="Show Surface Tracks", value=True, invalidate=False,
-                       description="Some of the points followed on the head by 'Follow Head Surface' at the frame (one in "
-                                   "ten): green where they fit the head pose, red where they were rejected."),
+                       description="The points followed on the head by 'Follow Head Surface' at the frame (as many as "
+                                   "'Surface Tracks Kept'): green where they fit the head pose, red where they were "
+                                   "rejected."),
+        desc.IntParam(name="surfaceTracksKept", label="Surface Tracks Kept", value=10, range=(1, 100, 1),
+                      invalidate=False,
+                      description="The share (%) of the points followed on the head that tracking keeps at each frame, to "
+                                  "show them ('Show Surface Tracks'): taken by the next 'Track Face' (more: a heavier "
+                                  "project)."),
         desc.StringParam(name="faceTrack", label="Face Track", value="", semantic="faceTrack", visible=False,
                          advanced=True, description="The landmarks of each frame (JSON, written by 'Track Face')."),
         desc.StringParam(name="tracks", label="Landmark Tracks", value="[]", semantic="autoTracks",
@@ -851,9 +857,13 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
                 return None
             from meshroom.live import gpu
             ctx = context.nodeContext(f)
-            return face.HeadPoseTracker(self.mesh(ctx, f), self.camera(ctx, f), width, height,
-                                        method="raft" if flowMethod == "raft" else "flow",
-                                        device=gpu.device(useGpu))
+            tracker = face.HeadPoseTracker(self.mesh(ctx, f), self.camera(ctx, f), width, height,
+                                           method="raft" if flowMethod == "raft" else "flow",
+                                           device=gpu.device(useGpu))
+            # (the share of its points kept to be shown)
+            tracker.SURFACE_POINTS_STEP = max(1, int(round(100.0 / max(1, int(context.values.get("surfaceTracksKept",
+                                                                                                10))))))
+            return tracker
 
         def propagate(start, sequence, callback):
             tracker = poseTracker(sequence[0])
