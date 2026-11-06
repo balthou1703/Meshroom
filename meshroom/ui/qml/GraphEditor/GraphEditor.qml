@@ -1937,6 +1937,12 @@ Item {
                     selectionMode = ItemSelectionModel.Deselect
                 }
                 uigraph.selectNodesByIndices(selectedIndices, selectionMode)
+                // The parameters of a node selected by the box are shown (as by a click): the current node when it
+                // stays selected, else the first node of the selection
+                if (selectionMode !== ItemSelectionModel.Deselect && selectedIndices.length > 0 &&
+                    !(uigraph.selectedNode && uigraph.isSelected(uigraph.selectedNode))) {
+                    uigraph.selectedNode = uigraph.graph.nodes.at(selectedIndices[0])
+                }
             }
         }
 
