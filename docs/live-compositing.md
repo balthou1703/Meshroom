@@ -649,8 +649,9 @@ paramètre de 1 contre 0,01 d'erreur de couleur² par sommet ; la tête gardée)
 est derrière change) et les iris ne sont pas comparés ; pas aux keyframes à pins. Sur un visage synthétique texturé :
 1,07 mm → 0,43 mm.
 Comme dans KeenTools FaceTracker, les pins du FaceTracker appartiennent à leurs keyframes : une frame où des pins
-ont une clé est une keyframe (le visage y est calé avec ses pins) ; ailleurs ils sont cachés et ne contraignent rien
-(teinte « Show Pin Reach » comprise), et ils ne sont pas trackés (pas de boutons de tracking de pins) : c'est le
+ont une clé est une keyframe (le visage y est calé avec ses pins) ; un pin est un point de la surface : ailleurs il
+est montré (pâle) là où le visage résolu met ce point (un repère de l'image peut y être comparé à chaque frame ; le
+glisser y ajoute une clé), sans rien contraindre (teinte « Show Pin Reach » comprise), et ils ne sont pas trackés (pas de boutons de tracking de pins) : c'est le
 visage qui est tracké, de la keyframe courante jusqu'à la suivante (exclue) ou le bout de la plage. « Refine »
 retracke entre chaque paire de keyframes depuis les deux bouts et mélange les deux suivis, pondérés vers la keyframe
 la plus proche.

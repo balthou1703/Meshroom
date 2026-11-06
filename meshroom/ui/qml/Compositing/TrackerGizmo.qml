@@ -142,8 +142,9 @@ Item {
         return Object.keys(track.keys || {}).map(function(f) { return [Number(f), track.keys[f]] })
                                            .sort(function(a, b) { return a[0] - b[0] })
     }
-    // Pins (as in GeoTracker): a pin constrains only the frames where it has a key; at the other frames it is shown
-    // where the solved geometry puts its point (dragging it there adds a key)
+    // Pins (as in GeoTracker and KeenTools FaceTracker): a pin is a point of the surface; it constrains only the frames
+    // where it has a key; at the other frames it is shown where the solved geometry puts its point (dragging it there
+    // adds a key)
     readonly property var pinProjections: {
         if (!pinMode || !live)
             return ({})
@@ -162,11 +163,13 @@ Item {
 
     function position(track, frame) {
         if (pinMode && frame === root.frame && !hasKey(track, frame)) {
-            // FaceTracker (as in KeenTools FaceTracker): the pins belong to their keyframes, hidden elsewhere
-            if (faceMode)
-                return null
+            // A pin is a point of the surface: at a frame where it has no key it is shown (faint) where the solved
+            // face puts that point (FaceTracker too: a landmark of the image can be checked against it at every
+            // frame); dragging it there adds a key
             if (pinProjections[track.name])
                 return pinProjections[track.name]
+            if (faceMode)
+                return null
         }
         var keys = sortedKeys(track)
         if (keys.length === 0)
