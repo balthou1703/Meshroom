@@ -960,13 +960,18 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         """ "Refine": between each pair of keyframes in the track range, the face followed from both ends and the two
         blended, weighted toward the nearest keyframe (its drift is the smallest), as Refine in FaceTracker. """
         inRange = set(context.frames)
-        spans = [(a, b) for a, b in zip(keyframes, keyframes[1:]) if b - a > 1 and a in inRange and b in inRange]
+        # Each pair of successive keyframes with frames of the track range between them (the keyframes themselves may
+        # be just outside it: a range starting after a keyframe still refines from it)
+        spans = [(a, b) for a, b in zip(keyframes, keyframes[1:]) if any(f in inRange for f in range(a + 1, b))]
         if not spans:
-            raise RuntimeError("Refine needs two keyframes (frames with pins) with frames between them.")
+            raise RuntimeError(f"Refine needs two keyframes (frames with pins) with frames of the track range between "
+                               f"them (keyframes: {keyframes or 'none'}; range {min(inRange)}-{max(inRange)}).")
         for a, b in spans:
             forward = propagate(startAt(a), list(range(a, b)), None)
             backward = propagate(startAt(b), list(range(b, a, -1)), None)
             for f in range(a + 1, b):
+                if f not in inRange:
+                    continue
                 one, other = forward.get(f), backward.get(f)
                 if one is None and other is None:
                     continue

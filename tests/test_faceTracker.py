@@ -427,6 +427,19 @@ def test_refineBlendsBothDirections():
     with pytest.raises(RuntimeError):
         FaceTracker()._refine(Context(), {}, [0, 1], lambda f: starts[0], propagate, lambda f, found: None)
 
+    class Ranged:
+        # The track range starting after the first keyframe (as "Track First" one frame after it)
+        frames = list(range(1, 5))
+    result.clear()
+    FaceTracker()._refine(Ranged(), {}, [0, 4], lambda f: starts[f], propagate, lambda f, found: result.__setitem__(f, found))
+    assert sorted(result) == [1, 2, 3]
+
+    class Inside:
+        frames = list(range(2, 4))
+    result.clear()
+    FaceTracker()._refine(Inside(), {}, [0, 4], lambda f: starts[f], propagate, lambda f, found: result.__setitem__(f, found))
+    assert sorted(result) == [2, 3]
+
 
 def test_stiffFaceIgnoresWrongLandmarks():
     frame = 3
