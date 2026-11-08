@@ -595,7 +595,30 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   Transform → translate / rotate / scale / skew, CornerPin → coins « To ») ; une seule étape d'annulation
   (`meshroom/live/bake.py`).
 
-Limites : pas de distorsion d'objectif dans le GeoTracker, focale non estimée, géométrie supposée fixe pendant que
+- **Contraintes du solve** (GeoTracker) : « Lock » (none / position : la caméra ne fait que tourner, trépied ou pano
+  nodal, sa position venant de la première frame résolue / rotation : elle ne fait que se déplacer) et « Lock Roll »
+  (pas de rotation autour de l'axe de visée) s'appliquent d'une frame à l'autre aux pins, au tracking des pins, à
+  Track Geometry, Align et Refine (`scene3d.solvePose(locks=...)`, `geotrack.TrackSettings.locks`). « Focal Length » :
+  camera (celle de l'entrée Camera) ou custom (« Focal », en mm sur le film back de la caméra) ; « Estimate Focal »
+  cherche la focale qui ajuste le mieux les pins de toutes les keyframes (une pose par keyframe, une focale pour le
+  plan, recherche bornée entre un cinquième et cinq fois la focale courante ; au moins 4 pins sur une frame, 6 en
+  tout ; mieux depuis plusieurs angles) et l'écrit dans « Focal ».
+- **Solve** (GeoTracker, `geotrack.solveSequence`, une couche par-dessus le suivi, qui est gardé) : les poses de la
+  plage résolues ensemble à partir des poses suivies (celles de Geometry Track telles qu'elles étaient, sans
+  l'ajustement des pins aux keyframes) : chaque pose corrigée par un mouvement dans sa caméra, la correction changeant
+  peu d'une frame à la suivante (« Solve Stiffness » : 10, une dérive d'environ un dixième de pixel par frame ; une
+  keyframe loin des autres s'explique donc plus facilement par une dérive), un peu tirée vers zéro (les poses suivies
+  sont aussi une mesure), et les pins de chaque frame reprojetés : ceux posés à la main pondérés par « Key
+  Confidence » à leur keyframe (à animer ; poids c / (1 − c) : 100 % tenue, 50 % aussi forte que les pins suivis d'une
+  frame, 0 % ignorée), les pins suivis robustes (Huber 3 px). Les pins d'une frame pèsent ensemble comme un seul.
+  Jacobien numérique creux (un paramètre d'une frame sur deux bougé à la fois), Gauss-Newton. Le solve écrit « Solved
+  Poses », active « Solve Layer » et décrit dans « Solve Report » l'erreur des pins de chaque keyframe avant / après ;
+  « Solve Layer » désactivé : le suivi tel qu'il était. Les verrous s'appliquent aussi aux corrections.
+- **Lissage** (GeoTracker) : « Smooth Translation » / « Smooth Rotation » lissent la position / l'orientation de la
+  caméra dans le temps (gaussiennes de cette largeur en frames, moyenne des rotations), sauf aux keyframes ; appliqués
+  après le Solve Layer.
+
+Limites : pas de distorsion d'objectif dans le GeoTracker, géométrie supposée fixe pendant que
 l'on pose les pins (les points des pins sont en coordonnées monde) et rigide pendant son suivi (la géométrie de la
 frame courante) ; suivi en numpy sur CPU (environ 0,1 à 0,3 s par frame à 1K, davantage en 4K avec le flot optique ;
 voir 4.14 pour le GPU) ; lecture Alembic / FBX non testée ici (modules absents).

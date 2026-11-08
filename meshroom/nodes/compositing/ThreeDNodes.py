@@ -342,6 +342,38 @@ into keys of a Camera or a ReadGeo.
         desc.PushButtonParam(name="refineGeo", label="Refine", semantic="liveAction",
                              description="Track the geometry again between each pair of keyframes, from both ends, and "
                                          "blend the two tracks."),
+        desc.PushButtonParam(name="solveGeo", label="Solve", semantic="liveAction",
+                             description="The poses of the track range solved together (after the tracking): each pose "
+                                         "corrected so that the pins of every frame fit, the corrections kept close from "
+                                         "frame to frame (the motion tracked kept), the pins placed by hand weighted by "
+                                         "the 'Key Confidence' of their keyframe (a keyframe less sure than the others "
+                                         "moves to agree with them), the tracked ones robust (a slipped pin let go). "
+                                         "Shown with 'Solve Layer' (turned on by the solve)."),
+        desc.BoolParam(name="useSolve", label="Solve Layer", value=False,
+                       description="The poses of 'Solve' used (a layer over the tracking, kept as it is: off, the poses "
+                                   "tracked again)."),
+        desc.FloatParam(name="keyConfidence", label="Key Confidence", value=100.0, range=(0.0, 100.0, 1.0),
+                        description="How sure the pins placed at a keyframe are, for 'Solve' (%): animate it, its value "
+                                    "at each keyframe being taken (100: held, 50: as strong as the tracked pins of a frame, "
+                                    "0: not a constraint)."),
+        desc.FloatParam(name="solveStiffness", label="Solve Stiffness", value=10.0, range=(0.01, 100.0, 0.1),
+                        description="How much 'Solve' trusts the motion tracked: a change of the correction of "
+                                    "1/stiffness pixel from a frame to the next costs as much as 1 pixel of error of the "
+                                    "pins of a frame (10: the tracking drifting by about a tenth of a pixel per frame; a "
+                                    "keyframe far from the others is more easily explained by a drift). "
+                                    "High: a keyframe that disagrees with the motion moves (or its correction spreads "
+                                    "over many frames); low: each frame closer to its own pins."),
+        desc.StringParam(name="solvedPoses", label="Solved Poses", value="", visible=False, advanced=True,
+                         description="The poses found by 'Solve' (JSON, as 'Geometry Track')."),
+        desc.StringParam(name="solveReport", label="Solve Report", value="", invalidate=False,
+                         description="What the last 'Solve' did: how far the pins of each keyframe are from the "
+                                     "geometry (pixels) before and after it."),
+        desc.FloatParam(name="smoothTranslation", label="Smooth Translation", value=0.0, range=(0.0, 20.0, 0.1),
+                        description="The positions of the camera smoothed over time (a Gaussian of this width in "
+                                    "frames; 0: none), except at the keyframes."),
+        desc.FloatParam(name="smoothRotation", label="Smooth Rotation", value=0.0, range=(0.0, 20.0, 0.1),
+                        description="The orientations of the camera smoothed over time (a Gaussian of this width in "
+                                    "frames; 0: none), except at the keyframes."),
         desc.PushButtonParam(name="clearGeoTrack", label="Clear Geometry Track", semantic="liveAction",
                              description="Remove the poses tracked with 'Track Geometry' (the pins solve again)."),
         desc.StringParam(name="geoTrack", label="Geometry Track", value="", semantic="geoTrack", advanced=True,
@@ -487,7 +519,15 @@ into keys of a Camera or a ReadGeo.
             return self.inputCamera(ctx).matrix @ np.linalg.inv(solved.matrix)
         if outputName == "geoOutput":
             return self.deformedGeo(ctx)
-        if outputName != "cameraOutput":
+        if outputName == "cameraOutput":
+            return self._smoothedCamera(ctx)
+        if outputName == "_layerCamera":
+            # The solve layer over the tracking
+            solved = self.solvedPoses(ctx)
+            if ctx.frame in solved:
+                return self.startCamera(ctx, ctx.frame).copy(matrix=solved[ctx.frame])
+            return ctx.ownData("_trackedCamera", ctx.frame)
+        if outputName != "_trackedCamera":
             return super().computeData(ctx, outputName)
         info = ctx.inputInfo("input")
         if info is None:
@@ -511,10 +551,10 @@ into keys of a Camera or a ReadGeo.
             after = [f for f in anchors if f > frame]
             if before and after:
                 a, b = before[-1], after[0]
-                matrix = scene3d.interpolateMatrices(ctx.ownData("cameraOutput", a).matrix,
-                                                     ctx.ownData("cameraOutput", b).matrix, (frame - a) / float(b - a))
+                matrix = scene3d.interpolateMatrices(ctx.ownData("_trackedCamera", a).matrix,
+                                                     ctx.ownData("_trackedCamera", b).matrix, (frame - a) / float(b - a))
             else:
-                matrix = ctx.ownData("cameraOutput", before[-1] if before else after[0]).matrix
+                matrix = ctx.ownData("_trackedCamera", before[-1] if before else after[0]).matrix
             return self.startCamera(ctx, frame, info).copy(matrix=matrix)
         # Solved from frame with pins to frame with pins, from the nearest tracked pose (or the first frame with pins),
         # each solve starting from the previous pose: the poses on the way are cached
@@ -526,9 +566,9 @@ into keys of a Camera or a ReadGeo.
         initial, solved = None, None
         for current in path:
             if current in poses and current != frame:
-                initial = ctx.ownData("cameraOutput", current).matrix
+                initial = ctx.ownData("_trackedCamera", current).matrix
                 continue
-            cached = evaluator.cachedData(uid, "cameraOutput", current) if current != frame else None
+            cached = evaluator.cachedData(uid, "_trackedCamera", current) if current != frame else None
             if cached is not None:
                 initial = cached.matrix
                 continue
@@ -536,8 +576,100 @@ into keys of a Camera or a ReadGeo.
             solved, _ = self._solve(ctx, current, initial, pins, info)
             initial = solved.matrix
             if current != frame:
-                evaluator.storeData(uid, "cameraOutput", current, solved)
+                evaluator.storeData(uid, "_trackedCamera", current, solved)
         return solved
+
+    def solvedPoses(self, ctx) -> dict:
+        """ {frame: camera-to-world} of "Solve" (empty without it or with "Solve Layer" off). """
+        from meshroom.live import geotrack
+        if not ctx.value("useSolve"):
+            return {}
+        try:
+            return geotrack.parsePoses(ctx.value("solvedPoses"))[0]
+        except ValueError as e:
+            raise RuntimeError(f"Invalid solved poses: {e}") from e
+
+    def _smoothedCamera(self, ctx):
+        """ The camera at the frame (the solve layer or the tracking), its position and orientation smoothed over time
+        ("Smooth Translation" / "Smooth Rotation": Gaussians, the keyframes kept). """
+        camera = ctx.ownData("_layerCamera", ctx.frame)
+        sigmas = (float(ctx.value("smoothTranslation")), float(ctx.value("smoothRotation")))
+        if max(sigmas) <= 0.0 or int(ctx.frame) != ctx.frame:
+            return camera
+        info = ctx.inputInfo("input")
+        pins = self.pins(ctx, info) if info is not None else []
+        frame = int(ctx.frame)
+        if frame in set(self.pinKeyframes(pins)) | set(self.geoTrack(ctx)[1]):
+            return camera
+        reach = int(np.ceil(3.0 * max(sigmas)))
+        first, last = frame - reach, frame + reach
+        if info is not None and info.hasFrameRange:
+            first, last = max(first, info.firstFrame), min(last, info.lastFrame)
+        frames = np.arange(first, last + 1)
+        matrices = [ctx.ownData("_layerCamera", int(f)).matrix for f in frames]
+        from scipy.spatial.transform import Rotation
+        matrix = camera.matrix.copy()
+        if sigmas[0] > 0.0:
+            weights = np.exp(-0.5 * ((frames - frame) / sigmas[0]) ** 2)
+            matrix[:3, 3] = np.average([m[:3, 3] for m in matrices], axis=0, weights=weights)
+        if sigmas[1] > 0.0:
+            weights = np.exp(-0.5 * ((frames - frame) / sigmas[1]) ** 2)
+            matrix[:3, :3] = Rotation.from_matrix([m[:3, :3] for m in matrices]).mean(weights=weights).as_matrix()
+        return camera.copy(matrix=matrix)
+
+    def solveSequence(self, context):
+        """
+        "Solve": the poses of the track range solved together (geotrack.solveSequence) from the poses tracked (the
+        layer off), the pins of every frame: those placed by hand weighted by the "Key Confidence" of their keyframe,
+        the tracked ones robust. Returns the poses ("Solved Poses", "Solve Layer" on) and the report.
+        """
+        from meshroom.live import geotrack
+        ctx = context.nodeContext()
+        info = ctx.inputInfo("input")
+        if info is None:
+            raise RuntimeError("Connect the plate to the input.")
+        pins = self.pins(ctx, info)
+        frames = list(context.frames)
+        if len(frames) < 2:
+            raise RuntimeError("Solve needs a range of frames (the track range).")
+        keyframes = set(self.pinKeyframes(pins))
+        # The motion of the tracking: the poses tracked as they were (not adjusted by the pins at the keyframes)
+        tracked, _ = self.geoTrack(ctx)
+        starts, keys = {}, {}
+        for done, f in enumerate(frames):
+            context.checkCancelled()
+            starts[f] = tracked[f] if f in tracked else ctx.ownData("_trackedCamera", f).matrix
+            points, positions = self._pinsAt(pins, f)
+            if len(points):
+                if f in keyframes:
+                    confidence = float(np.clip(context.nodeContext(f).value("keyConfidence"), 0.0, 100.0)) / 100.0
+                    weight = confidence / (1.0 - confidence + 0.001)
+                    keys[f] = (points, positions, np.full(len(points), np.sqrt(weight)), False)
+                else:
+                    keys[f] = (points, positions, np.ones(len(points)), True)
+            context.progress(0.3 * (done + 1) / len(frames), "Solve: the poses tracked")
+        if not keys:
+            raise RuntimeError("Solve needs pins (placed or tracked) on the track range.")
+        camera = self.startCamera(ctx, info=info)
+        geo = ctx.inputData("geo")
+        center = geo.vertices.mean(0) if geo is not None and not geo.isEmpty else np.zeros(3)
+        depth = float(np.median([np.linalg.norm(m[:3, 3] - center) for m in starts.values()]))
+        try:
+            result = geotrack.solveSequence(frames, starts, keys, info.width, info.height,
+                                            camera.focalPixels(info.width), depth,
+                                            stiffness=float(ctx.value("solveStiffness")), locks=self.locks(ctx),
+                                            cancel=context.checkCancelled,
+                                            progress=lambda done: context.progress(0.3 + 0.7 * done, "Solve"))
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        lines = [f"Frames {frames[0]}-{frames[-1]}"]
+        for f in sorted(keyframes & set(result["errors"])):
+            before, after = result["errors"][f]
+            lines.append(f"key {f}: pins {before:.1f} -> {after:.1f} px")
+        tracked = [result["errors"][f] for f in result["errors"] if f not in keyframes]
+        if tracked:
+            lines.append(f"tracked pins {np.mean([e[0] for e in tracked]):.1f} -> {np.mean([e[1] for e in tracked]):.1f} px")
+        return {"solvedPoses": geotrack.dumpPoses(result["poses"], []), "useSolve": True, "solveReport": "; ".join(lines)}
 
     # Tracking
 
@@ -561,6 +693,8 @@ into keys of a Camera or a ReadGeo.
             return {"geoDeform": ""}
         if name == "estimateFocal":
             return self.estimateFocal(context)
+        if name == "solveGeo":
+            return self.solveSequence(context)
         if name not in ("trackGeoForward", "trackGeoBackward", "alignGeo", "refineGeo", "deformForward", "deformBackward"):
             raise RuntimeError(f"Unknown action: {name}")
         return _GeoTrackAction(self, context).run(name)

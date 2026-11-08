@@ -686,3 +686,68 @@ def test_geoTrackerLockedPositionOnlyTurns(tmp_path):
     tracker.lockPose.value = "none"
     graph.update()
     assert np.linalg.norm(cameraOutput(tracker, 10).matrix[:3, 3] - first[:3, 3]) > 0.1
+
+
+def _solveGraph(tmp_path, confidence):
+    """ The cube tracked from its keyframe 0, a second keyframe at 20 whose pins are all 6 pixels off, of
+    `confidence` (animated: 100 at 0). Returns (graph, plate, tracker). """
+    graph, plate, tracker = resectionGraph(tmp_path)
+    tracker.geoTrack.value = runAction(tracker, plate, "trackGeoForward", 0)["geoTrack"]
+    pins = json.loads(tracker.tracks.value)
+    xy, _, _ = cameraAt(20).project(_CUBE, W, H)
+    for pin, position in zip(pins, xy):
+        pin["keys"]["20"] = (position + [6.0, 0.0]).tolist()
+        pin["keyframes"].append(20)
+    tracker.tracks.value = json.dumps(pins)
+    # Key Confidence animated: 100 at the keyframe 0, `confidence` at 20 (held from 19)
+    from meshroom.live import animation as anim
+    tracker.internalAttribute("animation").value = anim.dumpAnimation(
+        {"keyConfidence": [[0, 100.0], [19, 100.0], [20, confidence]]})
+    graph.update()
+    return graph, plate, tracker
+
+
+@pytest.mark.parametrize("confidence, held", [(30.0, False), (100.0, True)])
+def test_geoTrackerSolveWeighsTheKeyframes(tmp_path, monkeypatch, confidence, held):
+    """ "Solve": a doubtful keyframe (30 %) whose pins are off is brought back to the motion tracked; a sure one (100 %)
+    keeps its pins, the correction spread over the frames before it. The layer switched off: the tracking again. """
+    graph, plate, tracker = _solveGraph(tmp_path, confidence)
+    tracked = cameraOutput(tracker, 20).matrix
+    assert pixelError(tracked, 20) > 4.0
+    monkeypatch.setattr(ActionContext, "frames", property(lambda self: list(range(21))))
+    result = runAction(tracker, plate, "solveGeo", 0)
+    assert result["useSolve"] and "key 20" in result["solveReport"]
+    tracker.solvedPoses.value = result["solvedPoses"]
+    tracker.useSolve.value = True
+    graph.update()
+    solved = cameraOutput(tracker, 20).matrix
+    if held:
+        assert pixelError(solved, 20) > 4.0
+    else:
+        assert pixelError(solved, 20) < 0.6 * pixelError(tracked, 20)
+    # The sure keyframe 0 stays in place
+    assert pixelError(cameraOutput(tracker, 0).matrix, 0) < 0.5
+    tracker.useSolve.value = False
+    graph.update()
+    np.testing.assert_allclose(cameraOutput(tracker, 20).matrix, tracked, atol=1e-9)
+
+
+def test_geoTrackerSmoothsTheCamera(tmp_path):
+    """ "Smooth Translation" / "Smooth Rotation": a jittered track smoothed, the keyframe kept. """
+    graph, plate, tracker = resectionGraph(tmp_path)
+    rng = np.random.default_rng(1)
+    poses = {}
+    for f in range(21):
+        matrix = cameraAt(f).matrix.copy()
+        if f:
+            matrix[:3, 3] += rng.normal(scale=0.03, size=3)
+        poses[f] = matrix
+    tracker.geoTrack.value = geotrack.dumpPoses(poses, [0])
+    graph.update()
+    jittered = np.mean([pixelError(cameraOutput(tracker, f).matrix, f) for f in range(3, 18)])
+    tracker.smoothTranslation.value = 2.0
+    tracker.smoothRotation.value = 2.0
+    graph.update()
+    smoothed = np.mean([pixelError(cameraOutput(tracker, f).matrix, f) for f in range(3, 18)])
+    assert smoothed < 0.7 * jittered
+    np.testing.assert_allclose(cameraOutput(tracker, 0).matrix, poses[0], atol=1e-6)

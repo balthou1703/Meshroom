@@ -716,6 +716,132 @@ def blendPoses(forward: Dict[int, np.ndarray], backward: Dict[int, np.ndarray], 
     return result
 
 
+# Solve of a sequence (the "Solve" of the GeoTracker)
+
+def _cameraMove(theta: np.ndarray) -> np.ndarray:
+    """ The 4x4 move in the camera (rotation vector theta[:3] around its center, then translation theta[3:]). """
+    from .camera import rodrigues
+    move = np.eye(4)
+    move[:3, :3] = rodrigues(theta[:3])
+    move[:3, 3] = theta[3:6]
+    return move
+
+
+def solveSequence(frames, starts: Dict[int, np.ndarray], pins: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, bool]],
+                  width: int, height: int, focalPixels: float, depth: float, stiffness: float = 1.0,
+                  trust: float = 0.05, huber: float = 3.0, locks=(), iterations: int = 8, cancel=None, progress=None) -> dict:
+    """
+    The camera poses of `frames` (consecutive) solved together, from the poses tracked (`starts`, camera-to-world):
+    each pose corrected by a move in its camera, the corrections kept close from frame to frame (the motion tracked is
+    kept, `stiffness`: one pixel of change of the correction from a frame to the next against one pixel of error of a
+    pin), the corrections themselves small (`trust`: the poses tracked are evidence too, per frame), the pins of each
+    frame reprojected.
+
+    Args:
+        pins: {frame: (points (k, 3), positions (k, 2) Nuke pixels, weights (k,), robust)}: hand-placed pins
+            (keyframes, weighted by their confidence, not robust) or tracked ones (robust: a slipped pin let go, Huber of
+            `huber` pixels). The pins of a frame weigh together as one pin (their weights squared: 1 for a frame as
+            strong as its motion from its neighbors).
+        depth: the distance of the geometry to the camera (the scale of the translations in pixels).
+        locks: what the corrections leave (scene3d.solvePose): "position", "rotation", "roll".
+
+    Returns:
+        {"poses": {frame: camera-to-world}, "errors": {frame: (pins RMS before, after) in pixels}}.
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+    frames = [f for f in frames if f in starts]
+    if len(frames) < 2:
+        raise ValueError("Solve needs at least two frames with a pose")
+    index = {f: i for i, f in enumerate(frames)}
+    pins = {f: pin for f, pin in pins.items() if f in index and len(pin[0])}
+    count = 6 * len(frames)
+    free = np.ones(6, dtype=bool)
+    if "rotation" in locks:
+        free[:3] = False
+    if "roll" in locks:
+        free[2] = False
+    if "position" in locks:
+        free[3:] = False
+    scale = np.r_[np.full(3, focalPixels), np.full(3, focalPixels / max(depth, 1e-9))]
+
+    def residuals(thetas):
+        rows, owners = [], []
+        for f, (points, positions, weights, robust) in pins.items():
+            matrix = starts[f] @ _cameraMove(thetas[index[f]])
+            xy, _ = projectPoints(matrix, points, width, height, focalPixels)
+            # (the pins of a frame weigh together as one: their count does not make a frame stronger)
+            rows.append(((xy - positions) * weights[:, None]).ravel() / np.sqrt(len(points)))
+            owners.append(((index[f],), robust))
+        for f, g in zip(frames, frames[1:]):
+            if g != f + 1:
+                continue
+            rows.append(stiffness * scale * (thetas[index[g]] - thetas[index[f]]))
+            owners.append(((index[f], index[g]), False))
+        # The poses tracked are themselves (weakly) trusted: a correction costs
+        for f in frames:
+            rows.append(trust * scale * thetas[index[f]])
+            owners.append(((index[f],), False))
+        return rows, owners
+
+    def robustWeights(rows, owners):
+        weights = []
+        for block, (_, robust) in zip(rows, owners):
+            if not robust:
+                weights.append(np.ones(len(block)))
+                continue
+            norm = np.linalg.norm(block.reshape(-1, 2), axis=1)
+            weights.append(np.repeat(np.sqrt(np.minimum(1.0, huber / np.maximum(norm, 1e-12))), 2))
+        return weights
+
+    def pinErrors(thetas):
+        errors = {}
+        for f, (points, positions, _, _) in pins.items():
+            xy, _ = projectPoints(starts[f] @ _cameraMove(thetas[index[f]]), points, width, height, focalPixels)
+            errors[f] = float(np.sqrt(np.mean(np.sum((xy - positions) ** 2, axis=1))))
+        return errors
+    thetas = np.zeros((len(frames), 6))
+    before = pinErrors(thetas)
+    step = 1e-6
+    for iteration in range(iterations):
+        if cancel:
+            cancel()
+        rows, owners = residuals(thetas)
+        weights = robustWeights(rows, owners)
+        current = np.concatenate([w * r for w, r in zip(weights, rows)])
+        offsets = np.cumsum([0] + [len(r) for r in rows])
+        entries, rowIds, columnIds = [], [], []
+        # Each block depends on one or two consecutive frames: a parameter of every other frame moved at once
+        for color in range(2):
+            for parameter in np.flatnonzero(free):
+                moved = thetas.copy()
+                moved[color::2, parameter] += step
+                shifted, _ = residuals(moved)
+                for block, (w, r, (owner, _)) in enumerate(zip(weights, shifted, owners)):
+                    which = [i for i in owner if i % 2 == color]
+                    if not which:
+                        continue
+                    derivative = (w * r - current[offsets[block]:offsets[block + 1]]) / step
+                    nonzero = np.flatnonzero(derivative)
+                    entries.append(derivative[nonzero])
+                    rowIds.append(offsets[block] + nonzero)
+                    columnIds.append(np.full(len(nonzero), 6 * which[0] + parameter))
+        jacobian = sparse.csr_matrix((np.concatenate(entries), (np.concatenate(rowIds), np.concatenate(columnIds))),
+                                     shape=(len(current), count))
+        normal = (jacobian.T @ jacobian).tocsc()
+        # The locked parameters (no column) and the frames without pins nor neighbors held by a little damping
+        damping = 1e-6 * max(normal.diagonal().sum() / count, 1.0)
+        delta = spsolve(normal + damping * sparse.identity(count, format="csc"), -(jacobian.T @ current))
+        thetas += np.asarray(delta).reshape(-1, 6)
+        if progress:
+            progress((iteration + 1) / float(iterations))
+        if np.abs(delta).max() < 1e-9:
+            break
+    after = pinErrors(thetas)
+    return {"poses": {f: starts[f] @ _cameraMove(thetas[index[f]]) for f in frames},
+            "errors": {f: (before[f], after[f]) for f in pins}}
+
+
 # Stored poses of a GeoTracker ("geoTrack" parameter): {"poses": {"frame": 16 numbers}, "keyframes": [frames]}
 
 def parsePoses(text: str) -> Tuple[Dict[int, np.ndarray], List[int]]:
