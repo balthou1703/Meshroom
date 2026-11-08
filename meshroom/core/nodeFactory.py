@@ -8,6 +8,12 @@ from meshroom.core.desc.anySet import AnySet
 from meshroom.core.node import BackdropNode, CompatibilityIssue, CompatibilityNode, Node, Position
 
 
+# Node types renamed: {former name: current name}, the projects saved with the former name open with the current one
+RENAMED_NODE_TYPES = {
+    "Resection": "GeoTracker",
+}
+
+
 def nodeFactory(
     nodeData: dict,
     name: Optional[str] = None,
@@ -91,6 +97,10 @@ class _NodeCreator:
         if "inputs" not in self.nodeData and "attributes" in self.nodeData:
             self.nodeData["inputs"] = self.nodeData["attributes"]
             del self.nodeData["attributes"]
+        # Renamed node types
+        nodeType = self.nodeData.get("nodeType")
+        if nodeType in RENAMED_NODE_TYPES:
+            self.nodeData["nodeType"] = RENAMED_NODE_TYPES[nodeType]
 
     def _checkCompatibilityIssues(self) -> Optional[CompatibilityIssue]:
         if self.nodeDesc is None:

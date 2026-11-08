@@ -679,14 +679,14 @@ class LiveController(QObject):
     @Slot(QObject, int, "QVariantList")
     def track(self, node, direction, names, count=0):
         """
-        Track the tracks `names` (all the enabled ones if empty) of a Tracker node (or the pins of a Resection) from
+        Track the tracks `names` (all the enabled ones if empty) of a Tracker node (or the pins of a GeoTracker) from
         the current frame, forward (1) or backward (-1), to the end of the frame range of its input, in a worker
         thread. All the tracks move together frame after frame (each frame rendered once, see tracking.trackMany);
-        the pins of a Resection are linked by its pose (ThreeDNodes._PinsModel). The viewer follows the tracking
+        the pins of a GeoTracker are linked by its pose (ThreeDNodes._PinsModel). The viewer follows the tracking
         (each tracked frame is shown with its keys); all the new keys are one undoable change.
         """
         from meshroom.live import tracking
-        # Not while an action runs (e.g. the geometry tracking of a Resection: both would edit the node)
+        # Not while an action runs (e.g. the geometry tracking of a GeoTracker: both would edit the node)
         if self._trackToken is not None or self._actionToken is not None or node is None or not node.hasAttribute(_editableTracks(node)):
             return
         input = node.attribute("input")
@@ -746,10 +746,10 @@ class LiveController(QObject):
             if token.cancelled:
                 raise EvaluationCancelled()
 
-        # Tracks of a node linking them (the pins of a Resection, on one rigid geometry): tracked with its model
+        # Tracks of a node linking them (the pins of a GeoTracker, on one rigid geometry): tracked with its model
         modelContext = self._trackingModelContext(node, token)
         trackingModel = getattr(node.nodeDesc, "trackingModel", None)
-        # A point tracking network (Tracker, Resection: "Point Tracker"), and the GPU ("Use GPU")
+        # A point tracking network (Tracker, GeoTracker: "Point Tracker"), and the GPU ("Use GPU")
         method = node.attribute("pointTracker").value if node.hasAttribute("pointTracker") else "patches"
         nodeName = node.name
         useGpu = node.attribute("useGpu").value if node.hasAttribute("useGpu") else True
@@ -833,7 +833,7 @@ class LiveController(QObject):
 
     def _trackingModelContext(self, node, token):
         """
-        The render context of a node whose tracks are linked (its descriptor has `trackingModel`, e.g. a Resection), at
+        The render context of a node whose tracks are linked (its descriptor has `trackingModel`, e.g. a GeoTracker), at
         the current frame, in a full resolution plan (the tracks are tracked at full resolution); None otherwise.
         """
         from meshroom.live.evaluator import RenderContext
@@ -852,7 +852,7 @@ class LiveController(QObject):
     @Slot(QObject, "QVariantList", str)
     def deleteKeys(self, node, names, mode):
         """
-        Remove keys of the tracks `names` (all if empty) of a Tracker or a Resection (and the poses of its geometry
+        Remove keys of the tracks `names` (all if empty) of a Tracker or a GeoTracker (and the poses of its geometry
         track), keeping the current frame (see tracking.deleteKeys): "forward", "backward", or "tracked" (the keys
         found by the tracking, the keyframes placed by hand kept). One undoable change.
         """
@@ -1656,12 +1656,12 @@ class LiveController(QObject):
         self._imageProvider.setPatch(key, qimage)
         return "image://live/patch/" + key
 
-    # Resection (meshroom/nodes/compositing/ThreeDNodes.py): pins put on the geometry in the viewer
+    # GeoTracker (meshroom/nodes/compositing/ThreeDNodes.py): pins put on the geometry in the viewer
 
     def _resectionContext(self, node):
         """
-        (render context of a Resection node at the current frame, proxy scale): in the plan of the viewer when the node is
-        in it (its solved camera is cached there), else in a full resolution plan. (None, 1) if not a Resection.
+        (render context of a GeoTracker node at the current frame, proxy scale): in the plan of the viewer when the node is
+        in it (its solved camera is cached there), else in a full resolution plan. (None, 1) if not a GeoTracker.
         """
         from meshroom.live.evaluator import RenderContext
         if node is None or not isImageOpNode(node) or not hasattr(node.nodeDesc, "pickPoint"):
@@ -1675,7 +1675,7 @@ class LiveController(QObject):
     @Slot(QObject, float, float, result="QVariantList")
     def pickGeometryPoint(self, node, x, y):
         """
-        The point [x, y, z] of the geometry of a Resection under the image position (x, y) (Nuke pixels of the
+        The point [x, y, z] of the geometry of a GeoTracker under the image position (x, y) (Nuke pixels of the
         plate), seen from its solved camera at the current frame; [] if no geometry there.
         """
         try:
@@ -1691,7 +1691,7 @@ class LiveController(QObject):
     @Slot(QObject, result="QVariant")
     def pinProjections(self, node):
         """
-        {pin name: [x, y]} (pixels of the full resolution plate): where the pins of a Resection or a FaceTracker are seen
+        {pin name: [x, y]} (pixels of the full resolution plate): where the pins of a GeoTracker or a FaceTracker are seen
         at the current frame (their point on the solved geometry), from what the viewer rendered (nothing is solved
         here, in the thread of the interface); {} when it is not rendered yet.
         """
@@ -1764,7 +1764,7 @@ class LiveController(QObject):
                 continue
             try:
                 if semantic == "geoTrack":
-                    # The poses tracked with "Track Geometry" of a Resection
+                    # The poses tracked with "Track Geometry" of a GeoTracker
                     frames.update(int(f) for f in ((data or {}).get("poses") or {}))
                 elif semantic == "tracks":
                     for track in data or []:

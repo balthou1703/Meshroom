@@ -40,7 +40,7 @@ Where this map and the actual tree diverge, trust the tree — then update the m
 │   │                           #   editing (enter/leave), runner (Run Live in another interpreter) — docs/subgraph.md
 │   ├── live/                   # Live compositing engine: in-memory pull evaluation of desc.ImageOpNode
 │   │                           #   nodes (ImageBuffer, ImageCache, Evaluator, image IO, pixel ops, roto, tracking, curves,
-│   │                           #   geometry, camera solve, optical flow, geotrack.py: geometry tracking of the Resection,
+│   │                           #   geometry, camera solve, optical flow, geotrack.py: geometry tracking of the GeoTracker,
 │   │                           #   gpu.py / gpuOps.py: PyTorch GPU kernels with CPU fallback ("Use GPU"),
 │   │                           #   neural/: optional networks (RAFT, BootsTAPIR, CoTracker, LightGlue, MegaPose;
 │   │                           #   weights in MESHROOM_MODELS_PATH, python -m meshroom.live.neural.download), 3DE lens distortion, animation, timeline frame range, node actions,

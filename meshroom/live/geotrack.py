@@ -1,5 +1,5 @@
 """
-Tracking of a rigid geometry in a plate (the Resection node, like GeoTracker): the pose of the camera (the geometry
+Tracking of a rigid geometry in a plate (the GeoTracker node): the pose of the camera (the geometry
 staying still) follows the image, driven by many points of the surface instead of a few pins.
 
 - Surface samples: points spread on the faces of the geometry (or its vertices for a point cloud), with their normals.
@@ -709,7 +709,7 @@ def blendPoses(forward: Dict[int, np.ndarray], backward: Dict[int, np.ndarray], 
     return result
 
 
-# Stored poses of a Resection ("geoTrack" parameter): {"poses": {"frame": 16 numbers}, "keyframes": [frames]}
+# Stored poses of a GeoTracker ("geoTrack" parameter): {"poses": {"frame": 16 numbers}, "keyframes": [frames]}
 
 def parsePoses(text: str) -> Tuple[Dict[int, np.ndarray], List[int]]:
     """ The poses ({frame: camera-to-world matrix}) and the keyframes stored in a JSON string. """
@@ -755,7 +755,7 @@ def deletePoses(text: str, frame: int, mode: str) -> Tuple[str, int]:
     return dumpPoses(poses, keyframes), len(removed)
 
 
-# Deformation of the geometry by the optical flow ("Deform With Flow" of a Resection): control vertices of the geometry
+# Deformation of the geometry by the optical flow ("Deform With Flow" of a GeoTracker): control vertices of the geometry
 # follow the flow of the plate, frame after frame; their offsets (pixels, from where the rigid pose puts them) move every
 # vertex in the image, at its depth. Stored as {"indices": [control vertices], "radius": r, "frames": {"f": [dx, dy...]}}
 

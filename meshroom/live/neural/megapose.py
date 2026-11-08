@@ -1,6 +1,6 @@
 """
 MegaPose (megapose6d, or its happypose version): the pose of a known object in an RGB image from its mesh, starting from
-a box around it. The Resection uses it to "Align" its geometry when it is far from its place: the box is where the
+a box around it. The GeoTracker uses it to "Align" its geometry when it is far from its place: the box is where the
 current (rough) pose shows the geometry; the pose found is then refined on the image (geotrack.alignPose).
 
 Its data folder (the models and their renders cache) is <models>/megapose (MEGAPOSE_DATA_DIR). It needs a CUDA GPU.

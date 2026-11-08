@@ -51,7 +51,7 @@ def resectionGraph(tmp_path, width=640, height=360):
     readGeo.file.value = writeCube(tmp_path / "cube.obj")
     camera = graph.addNewNode("Camera")
     camera.translate.value = {"x": 0.0, "y": 0.0, "z": 8.0}
-    resection = graph.addNewNode("Resection")
+    resection = graph.addNewNode("GeoTracker")
     graph.addEdge(plate.output, resection.input)
     graph.addEdge(readGeo.output, resection.geo)
     graph.addEdge(camera.output, resection.camera)
@@ -87,7 +87,7 @@ class TestStreams:
         assert not other.inputMatrix.validateIncomingConnection(camera.output)
 
     def test_everyCompositingNodeHasAHiddenMatrixOutput(self):
-        for nodeType in ("Grade", "Transform", "Merge", "Camera", "ReadGeo", "Resection", "CornerPin"):
+        for nodeType in ("Grade", "Transform", "Merge", "Camera", "ReadGeo", "GeoTracker", "CornerPin"):
             nodeDesc = pluginManager.getNodeDescProvider(nodeType).nodeDescClass
             matrices = [output for output in nodeDesc.outputs if output.name == "matrix"]
             assert len(matrices) == 1 and isinstance(matrices[0], desc.Matrix) and not matrices[0].exposed, nodeType
@@ -451,7 +451,7 @@ class TestBake:
         graph = Graph("bakeImage")
         constant = graph.addNewNode("Constant")
         grade = graph.addNewNode("Grade")
-        resection = graph.addNewNode("Resection")
+        resection = graph.addNewNode("GeoTracker")
         readGeo = graph.addNewNode("ReadGeo")
         graph.addEdge(constant.output, grade.input)
         graph.addEdge(readGeo.output, resection.geo)
@@ -606,3 +606,11 @@ def test_objectNamesMatchTheirTransform():
     assert _namesMatch("/root/cam_A/cam_AShape", "")
     assert not _namesMatch("/root/cam_A/cam_AShape", "cam")
     assert not _namesMatch("/root/cam_A/cam_AShape", "root")
+
+
+def test_resectionOpensAsGeoTracker():
+    """ A node saved as a "Resection" (the former name of the GeoTracker) is created as a GeoTracker, its values kept. """
+    from meshroom.core.nodeFactory import nodeFactory
+    node = nodeFactory({"nodeType": "Resection", "inputs": {"trackPoints": 300}}, "Resection_1")
+    assert node.nodeType == "GeoTracker"
+    assert node.trackPoints.value == 300

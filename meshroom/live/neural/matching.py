@@ -1,6 +1,6 @@
 """
 Feature matching with LightGlue and ALIKED features (the lightglue package): corresponding points of two images, even
-far apart in time or seen from very different places (the CameraTracker autotrack, the "Align" of the Resection).
+far apart in time or seen from very different places (the CameraTracker autotrack, the "Align" of the GeoTracker).
 """
 from __future__ import annotations
 

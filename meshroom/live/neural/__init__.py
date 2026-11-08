@@ -1,12 +1,12 @@
 """
 Neural networks used by the compositing nodes, with PyTorch (optional):
 
-- RAFT (raft.py): dense optical flow (OpticalFlow, Retime / TimeWarp "motion", Roto flow, Resection geometry tracking).
+- RAFT (raft.py): dense optical flow (OpticalFlow, Retime / TimeWarp "motion", Roto flow, GeoTracker geometry tracking).
 - BootsTAPIR (TAPIR) and CoTracker (pointTracking.py): many points tracked together through a sequence, occlusions
-  included (Tracker, pins of the Resection).
+  included (Tracker, pins of the GeoTracker).
 - LightGlue with ALIKED features (matching.py): feature matching between two images, even far apart (CameraTracker
-  autotrack, Resection "Align").
-- MegaPose (megapose.py): the pose of a known object in an image from its mesh (Resection "Align").
+  autotrack, GeoTracker "Align").
+- MegaPose (megapose.py): the pose of a known object in an image from its mesh (GeoTracker "Align").
 
 Their weights are read from a local folder (MESHROOM_MODELS_PATH), filled once by `python -m
 meshroom.live.neural.download` (models.py lists them, with their licenses). When PyTorch, the package of a network or

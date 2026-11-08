@@ -34,14 +34,14 @@ Item {
 
     // Tracks shown but not edited (CameraTracker: the autotrack)
     property bool readOnly: false
-    // Pins of a Resection, a FaceTracker or a FaceBuilder: tracks stuck to a point of its geometry ("point"), added by
+    // Pins of a GeoTracker, a FaceTracker or a FaceBuilder: tracks stuck to a point of its geometry ("point"), added by
     // clicking on it
-    readonly property bool pinMode: !!node && (node.nodeType === "Resection" || node.nodeType === "FaceTracker" ||
+    readonly property bool pinMode: !!node && (node.nodeType === "GeoTracker" || node.nodeType === "FaceTracker" ||
                                                node.nodeType === "FaceBuilder")
     // FaceBuilder only: the pins of the view shown (each view has its own), placing the ears, skull, neck...
     readonly property bool builderMode: !!node && node.nodeType === "FaceBuilder"
-    // Resection only: the geometry track (Track Geometry, Align, Refine)
-    readonly property bool geoMode: !!node && node.nodeType === "Resection"
+    // GeoTracker only: the geometry track (Track Geometry, Align, Refine)
+    readonly property bool geoMode: !!node && node.nodeType === "GeoTracker"
     // FaceTracker only: the face tracked by MediaPipe / the optical flow
     readonly property bool faceMode: !!node && node.nodeType === "FaceTracker"
     readonly property string itemName: pinMode ? "pin" : "track"
@@ -699,7 +699,7 @@ Item {
                 onClicked: root.showError = !root.showError
                 ToolTip.text: "Error: color the paths by match quality (green: good, red: poor)"
             }
-            // Resection: start from the camera stepped back to see the whole geometry, centered
+            // GeoTracker: start from the camera stepped back to see the whole geometry, centered
             MaterialToolButton {
                 readonly property var attribute: root.geoMode && root.node.hasAttribute("centerGeometry")
                                                  ? root.node.attribute("centerGeometry") : null
@@ -743,7 +743,7 @@ Item {
                     ToolTip.text: modelData[2] + " (Track With: " + root.node.attribute("trackWith").value + ")"
                 }
             }
-            // Resection: the geometry itself tracked by many points of its surface (optical flow / patches)
+            // GeoTracker: the geometry itself tracked by many points of its surface (optical flow / patches)
             Rectangle { visible: root.geoMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
             MaterialToolButton {
                 visible: root.geoMode
@@ -789,7 +789,7 @@ Item {
                 onClicked: root.live.runAction(root.node, "clearGeoTrack")
                 ToolTip.text: "Clear the geometry track (the pins solve again)"
             }
-            // Resection: the geometry deformed by the optical flow (non rigid)
+            // GeoTracker: the geometry deformed by the optical flow (non rigid)
             Rectangle { visible: root.geoMode; width: 1; Layout.preferredHeight: 20; color: Qt.rgba(1, 1, 1, 0.3) }
             MaterialToolButton {
                 visible: root.geoMode
@@ -818,7 +818,7 @@ Item {
                 onClicked: root.live.runAction(root.node, "clearDeform")
                 ToolTip.text: "Clear the deformation (the rigid geometry)"
             }
-            // Pins of the Resection at this frame and their reprojection error
+            // Pins of the GeoTracker at this frame and their reprojection error
             Label {
                 visible: root.geoMode
                 leftPadding: 6

@@ -97,7 +97,7 @@ Needs MediaPipe (pip install mediapipe) and its model in MESHROOM_MODELS_PATH
         desc.BoolParam(name="followSurface", label="Follow Head Surface", value=True, invalidate=False,
                        description="With flow or mediapipe+flow: the pose of the head is followed by the surface of "
                                    "its rigid parts (forehead, nose bridge, temples, cheekbones: many textured points, "
-                                   "as the Resection follows a geometry, the masked parts left out), not by the "
+                                   "as the GeoTracker follows a geometry, the masked parts left out), not by the "
                                    "landmarks: much less drift; the landmarks then only give the expression. Kept with "
                                    "each tracked frame (the keyframes with rigid pins are placed by their pins)."),
         gpuParam(),

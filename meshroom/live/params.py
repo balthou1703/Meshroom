@@ -202,7 +202,7 @@ def colorspaceParam(name, label, description, value="auto"):
 
 
 def pointTrackerParam():
-    """ How the tracks are tracked in the viewer (Tracker, pins of the Resection). """
+    """ How the tracks are tracked in the viewer (Tracker, pins of the GeoTracker). """
     return desc.ChoiceParam(
         name="pointTracker", label="Point Tracker", value="patches", values=["patches", "tapir", "cotracker"],
         invalidate=False,

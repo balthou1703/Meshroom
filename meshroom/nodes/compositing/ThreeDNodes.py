@@ -1,5 +1,5 @@
 """
-3D nodes of the compositing workspace: Camera, ReadGeo, MergeGeo and Resection (a GeoTracker: the pose of a
+3D nodes of the compositing workspace: Camera, ReadGeo, MergeGeo and GeoTracker (the pose of a
 camera, or of a geometry, from pins placed on the geometry and tracked in the plate).
 
 They are connected through camera, geo and matrix streams (desc.Camera, desc.Geo, desc.Matrix), computed per
@@ -72,7 +72,7 @@ class Camera(desc.ImageOpNode):
     documentation = """
 A camera: its transform and its lens, set by its parameters (animatable), read from a file (USD, Alembic, FBX:
 the camera named in "Camera Name", or the first one), or taken from the camera connected to "Input Camera"
-(e.g. the camera solved by a Resection).
+(e.g. the camera solved by a GeoTracker).
 
 "Input Matrix" (shown when the node is expanded) replaces the transform with a matrix: e.g. the "matrix"
 output of another Camera, to follow its animation. Right click on its edge > "Disconnect and Bake" turns what
@@ -120,7 +120,7 @@ Conventions: Y up, the camera looks along -Z; the horizontal aperture fits the w
     outputs = [desc.Camera(name="output", label="Camera", description="The camera at each frame.")]
 
     def getInfo(self, ctx, inputsInfo):
-        raise RuntimeError("A Camera gives no image (connect it to a Resection, or use its matrix).")
+        raise RuntimeError("A Camera gives no image (connect it to a GeoTracker, or use its matrix).")
 
     def computeData(self, ctx, outputName):
         if outputName == "matrix":
@@ -165,7 +165,7 @@ class ReadGeo(desc.ImageOpNode):
 Reads a geometry (meshes, point clouds) from a file: OBJ, PLY, USD (.usda without the USD module), Alembic or
 FBX (with their Python modules). Animated files (time samples) are read at each frame. "Translate", "Rotate",
 "Scale" transform it, or "Input Matrix" (shown when the node is expanded), e.g. the "Geo Matrix" output of a
-Resection to put the geometry where it is in the plate.
+GeoTracker to put the geometry where it is in the plate.
 """
     inputs = [
         desc.File(name="file", label="File", value="", semantic="openFile:" + _FILE_FILTER,
@@ -183,12 +183,12 @@ Resection to put the geometry where it is in the plate.
                         description="Scale applied on the 3 axes."),
         _rotationOrder(),
         _inputMatrix("When connected, the transform of the geometry (replacing translate / rotate / scale): e.g. "
-                     "the 'Geo Matrix' of a Resection."),
+                     "the 'Geo Matrix' of a GeoTracker."),
     ]
     outputs = [desc.Geo(name="output", label="Geo", description="The geometry at each frame, in world space.")]
 
     def getInfo(self, ctx, inputsInfo):
-        raise RuntimeError("A ReadGeo gives no image (connect it to a Resection).")
+        raise RuntimeError("A ReadGeo gives no image (connect it to a GeoTracker).")
 
     def transformMatrix(self, ctx):
         matrix = ctx.inputData("inputMatrix")
@@ -225,7 +225,7 @@ Merges up to 4 geometries into one.
     outputs = [desc.Geo(name="output", label="Geo", description="The geometries together.")]
 
     def getInfo(self, ctx, inputsInfo):
-        raise RuntimeError("A MergeGeo gives no image (connect it to a Resection).")
+        raise RuntimeError("A MergeGeo gives no image (connect it to a GeoTracker).")
 
     def computeData(self, ctx, outputName):
         if outputName == "output":
@@ -233,14 +233,14 @@ Merges up to 4 geometries into one.
         return super().computeData(ctx, outputName)
 
 
-class Resection(desc.ImageOpNode):
+class GeoTracker(desc.ImageOpNode):
     category = "Comp 3D"
     color = _COLOR
     documentation = """
-Finds the camera (or the motion of the geometry) matching a geometry to the plate, like GeoTracker: pins put on
-the geometry are moved onto the plate, and tracked.
+Finds the camera (or the motion of the geometry) matching a geometry to the plate (formerly "Resection", the projects
+saved with it open with a GeoTracker): pins put on the geometry are moved onto the plate, and tracked.
 
-- Evaluate the Resection: the plate is shown with the geometry over it, seen from the solved camera ("Display":
+- Evaluate the GeoTracker: the plate is shown with the geometry over it, seen from the solved camera ("Display":
   shaded surface, feature edges, wireframe or points, the hidden parts removed).
 - Select it, "Add pin" in the toolbar of the viewer and click on the geometry: a pin is stuck to the surface (or
   to the nearest point of a point cloud); drag it onto its place in the plate. The pose follows: 1 pin moves the
@@ -608,7 +608,7 @@ into keys of a Camera or a ReadGeo.
 
 class _PinsModel:
     """
-    The pins of a Resection tracked together (a tracking.TrackingModel): at each frame the pose is solved with the pins
+    The pins of a GeoTracker tracked together (a tracking.TrackingModel): at each frame the pose is solved with the pins
     found; the pins far from where it puts their point are rejected, and each pin is searched in the next frame where
     the pose, moving at constant speed, puts it.
     """
@@ -676,7 +676,7 @@ class _PinsModel:
 
 
 class _GeoTrackAction:
-    """ The geometry tracking actions of a Resection (Track Geometry, Align, Refine), run in a worker thread. """
+    """ The geometry tracking actions of a GeoTracker (Track Geometry, Align, Refine), run in a worker thread. """
 
     def __init__(self, nodeDesc, context):
         from meshroom.live import geotrack
@@ -713,7 +713,7 @@ class _GeoTrackAction:
         return geotrack.setMask(image, mask)
 
     def poseAt(self, frame):
-        """ The camera-to-world matrix of the Resection at a frame (when the action started). """
+        """ The camera-to-world matrix of the GeoTracker at a frame (when the action started). """
         return self.ctx.ownData("cameraOutput", frame).matrix
 
     def publish(self, frame=None, force=False):

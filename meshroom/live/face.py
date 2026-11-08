@@ -392,7 +392,7 @@ def trackFaces(imageAt: Callable, frames: List[int], detector, fps: float = 24.0
 class HeadPoseTracker:
     """
     The pose of the head followed from frame to frame by the surface of the rigid parts of the face (forehead, nose
-    bridge, temples, cheekbones: no expression moves them), as the Resection follows a geometry (geotrack.py): many
+    bridge, temples, cheekbones: no expression moves them), as the GeoTracker follows a geometry (geotrack.py): many
     textured points of it followed by the optical flow, the pose solved from them (robust), then checked against an
     anchor frame (patches searched near where the pose puts them) to limit the drift. Poses are camera-to-face matrices.
     """
@@ -471,7 +471,7 @@ def propagateFaces(imageAt: Callable, frames: List[int], start: np.ndarray, dete
     "hidden" (as in trackFaces). `regularize(frame, landmarks, hidden)`: the landmarks of the face model fitted on the
     flowed ones (e.g. a stiff face through them): what is followed stays a face (no drifting point breaks it).
     `poseTracker` (a HeadPoseTracker) with `startPose` (the camera-to-face matrix at frames[0]): the pose of the head
-    followed by the surface of its rigid parts (many textured points, as the Resection), not by the landmarks: less
+    followed by the surface of its rigid parts (many textured points, as the GeoTracker), not by the landmarks: less
     drift; kept with each frame ("pose") and given to `regularize(frame, landmarks, hidden, pose=pose)`.
 
     Returns:

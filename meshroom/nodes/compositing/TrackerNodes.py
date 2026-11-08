@@ -223,7 +223,7 @@ tracker: the motion of the tracks of the connected Tracker (or CameraTracker):
   moves with the tracks near it (inverse distance weighting), e.g. several objects moving differently.
 
 camera: the motion of a camera (e.g. a Camera node reading a USD, Alembic or FBX camera, or the camera
-solved by a Resection) moves the image as the camera sees it: its rotation and its focal length (a zoom)
+solved by a GeoTracker) moves the image as the camera sees it: its rotation and its focal length (a zoom)
 at any distance, its translation for an image at "Distance" (scene units; 0: far away, the translation
 ignored).
 

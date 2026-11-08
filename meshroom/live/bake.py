@@ -4,7 +4,7 @@ as keys when it changes over time (meshroom/live/animation.py).
 
 - A connected parameter keeps the value of its source, and the keys of its source when it is animated.
 - A camera or matrix input is turned into the parameters of its node (desc.ImageOpNode.bakeStream), from the values it
-  received over a range of frames (e.g. a Camera following a Resection gets keys of its translate / rotate).
+  received over a range of frames (e.g. a Camera following a GeoTracker gets keys of its translate / rotate).
 
 These functions only compute the new values: {parameter name: value or keys [[frame, value], ...]}; the user interface
 removes the edge and sets them (one undoable step).

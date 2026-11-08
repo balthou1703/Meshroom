@@ -1,5 +1,5 @@
 """
-Drawing of a geometry over an image, seen through a camera (the Resection node): its shaded surface, its feature edges
+Drawing of a geometry over an image, seen through a camera (the GeoTracker node): its shaded surface, its feature edges
 (silhouettes, creases, open edges), all its edges, or its points. The hidden parts are removed with a depth buffer
 (`rasterize`), the lines are antialiased (each sample spread on its 4 nearest pixels).
 

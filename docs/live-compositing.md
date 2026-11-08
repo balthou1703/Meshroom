@@ -244,7 +244,7 @@ nœud Dot.
 | Comp Filter | Blur, Sharpen, Erode, Median, MotionBlur, ZDefocus |
 | Comp Merge | Merge, Premult, Unpremult, Dot, Clone, Switch |
 | Comp Transform | Transform, Reformat (option Crop), Crop, Mirror, CornerPin, Tracker, Stabilize, CameraTracker, LensDistortion |
-| Comp 3D | Camera, ReadGeo, MergeGeo, Resection (voir 4.13) |
+| Comp 3D | Camera, ReadGeo, MergeGeo, GeoTracker (voir 4.13) |
 | Comp Time | TimeOffset, FrameHold, Retime, TimeWarp, OpticalFlow |
 
 Couleur du corps des nœuds par famille (quand l'utilisateur n'en a pas choisi), le bandeau gardant
@@ -278,7 +278,7 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   colore le trajet du rouge (mauvaise corrélation) au vert. Trois boutons suppriment des clés des pistes
   sélectionnées (toutes sans sélection), en gardant celle de la frame courante : avant elle, après elle, ou les clés
   trouvées par le suivi en gardant les keyframes posées à la main (une piste sans keyframe, d'un autotrack, n'est pas
-  touchée) ; sur une Resection, les poses du suivi de géométrie suivent la même règle (une étape d'annulation,
+  touchée) ; sur un GeoTracker, les poses du suivi de géométrie suivent la même règle (une étape d'annulation,
   `tracking.deleteKeys`, `geotrack.deletePoses`). Toutes les pistes suivies avancent ensemble, frame après
   frame (chaque frame rendue une fois, `tracking.trackMany`) ; chacune est cherchée là où la mène son dernier
   mouvement (vitesse constante), puis là où elle était, et s'arrête seule (corrélation trop faible, sa prochaine
@@ -343,7 +343,7 @@ Transform `#A57AAA`, Time ocre, Write rouge, Dot et Clone gris).
   comptent (une feature de l'autotrack ne vit que quelques frames) ; de même pour Stabilize. Modèles : translate (moyenne des pistes, copies décalées en parallèle),
   translate rotate scale (ajusté sur les pistes), vector field (chaque piste donne le mouvement
   autour d'elle : champ de vecteurs interpolé, flou par pixel). « Motion From » : tracker (ci-dessus) ou camera :
-  l'entrée Camera (un Camera lisant une caméra USD / Alembic / FBX, la caméra d'une Resection...) déplace l'image
+  l'entrée Camera (un Camera lisant une caméra USD / Alembic / FBX, la caméra d'un GeoTracker...) déplace l'image
   comme la caméra la voit bouger pendant l'obturateur : une homographie par échantillon (`_cameraMotion`), avec sa
   rotation et sa focale (zoom), et sa translation pour une image à « Distance » (0 : à l'infini, translation
   ignorée) ; la caméra est interpolée entre les frames. Seule l'entrée de la source choisie a un pin (les entrées
@@ -525,16 +525,16 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
 - **Sortie matrice de tous les nœuds** : chaque nœud de compositing a une sortie « Matrix », non exposée : son pin
   n'apparaît que quand le nœud est déplié (flèche du bas) ou qu'elle est branchée. C'est la transformation que le
   nœud applique à la frame : Transform, CornerPin, Tracker (match-move / stabilize), Stabilize, Reformat, Mirror
-  (la 3x3 en pixels, plongée en 4x4), Camera, ReadGeo, Resection ; identité pour les autres.
+  (la 3x3 en pixels, plongée en 4x4), Camera, ReadGeo, GeoTracker ; identité pour les autres.
 - **Entrées matrice** (non exposées aussi) : « Input Matrix » de Transform, CornerPin, Camera, ReadGeo remplace la
   transformation du nœud (une caméra suit l'animation d'une autre caméra, un Transform reprend le mouvement d'un
   Tracker...).
 - **Camera** : paramètres animables (translate, rotate, ordre de rotation, focale, ouvertures, near / far), ou
   fichier (USD : `.usda` lu sans module, binaire avec `pxr` ; Alembic avec PyAlembic ; FBX avec le SDK FBX ; nom de
-  la caméra, décalage de frames, fps), ou entrée « Input Camera » (prise telle quelle, ex. la caméra d'une Resection).
+  la caméra, décalage de frames, fps), ou entrée « Input Camera » (prise telle quelle, ex. la caméra d'un GeoTracker).
 - **ReadGeo** : OBJ, PLY (ascii / binaire), USD, Alembic, FBX (mêmes conditions), échantillons de temps lus à chaque
   frame ; translate / rotate / scale / uniform scale ou « Input Matrix ». **MergeGeo** : jusqu'à 4 géométries.
-- **Affichage de la géométrie** (Resection, « Display », `meshroom/live/geoRender.py`) : shaded (surface éclairée
+- **Affichage de la géométrie** (GeoTracker, « Display », `meshroom/live/geoRender.py`) : shaded (surface éclairée
   depuis la caméra, avec ses arêtes caractéristiques), edges (silhouettes, arêtes vives au-delà de
   « Crease Angle », bords ouverts : la forme d'un maillage dense sans le remplir), wireframe (toutes les arêtes des
   faces ; par défaut), points, none. « Hide Hidden Lines » retire ce qui est derrière la surface (tampon de profondeur : chaque
@@ -542,12 +542,12 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   de son centre ; sur le GPU avec « Use GPU »). Lignes antialiasées. Les faces d'une géométrie (triangles, arêtes,
   voisinage des arêtes) sont une `Topology` partagée par toutes ses frames (`scene3d.Topology`) : calculées une fois,
   pas à chaque frame (c'était la latence du défilement de la timeline sur un maillage dense).
-- **Resection** (à la GeoTracker) : entrées plaque, géométrie, caméra (optique et pose de départ ; sans caméra :
+- **GeoTracker** (anciennement « Resection » : les projets enregistrés avec elle s'ouvrent en GeoTracker, `nodeFactory.RENAMED_NODE_TYPES`) : entrées plaque, géométrie, caméra (optique et pose de départ ; sans caméra :
   35 mm sur 36 mm, cadrant la géométrie ; « Center Geometry » recule la caméra de départ le long de son axe jusqu'à
   centrer toute la géométrie, utile quand une grande géométrie entoure la caméra). Sorties : **Camera** (en premier : la caméra résolue, la géométrie fixe),
   **Camera Matrix**, **Geo Matrix** (la transformation de la géométrie vue depuis la caméra d'entrée, à brancher
   dans l'« Input Matrix » d'un ReadGeo), et l'image (la plaque avec la géométrie en fil de fer, les points des pins
-  reprojetés et leur écart). Dans le viewer (Resection sélectionnée) : « Add pin » puis clic sur la géométrie (lancer
+  reprojetés et leur écart). Dans le viewer (GeoTracker sélectionné) : « Add pin » puis clic sur la géométrie (lancer
   de rayon depuis la caméra résolue ; nuage de points : le point projeté le plus proche) ; glisser le pin à sa place
   dans la plaque, la pose suit en direct : 1 pin déplace la géométrie dans l'image, 2 pins la tournent et la mettent
   à l'échelle, 3 pins et plus résolvent la pose (Gauss-Newton amorti vers la pose de départ ; DLT à partir de 6). Les
@@ -580,7 +580,7 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   actions ; canal et inversion comme les autres masques) : Track Geometry, Align et Refine ne suivent que les points
   dans sa partie blanche (`geotrack.setMask` / `maskedOut` : un objet qui passe devant ou une partie qui bouge, son
   roto inversé).
-- **Deform With Flow** (Resection, non rigide, `geotrack.trackDeformation`) : depuis la frame courante jusqu'au bout
+- **Deform With Flow** (GeoTracker, non rigide, `geotrack.trackDeformation`) : depuis la frame courante jusqu'au bout
   de la plage de tracking (avant / arrière), des sommets de contrôle répartis sur la géométrie (« Deform Points »,
   400) suivent le flot optique de la plaque (Lucas-Kanade, ou RAFT avec « Track Geometry With » : raft) à partir de
   la pose rigide ; un sommet caché par la géométrie ou masqué garde son décalage. Leurs décalages (pixels, par
@@ -595,7 +595,7 @@ Les edges de caméra sont ambre, de géométrie verts, de matrice violets (`mesh
   Transform → translate / rotate / scale / skew, CornerPin → coins « To ») ; une seule étape d'annulation
   (`meshroom/live/bake.py`).
 
-Limites : pas de distorsion d'objectif dans la Resection, focale non estimée, géométrie supposée fixe pendant que
+Limites : pas de distorsion d'objectif dans le GeoTracker, focale non estimée, géométrie supposée fixe pendant que
 l'on pose les pins (les points des pins sont en coordonnées monde) et rigide pendant son suivi (la géométrie de la
 frame courante) ; suivi en numpy sur CPU (environ 0,1 à 0,3 s par frame à 1K, davantage en 4K avec le flot optique ;
 voir 4.14 pour le GPU) ; lecture Alembic / FBX non testée ici (modules absents).
@@ -624,7 +624,7 @@ flow (le visage ajusté de la frame courante, pins compris, suit le flot optique
 avec lui : pas de dérive, et le flot là où MediaPipe se perd ; `face.propagateFaces`). Avec le flot, partir d'une
 frame bien placée : boutons du viewer (et du nœud) en arrière / avant jusqu'au bout de la plage de tracking, ou une
 frame à la fois (le viewer passe à la frame trackée) ; les autres frames gardent leurs points. Les pistes ont aussi
-des boutons d'une frame (avant / arrière) dans la barre du viewer (Tracker, Resection).
+des boutons d'une frame (avant / arrière) dans la barre du viewer (Tracker, GeoTracker).
 Yeux (`meshroom/live/faceEyes.py`, d'après FaceCapture de Technicolor : une sphère par œil, son regard ajusté sur
 l'image) : chaque globe est placé derrière l'ouverture de ses paupières sur le visage de repos (coins et paupières,
 rayon 0,42 × la largeur de l'œil, soit ~1,2 cm), suit la tête, et est tourné à chaque frame pour que le centre de son
@@ -972,7 +972,7 @@ tourner et bouger la tête sans rien déformer. Nez et narines : 1,5 % de la lar
 
 Suivi de la pose par la surface (« Follow Head Surface », activé par défaut, `face.HeadPoseTracker`) : avec Track
 With flow ou mediapipe+flow, la pose de la tête n'est plus déduite des 478 points suivis un à un, mais suivie comme
-le Resection suit une géométrie (`geotrack.stepPose` puis `alignPose` contre une frame d'ancrage) : jusqu'à 400 points
+le GeoTracker suit une géométrie (`geotrack.stepPose` puis `alignPose` contre une frame d'ancrage) : jusqu'à 400 points
 texturés (Shi-Tomasi) des parties rigides du visage (front, arête du nez, tempes, pommettes : rigidité ≥ 0,6), suivis
 par le flow (Lucas-Kanade ou RAFT), pose robuste, parties masquées exclues. La pose est gardée avec chaque frame
 (champ `"p"` de « faceTrack ») et `solveFace(pose=...)` la garde : les points ne donnent plus que l'expression (rig
@@ -1002,7 +1002,7 @@ déformée, espace du visage, en cm), « Original » (la tête de base), « Came
 à l'origine) et l'image de la vue choisie par « Show View » avec la tête dessinée. Entrée « Base » : un autre visage
 ou une tête de topologie MediaPipe. Brancher « Head » dans « Face » d'un FaceTracker pour suivre la tête de l'acteur.
 
-**Plage de tracking** (« Limit Track Range », « Track First », « Track Last » : Tracker, CameraTracker, Resection,
+**Plage de tracking** (« Limit Track Range », « Track First », « Track Last » : Tracker, CameraTracker, GeoTracker,
 FaceTracker, Roto ; `params.trackRangeParams` / `trackRange`) : les actions de tracking (boutons Track du viewer,
 Autotrack, Track Geometry et Refine, Track Face, Track Shapes) ne calculent que dans cette plage ; une frame courante
 hors de la plage est refusée.
@@ -1010,7 +1010,7 @@ hors de la plage est refusée.
 ### 4.14 GPU et réseaux de neurones
 
 **GPU** (`meshroom/live/gpu.py`, `gpuOps.py`) : les nœuds Blur, Sharpen, Erode, Median, ZDefocus, OpticalFlow,
-Retime, TimeWarp, Tracker, CameraTracker et Resection ont « Use GPU » (coché par défaut). Avec PyTorch et un GPU
+Retime, TimeWarp, Tracker, CameraTracker et GeoTracker ont « Use GPU » (coché par défaut). Avec PyTorch et un GPU
 CUDA (ou MPS sur macOS), le calcul y est fait ; sinon, ou en cas d'échec (mémoire, opération non supportée), sur le
 CPU, avec le même résultat (avertissement une fois par opération dans le log). Ce qui passe sur le GPU : flous
 (gaussien et trois boîtes), érosion / dilatation, médiane (par bandes), convolutions FFT du ZDefocus, flot optique
@@ -1023,10 +1023,10 @@ suivi de géométrie par patches). Le Roto (« Track Shapes With Flow ») utilis
 | Réseau | Licence | Où | Option |
 |--------|---------|----|--------|
 | RAFT (torchvision `raft_large`) | BSD-3 | OpticalFlow, suivi de géométrie | « Method » : raft ; « Track Geometry With » : raft |
-| BootsTAPIR (tapnet) | Apache-2.0 / CC-BY-4.0 | Tracker, pins de la Resection | « Point Tracker » : tapir |
+| BootsTAPIR (tapnet) | Apache-2.0 / CC-BY-4.0 | Tracker, pins du GeoTracker | « Point Tracker » : tapir |
 | CoTracker3 | **CC-BY-NC-4.0, non commercial** | Tracker, pins | « Point Tracker » : cotracker |
-| LightGlue + ALIKED | Apache-2.0 / BSD-3 | CameraTracker, Align de la Resection | « Features » : lightglue ; « Align With » : lightglue |
-| MegaPose (megapose6d ou happypose) | Apache-2.0 | Align de la Resection | « Align With » : megapose (GPU CUDA) |
+| LightGlue + ALIKED | Apache-2.0 / BSD-3 | CameraTracker, Align du GeoTracker | « Features » : lightglue ; « Align With » : lightglue |
+| MegaPose (megapose6d ou happypose) | Apache-2.0 | Align du GeoTracker | « Align With » : megapose (GPU CUDA) |
 
 FoundationPose n'est pas intégré : il lui faut une image de profondeur (RGB-D) en plus de l'image, ce que n'ont pas
 les plaques, et sa licence est non commerciale. MegaPose a un modèle RGB seul.
@@ -1043,7 +1043,7 @@ les plaques, et sa licence est non commerciale. MegaPose a un modèle RGB seul.
   que la texture à l'intérieur de l'objet ne l'attire pas ; la pose est résolue sur la distance le long des normales
   (Levenberg-Marquardt, poids de Tukey), du flou au net, sur « Silhouette Search » pixels au plus (40 par défaut,
   avancé) ; il faut un objet qui se détache de son fond et une géométrie placée à moins de cette distance ; un objet
-  symétrique peut se recaler sur une pose symétrique ; l'entrée « Mask » de la Resection limite aussi le contour
+  symétrique peut se recaler sur une pose symétrique ; l'entrée « Mask » du GeoTracker limite aussi le contour
   recalé à sa partie blanche), lightglue (les features de la
   keyframe appariées dans la frame courante puis posées sur la géométrie : marche loin de la bonne position et sous
   un autre angle, `geotrack.alignWithMatches`), megapose (la pose du maillage trouvée dans l'image depuis la boîte où
@@ -1149,7 +1149,7 @@ comparaison des EXR produits avec ceux de Nuke.
 | `meshroom/live/frameRange.py` | in / out de la timeline (enregistrés dans le header du graphe) |
 | `meshroom/core/chapters.py`, `meshroom/nodes/general/Chapter.py` | chapitres repliables du graphe |
 | `meshroom/ui/qml/GraphEditor/` | menu Evaluate, contours de statut, éditeurs (couleur, 2D, formes), lignes de chapitre |
-| `meshroom/live/scene3d.py`, `meshroom/nodes/compositing/ThreeDNodes.py` | 3D : caméras, géométries, matrices, lecture des fichiers, résolution de pose ; nœuds Camera, ReadGeo, MergeGeo, Resection |
+| `meshroom/live/scene3d.py`, `meshroom/nodes/compositing/ThreeDNodes.py` | 3D : caméras, géométries, matrices, lecture des fichiers, résolution de pose ; nœuds Camera, ReadGeo, MergeGeo, GeoTracker |
 | `meshroom/live/bake.py` | Disconnect and Bake |
 | `tests/test_liveCompositing.py`, `tests/test_compositing3D.py` | tests du moteur et des nœuds |
 

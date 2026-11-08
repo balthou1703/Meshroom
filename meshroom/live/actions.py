@@ -34,7 +34,7 @@ class ActionContext:
                  inputValues: Optional[dict] = None, publish: Optional[Callable[[dict, int], None]] = None,
                  nodePlan: Optional[RenderPlan] = None):
         self.values = values
-        # Plan of the node itself (its own outputs, e.g. the camera solved by a Resection, see nodeContext)
+        # Plan of the node itself (its own outputs, e.g. the camera solved by a GeoTracker, see nodeContext)
         self._nodePlan = nodePlan
         self._publish = publish
         self._evaluator = evaluator

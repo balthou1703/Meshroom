@@ -44,6 +44,6 @@ def test_notOnItsOwnEdgesNorMakingACycle():
     assert insertionAttributes(c, a.output, b.input) is None
     # No compatible input: a camera stream cannot go through a Grade
     camera = graph.addNewNode("Camera")
-    resection = graph.addNewNode("Resection")
+    resection = graph.addNewNode("GeoTracker")
     graph.addEdge(camera.output, resection.camera)
     assert insertionAttributes(graph.addNewNode("Grade"), camera.output, resection.camera) is None

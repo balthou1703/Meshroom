@@ -250,7 +250,7 @@ def resectionGraph(tmp_path):
         file.writelines("f " + " ".join(str(i + 1) for i in face) + "\n" for face in _CUBE_FACES)
     readGeo = graph.addNewNode("ReadGeo")
     readGeo.file.value = str(path)
-    resection = graph.addNewNode("Resection")
+    resection = graph.addNewNode("GeoTracker")
     graph.addEdge(plate.output, resection.input)
     graph.addEdge(readGeo.output, resection.geo)
     xy, _, _ = cameraAt(0).project(_CUBE, W, H)

@@ -500,7 +500,7 @@ def nearestVertexOnScreen(geo: GeoData, camera: CameraData, x: float, y: float, 
     return geo.vertices[index].copy() if distance[index] <= radius else None
 
 
-# Pose of a camera from 2D / 3D correspondences (the pins of the Resection node)
+# Pose of a camera from 2D / 3D correspondences (the pins of the GeoTracker node)
 
 def solvePose(points: np.ndarray, positions: np.ndarray, width: int, height: int, focalPixels: float,
               initial: np.ndarray, iterations: int = 30):

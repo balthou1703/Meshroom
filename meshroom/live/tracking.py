@@ -315,7 +315,7 @@ def trackFrames(track: dict, frames: List[int], imageAt, cancel=None, minScore: 
 
 class TrackingModel:
     """
-    What links tracks tracked together (e.g. the pins of a Resection, all on one rigid geometry): it predicts where
+    What links tracks tracked together (e.g. the pins of a GeoTracker, all on one rigid geometry): it predicts where
     to search them in the next frame and rejects the positions that do not fit (the other tracks go on).
     """
 

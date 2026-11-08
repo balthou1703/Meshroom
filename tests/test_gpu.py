@@ -66,7 +66,7 @@ def test_nodesWithAGpuParameter():
     from meshroom.core.graph import Graph
     graph = Graph("gpu")
     for nodeType in ("Blur", "Sharpen", "Erode", "Median", "ZDefocus", "OpticalFlow", "Retime", "TimeWarp", "Tracker",
-                     "CameraTracker", "Resection"):
+                     "CameraTracker", "GeoTracker"):
         node = graph.addNewNode(nodeType)
         assert node.useGpu.value is True, nodeType
 
