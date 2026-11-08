@@ -69,12 +69,14 @@ def projectPoints(matrix: np.ndarray, points: np.ndarray, width: int, height: in
 
 
 def robustPose(points: np.ndarray, positions: np.ndarray, width: int, height: int, focalPixels: float,
-               initial: np.ndarray, rounds: int = 3):
+               initial: np.ndarray, rounds: int = 3, locks=()):
     """
     The camera pose putting the 3D `points` at the image `positions`, ignoring the points that do not fit (wrong
     matches, moving objects, occlusions): solved, then the points much farther than the typical error are dropped,
     and solved again. With few points (pins), one wrong point pulls the pose toward it: the worst point is dropped one at
     a time while it is far from the others.
+
+    `locks`: what keeps its value of `initial` (scene3d.solvePose).
 
     Returns:
         (camera-to-world matrix, inliers (n,) bool, RMS error of the inliers in pixels).
@@ -87,7 +89,8 @@ def robustPose(points: np.ndarray, positions: np.ndarray, width: int, height: in
         return matrix, inliers, 0.0
 
     def solve(start):
-        solved, _ = scene3d.solvePose(points[inliers], positions[inliers], width, height, focalPixels, start, iterations=20)
+        solved, _ = scene3d.solvePose(points[inliers], positions[inliers], width, height, focalPixels, start, iterations=20,
+                                      locks=locks)
         xy, depth = projectPoints(solved, points, width, height, focalPixels)
         return solved, np.where(depth > 0, np.hypot(*(xy - positions).T), np.inf)
 
@@ -228,7 +231,7 @@ class TrackSettings:
     """ How the geometry is tracked. """
 
     def __init__(self, method: str = "flow", features: int = 150, pattern: int = 15, search: int = 41,
-                 minScore: float = 0.7, minInliers: int = 8, anchored: bool = True, device=None):
+                 minScore: float = 0.7, minInliers: int = 8, anchored: bool = True, device=None, locks=()):
         self.method = method if method in METHODS else "flow"
         self.features = int(features)
         self.pattern = int(pattern) | 1
@@ -239,6 +242,8 @@ class TrackSettings:
         self.anchored = bool(anchored)
         # The GPU to compute on (meshroom/live/gpu.py), None: the CPU
         self.device = device
+        # What the poses keep of the previous one (scene3d.solvePose: "position", "rotation", "roll")
+        self.locks = tuple(locks or ())
 
 
 class TrackingLost(RuntimeError):
@@ -306,7 +311,8 @@ def stepPose(samples: SurfaceSamples, settings: TrackSettings, matrixA: np.ndarr
     found &= ~maskedOut(imageB, positionsB)
     if found.sum() < settings.minInliers:
         raise TrackingLost(f"only {int(found.sum())} points of the geometry were found in the next frame")
-    matrix, inliers, error = robustPose(points[found], positionsB[found], width, height, focalPixels, predictedB)
+    matrix, inliers, error = robustPose(points[found], positionsB[found], width, height, focalPixels, predictedB,
+                                        locks=settings.locks)
     if report is not None:
         report["positions"], report["inliers"] = positionsB[found], np.asarray(inliers, dtype=bool)
     if inliers.sum() < settings.minInliers:
@@ -420,7 +426,8 @@ def alignPose(samples: SurfaceSamples, settings: TrackSettings, referenceMatrix:
             if inliers:
                 break
             raise TrackingLost(f"only {int(ok.sum())} points of the geometry were found in the image")
-        current, fitting, error = robustPose(points[ok], found[ok], width, height, focalPixels, current)
+        current, fitting, error = robustPose(points[ok], found[ok], width, height, focalPixels, current,
+                                             locks=settings.locks)
         inliers = int(fitting.sum())
     if inliers < settings.minInliers:
         raise TrackingLost(f"only {inliers} points of the geometry fit")

@@ -503,13 +503,16 @@ def nearestVertexOnScreen(geo: GeoData, camera: CameraData, x: float, y: float, 
 # Pose of a camera from 2D / 3D correspondences (the pins of the GeoTracker node)
 
 def solvePose(points: np.ndarray, positions: np.ndarray, width: int, height: int, focalPixels: float,
-              initial: np.ndarray, iterations: int = 30):
+              initial: np.ndarray, iterations: int = 30, locks=()):
     """
     The camera-to-world matrix whose projection puts the 3D `points` at the image `positions` (Nuke pixels), and
     the RMS error in pixels. With fewer than 4 points the pose is not determined: it moves as little as possible
     from `initial` (1 point: the camera moves parallel to the image; 2: and turns, gets closer; 3: almost free).
     Gauss-Newton with a damping toward `initial` (prior weighted down as points are added).
+    `locks`: what keeps its value of `initial`: "position" (the camera only turns: a tripod, a nodal pan),
+    "rotation" (it only moves), "roll" (no turn around its view axis).
     """
+    locks = set(locks or ())
     from .camera import _poseDLT, rodrigues
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
@@ -524,9 +527,21 @@ def solvePose(points: np.ndarray, positions: np.ndarray, width: int, height: int
     factor = {1: 1.0, 2: 0.3, 3: 0.05}.get(count, 1e-3)
     weights = focalPixels * factor * np.array([0.5, 0.5, 0.5, 0.1 / scale, 0.1 / scale, 0.3 / scale])
 
-    def residuals(params, rotation0, translation0):
+    # The free parameters (rotation vector in the camera, then translation)
+    free = [k for k in range(6) if not (k < 3 and "rotation" in locks) and not (k == 2 and "roll" in locks)
+            and not (k >= 3 and "position" in locks)]
+    if not free:
+        return toMatrix4(initial), 0.0
+
+    def poseOf(params, rotation0, translation0):
         rotation = rodrigues(params[:3]) @ rotation0
-        translation = translation0 + params[3:]
+        if "position" in locks:
+            # The center of the camera kept: t = -R C
+            return rotation, -rotation @ (-rotation0.T @ translation0)
+        return rotation, translation0 + params[3:]
+
+    def residuals(params, rotation0, translation0):
+        rotation, translation = poseOf(params, rotation0, translation0)
         camera = points @ rotation.T + translation
         z = np.where(np.abs(camera[:, 2]) < 1e-9, 1e-9, camera[:, 2])
         reprojection = (camera[:, :2] / z[:, np.newaxis] - observations).ravel() * focalPixels
@@ -539,17 +554,18 @@ def solvePose(points: np.ndarray, positions: np.ndarray, width: int, height: int
         damping = 1e-3
         current = residuals(params, rotation0, translation0)
         for _ in range(iterations):
-            jacobian = np.empty((len(current), 6))
-            for k in range(6):
+            jacobian = np.empty((len(current), len(free)))
+            for column, k in enumerate(free):
                 step = np.zeros(6)
                 step[k] = 1e-6
-                jacobian[:, k] = (residuals(params + step, rotation0, translation0) - current) / 1e-6
+                jacobian[:, column] = (residuals(params + step, rotation0, translation0) - current) / 1e-6
             normal = jacobian.T @ jacobian
             gradient = jacobian.T @ current
             improved = False
             for _ in range(8):
                 try:
-                    delta = -np.linalg.solve(normal + damping * np.diag(np.diag(normal) + 1e-9), gradient)
+                    delta = np.zeros(6)
+                    delta[free] = -np.linalg.solve(normal + damping * np.diag(np.diag(normal) + 1e-9), gradient)
                 except np.linalg.LinAlgError:
                     break
                 candidate = residuals(params + delta, rotation0, translation0)
@@ -561,11 +577,10 @@ def solvePose(points: np.ndarray, positions: np.ndarray, width: int, height: int
                 damping *= 4.0
             if not improved or np.linalg.norm(delta) < 1e-10:
                 break
-        rotation = rodrigues(params[:3]) @ rotation0
-        return rotation, translation0 + params[3:]
+        return poseOf(params, rotation0, translation0)
 
     candidates = [(r0, t0)]
-    if count >= 6:
+    if count >= 6 and not locks:
         pose = _poseDLT(points, observations)
         if pose is not None:
             candidates.append(pose)

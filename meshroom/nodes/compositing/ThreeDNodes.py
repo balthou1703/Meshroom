@@ -280,6 +280,25 @@ into keys of a Camera or a ReadGeo.
                        description="Start from the camera stepped back along its view axis until the whole geometry is "
                                    "centered in the view (e.g. a large geometry, the camera close to its center: hard to "
                                    "find or to grab). The pins then solve from there."),
+        desc.ChoiceParam(name="focalMode", label="Focal Length", value="camera", values=["camera", "custom"],
+                         description="The focal length of the solve: camera (of the 'Camera' input, 35 mm without it) "
+                                     "or custom ('Focal' below, e.g. found by 'Estimate Focal')."),
+        desc.FloatParam(name="focalLength", label="Focal", value=35.0, range=(1.0, 500.0, 0.1),
+                        enabled=lambda node: node.focalMode.value == "custom",
+                        description="The focal length (mm, on the film back of the 'Camera' input: 36 mm without it) "
+                                    "with 'Focal Length' custom."),
+        desc.PushButtonParam(name="estimateFocal", label="Estimate Focal", semantic="liveAction",
+                             description="The focal length that best fits the pins of the keyframes (one focal for the "
+                                         "shot: the frames where pins were placed, at least 6 pins in all, at least 4 on "
+                                         "a frame; better from several frames seen from different angles): written in "
+                                         "'Focal', 'Focal Length' set to custom."),
+        desc.ChoiceParam(name="lockPose", label="Lock", value="none", values=["none", "position", "rotation"],
+                         description="What the solve keeps from frame to frame (the pins, Track Geometry, Align, Refine): "
+                                     "none, position (the camera only turns: a tripod, a nodal pan; its position from "
+                                     "the first frame solved) or rotation (it only moves)."),
+        desc.BoolParam(name="lockRoll", label="Lock Roll", value=False,
+                       description="No turn of the camera around its view axis from frame to frame (a camera kept "
+                                   "level)."),
         desc.StringParam(name="tracks", label="Pins", value="[]", semantic="tracks",
                          description="Pins as JSON: a tracked image position (as the tracks of a Tracker) and its point "
                                      "on the geometry (\"point\": [x, y, z]). Edited in the viewer."),
@@ -422,11 +441,20 @@ into keys of a Camera or a ReadGeo.
             raise RuntimeError(str(e)) from e
 
     def inputCamera(self, ctx, frame=None):
-        """ The camera of the "camera" input at a frame, or a camera looking at the geometry. """
+        """ The camera of the "camera" input at a frame, or a camera looking at the geometry; with "Focal Length"
+        custom, its focal length is "Focal". """
         camera = ctx.inputData("camera", frame)
-        if camera is not None:
-            return camera
-        return scene3d.framingCamera(ctx.inputData("geo", frame))
+        if camera is None:
+            camera = scene3d.framingCamera(ctx.inputData("geo", frame))
+        if ctx.value("focalMode") == "custom":
+            camera = camera.copy(focalLength=float(ctx.value("focalLength")))
+        return camera
+
+    @staticmethod
+    def locks(ctx) -> tuple:
+        """ What the solves keep from the previous pose (scene3d.solvePose): "Lock" and "Lock Roll". """
+        locks = () if ctx.value("lockPose") == "none" else (ctx.value("lockPose"),)
+        return locks + (("roll",) if ctx.value("lockRoll") else ())
 
     def startCamera(self, ctx, frame=None, info=None):
         """ The pose the solve starts from: the input camera, or with "Center Geometry", stepped back to center it. """
@@ -440,13 +468,15 @@ into keys of a Camera or a ReadGeo.
     # Solve
 
     def _solve(self, ctx, frame, initial, pins, info):
+        """ (the camera solved by the pins with a key at `frame`, from `initial` (None: the start camera), its RMS
+        error in pixels): the locks keep what they lock of `initial` (the first frame solved is free). """
         points, positions = self._pinsAt(pins, frame)
         camera = self.startCamera(ctx, frame, info)
         if not len(points):
             return camera.copy(matrix=initial if initial is not None else camera.matrix), 0.0
         start = initial if initial is not None else camera.matrix
         matrix, error = scene3d.solvePose(points, positions, info.width, info.height, camera.focalPixels(info.width),
-                                          start)
+                                          start, locks=self.locks(ctx) if initial is not None else ())
         return camera.copy(matrix=matrix), error
 
     def computeData(self, ctx, outputName):
@@ -521,7 +551,7 @@ into keys of a Camera or a ReadGeo.
             start = ctx.ownData("cameraOutput", ctx.frame).matrix
         except Exception:
             start = camera.matrix
-        return _PinsModel(tracks, info.width, info.height, camera.focalPixels(info.width), start)
+        return _PinsModel(tracks, info.width, info.height, camera.focalPixels(info.width), start, self.locks(ctx))
 
     def runAction(self, name, context):
         """ Geometry tracking actions (see the documentation): returns {"geoTrack": the new poses}. """
@@ -529,9 +559,51 @@ into keys of a Camera or a ReadGeo.
             return {"geoTrack": ""}
         if name == "clearDeform":
             return {"geoDeform": ""}
+        if name == "estimateFocal":
+            return self.estimateFocal(context)
         if name not in ("trackGeoForward", "trackGeoBackward", "alignGeo", "refineGeo", "deformForward", "deformBackward"):
             raise RuntimeError(f"Unknown action: {name}")
         return _GeoTrackAction(self, context).run(name)
+
+    def estimateFocal(self, context):
+        """
+        "Estimate Focal": the focal length (mm) minimizing the reprojection error of the pins of the keyframes (each
+        keyframe its own pose, one focal for all), searched between a fifth and five times the focal of the camera.
+        Returns {"focalLength": mm, "focalMode": "custom"}.
+        """
+        from scipy.optimize import minimize_scalar
+        ctx = context.nodeContext()
+        info = ctx.inputInfo("input")
+        if info is None:
+            raise RuntimeError("Connect the plate to the input.")
+        pins = self.pins(ctx, info)
+        frames = [f for f in self.pinKeyframes(pins) if len(self._pinsAt(pins, f)[0]) >= 4]
+        count = sum(len(self._pinsAt(pins, f)[0]) for f in frames)
+        if not frames or count < 6:
+            raise RuntimeError("Estimate Focal needs pins placed on keyframes: at least 4 on a frame, 6 in all.")
+        cameras = {}
+        for f in frames:
+            camera = ctx.inputData("camera", f)
+            camera = camera if camera is not None else scene3d.framingCamera(ctx.inputData("geo", f))
+            cameras[f] = camera
+        # The start poses: the poses solved now (with the current focal)
+        starts = {f: ctx.ownData("cameraOutput", f).matrix for f in frames}
+        aperture = cameras[frames[0]].horizontalAperture
+        current = float(ctx.value("focalLength")) if ctx.value("focalMode") == "custom" else cameras[frames[0]].focalLength
+
+        def cost(logFocal):
+            context.checkCancelled()
+            focalPixels = np.exp(logFocal) / aperture * info.width
+            total = 0.0
+            for f in frames:
+                points, positions = self._pinsAt(pins, f)
+                _, error = scene3d.solvePose(points, positions, info.width, info.height, focalPixels, starts[f])
+                total += error ** 2 * len(points)
+            return total
+        result = minimize_scalar(cost, bounds=(np.log(current / 5.0), np.log(current * 5.0)), method="bounded",
+                                 options={"xatol": 1e-4})
+        focal = float(np.exp(result.x))
+        return {"focalLength": round(focal, 3), "focalMode": "custom"}
 
     def deformedGeo(self, ctx):
         """ The input geometry deformed by "Deform With Flow" at the frame (seen from the solved camera). """
@@ -613,10 +685,11 @@ class _PinsModel:
     the pose, moving at constant speed, puts it.
     """
 
-    def __init__(self, tracks, width, height, focalPixels, start):
+    def __init__(self, tracks, width, height, focalPixels, start, locks=()):
         self.points = {index: np.array(track["point"], dtype=np.float64) for index, track in enumerate(tracks)
                        if len(track.get("point") or []) == 3}
         self.width, self.height, self.focalPixels = width, height, focalPixels
+        self.locks = locks
         self.poses = [np.asarray(start, dtype=np.float64)]
 
     def predict(self, frame, positions):
@@ -639,7 +712,8 @@ class _PinsModel:
             return set()
         points = np.array([self.points[i] for i in indices])
         found = np.array([positions[i] for i in indices])
-        matrix, inliers, _ = geotrack.robustPose(points, found, self.width, self.height, self.focalPixels, self.poses[-1])
+        matrix, inliers, _ = geotrack.robustPose(points, found, self.width, self.height, self.focalPixels, self.poses[-1],
+                                                 locks=self.locks)
         rejected = {index for index, inlier in zip(indices, inliers) if not inlier} if len(indices) >= 5 else set()
         if len(indices) == 4:
             # 4 pins: the pose of the other 3 is always exact, the pin far from where it puts its point slipped
@@ -671,7 +745,8 @@ class _PinsModel:
         if deviation[worst] <= 3.0 + 3.0 * float(np.median(others)):
             return matrix, None
         keep = np.arange(4) != worst
-        solved, _ = scene3d.solvePose(points[keep], found[keep], self.width, self.height, self.focalPixels, matrix)
+        solved, _ = scene3d.solvePose(points[keep], found[keep], self.width, self.height, self.focalPixels, matrix,
+                                      locks=self.locks)
         return solved, worst
 
 
@@ -692,7 +767,8 @@ class _GeoTrackAction:
         from meshroom.live import gpu
         self.device = gpu.device(gpu.enabled(context))
         self.settings = geotrack.TrackSettings(context.value("trackMethod"), features=context.value("trackPoints"),
-                                               anchored=context.value("trackAnchored"), device=self.device)
+                                               anchored=context.value("trackAnchored"), device=self.device,
+                                               locks=nodeDesc.locks(self.ctx))
         self.geo = geo
         self.focalPixels = nodeDesc.startCamera(self.ctx, info=self.info).focalPixels(self.info.width)
         self.poses, self.keyframes = nodeDesc.geoTrack(self.ctx)

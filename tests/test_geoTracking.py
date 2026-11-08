@@ -629,3 +629,60 @@ def test_motionBlurFromACamera(tmp_path):
     graph.update()
     plan = buildPlan(blur)
     assert blur.nodeDesc.isIdentity(RenderContext(plan.nodes[plan.target], 5, Evaluator(), plan)) == "input"
+
+
+def test_solvePoseLocks():
+    """ solvePose with locks: "position" keeps the center of the camera (it only turns), "rotation" its orientation,
+    "roll" its turn around the view axis. """
+    truth = cameraAt(10)
+    xy, _, _ = truth.project(_CUBE, W, H)
+    focal = truth.focalPixels(W)
+    start = cameraAt(0).matrix
+    free, _ = scene3d.solvePose(_CUBE, xy, W, H, focal, start)
+    np.testing.assert_allclose(free, truth.matrix, atol=1e-4)
+    turned, _ = scene3d.solvePose(_CUBE, xy, W, H, focal, start, locks=("position",))
+    np.testing.assert_allclose(turned[:3, 3], start[:3, 3], atol=1e-9)
+    assert not np.allclose(turned[:3, :3], start[:3, :3], atol=1e-3)
+    moved, _ = scene3d.solvePose(_CUBE, xy, W, H, focal, start, locks=("rotation",))
+    np.testing.assert_allclose(moved[:3, :3], start[:3, :3], atol=1e-9)
+    level, _ = scene3d.solvePose(_CUBE, xy, W, H, focal, start, locks=("roll",))
+    # The turn from the start, in the camera: no component around the view axis
+    from scipy.spatial.transform import Rotation
+    turn = Rotation.from_matrix(scene3d.cvPose(level)[0] @ scene3d.cvPose(start)[0].T).as_rotvec()
+    assert abs(turn[2]) < 1e-6 and np.linalg.norm(turn) > 1e-2
+
+
+def test_geoTrackerEstimatesTheFocal(tmp_path):
+    """ "Estimate Focal": from the pins of the keyframes, the focal length of the plate (35 mm), from a wrong one. """
+    graph, plate, tracker = resectionGraph(tmp_path)
+    pins = json.loads(tracker.tracks.value)
+    xy, _, _ = cameraAt(15).project(_CUBE, W, H)
+    for pin, position in zip(pins, xy):
+        pin["keys"]["15"] = position.tolist()
+        pin["keyframes"].append(15)
+    tracker.tracks.value = json.dumps(pins)
+    tracker.focalMode.value = "custom"
+    tracker.focalLength.value = 20.0
+    graph.update()
+    result = runAction(tracker, plate, "estimateFocal", 0)
+    assert result["focalMode"] == "custom" and abs(result["focalLength"] - 35.0) < 0.2
+    tracker.focalLength.value = result["focalLength"]
+    graph.update()
+    assert pixelError(cameraOutput(tracker, 15).matrix, 15) < 0.5
+
+
+def test_geoTrackerLockedPositionOnlyTurns(tmp_path):
+    """ "Lock" position: from the first frame solved, the pins only turn the camera. """
+    graph, plate, tracker = resectionGraph(tmp_path)
+    pins = json.loads(tracker.tracks.value)
+    xy, _, _ = cameraAt(10).project(_CUBE, W, H)
+    for pin, position in zip(pins, xy):
+        pin["keys"]["10"] = position.tolist()
+    tracker.tracks.value = json.dumps(pins)
+    tracker.lockPose.value = "position"
+    graph.update()
+    first, later = cameraOutput(tracker, 0).matrix, cameraOutput(tracker, 10).matrix
+    np.testing.assert_allclose(later[:3, 3], first[:3, 3], atol=1e-6)
+    tracker.lockPose.value = "none"
+    graph.update()
+    assert np.linalg.norm(cameraOutput(tracker, 10).matrix[:3, 3] - first[:3, 3]) > 0.1
